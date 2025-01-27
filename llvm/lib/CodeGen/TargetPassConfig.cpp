@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file defines interfaces to access the target independent code
@@ -1068,6 +1070,7 @@ bool TargetPassConfig::addISelPasses() {
   addIRPasses();
   addCodeGenPrepare();
   addPassesToHandleExceptions();
+  addPass(createGoStatepointsLegacyPass());
   addISelPrepare();
 
   return addCoreISelPasses();
@@ -1498,8 +1501,8 @@ void TargetPassConfig::addMachineLateOptimization() {
   // Cleanup of redundant immediate/address loads.
   addPass(&MachineLateInstrsCleanupID);
 
-  // Branch folding must be run after regalloc and prolog/epilog insertion.
-  addPass(&BranchFolderPassID);
+  // // Branch folding must be run after regalloc and prolog/epilog insertion.
+  // addPass(&BranchFolderPassID);
 
   // Tail duplication.
   // Note that duplicating tail just increases code size and degrades

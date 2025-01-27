@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file implements the visitCall, visitInvoke, and visitCallBr functions.
@@ -4080,6 +4082,11 @@ bool InstCombinerImpl::transformConstExprCastCall(CallBase &Call) {
 
   assert(!isa<CallBrInst>(Call) &&
          "CallBr's don't have a single point after a def to insert at");
+
+  // TANGOLLVM
+  // go.closurecall requires the bitcast to pass contextptr
+  if (Call.hasFnAttr("go.closurecall"))
+    return false;
 
   // If this is a call to a thunk function, don't remove the cast. Thunks are
   // used to transparently forward all incoming parameters and outgoing return

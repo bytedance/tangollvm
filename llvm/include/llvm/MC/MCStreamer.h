@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file declares the MCStreamer class.
@@ -28,6 +30,7 @@
 #include "llvm/Support/SMLoc.h"
 #include "llvm/Support/VersionTuple.h"
 #include "llvm/TargetParser/ARMTargetParser.h"
+#include "llvm/MC/MCGoAuxData.h"
 #include <cassert>
 #include <cstdint>
 #include <memory>
@@ -1120,6 +1123,11 @@ public:
 
   /// Emit the debug line end entry.
   virtual void emitDwarfLineEndEntry(MCSection *Section, MCSymbol *LastLabel) {}
+
+  virtual void emitGoStackObjects(ArrayRef<MCGoStackObjectRecord> StackObjects) {}
+  virtual void emitGoFuncInfo(MCGoFuncInfo &FuncInfo) {}
+  virtual void emitGoPCDataEntry(int64_t ValueDelta, const MCExpr* PCDelta) {}
+  virtual void emitGoBytes(StringRef Data) {}
 
   /// If targets does not support representing debug line section by .loc/.file
   /// directives in assembly output, we need to populate debug line section with

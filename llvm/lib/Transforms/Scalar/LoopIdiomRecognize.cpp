@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This pass implements an idiom recognizer that transforms simple loops into a
@@ -1010,6 +1012,9 @@ bool LoopIdiomRecognize::processLoopStridedStore(
   Module *M = TheStore->getModule();
   Value *SplatValue = isBytewiseValue(StoredVal, *DL);
   Constant *PatternValue = nullptr;
+  if (SplatValue && TheStore->getFunction()->getCallingConv() == CallingConv::Go_Internal) {
+    return false;
+  }
 
   if (!SplatValue)
     PatternValue = getMemSetPatternValue(StoredVal, DL);

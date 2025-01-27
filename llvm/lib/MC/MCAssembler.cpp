@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 
 #include "llvm/MC/MCAssembler.h"
@@ -338,6 +340,8 @@ uint64_t MCAssembler::computeFragmentSize(const MCFragment &F) const {
     return cast<MCDwarfLineAddrFragment>(F).getContents().size();
   case MCFragment::FT_DwarfFrame:
     return cast<MCDwarfCallFrameFragment>(F).getContents().size();
+  case MCFragment::FT_GoPCData:
+    return cast<MCGoPCDataFragment>(F).getContents().size();
   case MCFragment::FT_CVInlineLines:
     return cast<MCCVInlineLineTableFragment>(F).getContents().size();
   case MCFragment::FT_CVDefRange:
@@ -800,6 +804,12 @@ static void writeFragment(raw_ostream &OS, const MCAssembler &Asm,
     OS << OF.getContents();
     break;
   }
+
+  case MCFragment::FT_GoPCData: {
+    const MCGoPCDataFragment &OF = cast<MCGoPCDataFragment>(F);
+    OS << OF.getContents();
+    break;
+  }
   case MCFragment::FT_DwarfFrame: {
     const MCDwarfCallFrameFragment &CF = cast<MCDwarfCallFrameFragment>(F);
     OS << CF.getContents();
@@ -1010,6 +1020,12 @@ void MCAssembler::layout() {
         Contents = DF.getContents();
         break;
       }
+      case MCFragment::FT_GoPCData: {
+        MCGoPCDataFragment &DF = cast<MCGoPCDataFragment>(Frag);
+        Fixups = DF.getFixups();
+        Contents = DF.getContents();
+        break;
+      }      
       case MCFragment::FT_DwarfFrame: {
         MCDwarfCallFrameFragment &DF = cast<MCDwarfCallFrameFragment>(Frag);
         Fixups = DF.getFixups();
@@ -1229,6 +1245,59 @@ bool MCAssembler::relaxDwarfLineAddr(MCDwarfLineAddrFragment &DF) {
   return OldSize != Data.size();
 }
 
+static inline unsigned encodeUvarint(uint64_t Value, raw_ostream &OS) {
+  unsigned Count = 0;
+  while (Value >= 0x80) {
+    OS << char(((uint8_t)Value)|0x80);
+    Value >>= 7;
+    Count++;
+  }
+  OS << char(Value);
+  return Count + 1;
+}
+
+static inline unsigned encodeVarint(int64_t Value, raw_ostream &OS) {
+  uint64_t Uvalue = uint64_t(Value) << 1;
+  if (Value < 0) {
+    Uvalue = ~Uvalue;
+  }
+  return encodeUvarint(Uvalue, OS);
+}
+
+bool MCAssembler::relaxGoPCData(MCGoPCDataFragment &DF) {
+  uint64_t OldSize = DF.getContents().size();
+
+  SmallVectorImpl<char> &Data = DF.getContents();
+  Data.clear();
+  raw_svector_ostream OSE(Data);
+  DF.getFixups().clear();
+
+  int64_t ValueDelta;
+  ValueDelta = DF.getValueDelta();
+  if (ValueDelta == 0 && DF.getAddrDelta() == nullptr) {
+    // a terminator indicator
+    OSE << char(0);
+    return OldSize != Data.size();
+  }
+
+  int64_t AddrDelta;
+  bool Abs = DF.getAddrDelta()->evaluateKnownAbsolute(AddrDelta, *this);
+  if (!Abs) {
+    return false;
+  }
+  assert(Abs && "We created a PC address delta with an invalid expression");
+  assert(AddrDelta >= 0 && "AddrDelta in Go PC data must be non-negative!");
+  (void)Abs;
+
+  if (AddrDelta == 0) {
+    // post PC update at the end of the function
+    return false;
+  }
+  encodeVarint(ValueDelta, OSE);
+  encodeUvarint(uint64_t(AddrDelta), OSE);
+  return OldSize != Data.size();
+}
+
 bool MCAssembler::relaxDwarfCallFrameFragment(MCDwarfCallFrameFragment &DF) {
   bool WasRelaxed;
   if (getBackend().relaxDwarfCFA(*this, DF, WasRelaxed))
@@ -1293,6 +1362,8 @@ bool MCAssembler::relaxFragment(MCFragment &F) {
     return relaxDwarfLineAddr(cast<MCDwarfLineAddrFragment>(F));
   case MCFragment::FT_DwarfFrame:
     return relaxDwarfCallFrameFragment(cast<MCDwarfCallFrameFragment>(F));
+  case MCFragment::FT_GoPCData:
+    return relaxGoPCData(cast<MCGoPCDataFragment>(F));
   case MCFragment::FT_LEB:
     return relaxLEB(cast<MCLEBFragment>(F));
   case MCFragment::FT_BoundaryAlign:

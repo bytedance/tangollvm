@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 
 #ifndef LLVM_MC_MCOBJECTSTREAMER_H
@@ -147,6 +149,11 @@ public:
                                 const MCSymbol *Label,
                                 unsigned PointerSize) override;
   void emitDwarfLineEndEntry(MCSection *Section, MCSymbol *LastLabel) override;
+  // TANGOLLVM
+  void emitGoStackObjects(ArrayRef<MCGoStackObjectRecord> StackObjects) override;
+  void emitGoFuncInfo(MCGoFuncInfo &FuncInfo) override;
+  void emitGoPCDataEntry(int64_t ValueDelta, const MCExpr* PCDelta) override;
+  void emitGoBytes(StringRef Data) override;
   void emitDwarfAdvanceFrameAddr(const MCSymbol *LastLabel,
                                  const MCSymbol *Label, SMLoc Loc);
   void emitCVLocDirective(unsigned FunctionId, unsigned FileNo, unsigned Line,

@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // The inline spiller modifies the machine function directly instead of
@@ -72,7 +74,7 @@ STATISTIC(NumRemats,          "Number of rematerialized defs for spilling");
 
 static cl::opt<bool>
 RestrictStatepointRemat("restrict-statepoint-remat",
-                       cl::init(false), cl::Hidden,
+                       cl::init(true), cl::Hidden,
                        cl::desc("Restrict remat for statepoint operands"));
 
 namespace {

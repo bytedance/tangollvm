@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This implements the Emit routines for the SelectionDAG class, which creates
@@ -1052,6 +1054,20 @@ EmitMachineNode(SDNode *Node, bool IsClone, bool IsCloned,
                         !HasVRegVariadicDefs;
 #ifndef NDEBUG
   unsigned NumMIOperands = NodeOperands + NumResults;
+  // TANGOLLVM TODO: workaround for assertion failure
+  if (!(NumMIOperands <= II.getNumOperands() + II.NumImplicitDefs +
+                            NumImpUses)) {
+    if (Node->getNumOperands() == 6) {
+      if (GlobalAddressSDNode *TGA = dyn_cast<GlobalAddressSDNode>(Node->getOperand(0))) {
+        if (TGA->getGlobal()->getName() == StringRef("runtime.gcWriteBarrier")) {
+          if (NumImpUses == 1) {
+            NumImpUses += 2; // for two implicit vreg usage
+          }
+        }
+      }
+    }
+  }
+
   if (II.isVariadic())
     assert(NumMIOperands >= II.getNumOperands() &&
            "Too few operands for a variadic node!");

@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file implements the IntrinsicLowering class.
@@ -352,7 +354,13 @@ void IntrinsicLowering::LowerIntrinsicCall(CallInst *CI) {
     Ops[0] = CI->getArgOperand(0);
     Ops[1] = CI->getArgOperand(1);
     Ops[2] = Size;
-    ReplaceCallWith("memcpy", CI, Ops, Ops+3, CI->getArgOperand(0)->getType());
+    // TANGOLLVM
+    if (CI->getFunction()->getCallingConv() == CallingConv::Go_Internal) {
+      CallInst *NewCI = ReplaceCallWith("runtime.memmove", CI, Ops, Ops+3, Type::getVoidTy(Context));
+      NewCI->setCallingConv(CallingConv::Go_Internal);
+    } else {
+      ReplaceCallWith("memcpy", CI, Ops, Ops+3, CI->getArgOperand(0)->getType());
+    }    
     break;
   }
   case Intrinsic::memmove: {
@@ -363,7 +371,14 @@ void IntrinsicLowering::LowerIntrinsicCall(CallInst *CI) {
     Ops[0] = CI->getArgOperand(0);
     Ops[1] = CI->getArgOperand(1);
     Ops[2] = Size;
-    ReplaceCallWith("memmove", CI, Ops, Ops+3, CI->getArgOperand(0)->getType());
+    // TANGOLLVM
+    CallingConv::ID CallingConv = CI->getFunction()->getCallingConv();
+    if (CallingConv == CallingConv::Go_Internal) {
+      CallInst *NewCI = ReplaceCallWith("runtime.memmove", CI, Ops, Ops+3, Type::getVoidTy(Context));
+      NewCI->setCallingConv(CI->getFunction()->getCallingConv());
+    } else {
+      ReplaceCallWith("memmove", CI, Ops, Ops+3, CI->getArgOperand(0)->getType());
+    }
     break;
   }
   case Intrinsic::memset: {
@@ -371,14 +386,23 @@ void IntrinsicLowering::LowerIntrinsicCall(CallInst *CI) {
     Type *IntPtr = DL.getIntPtrType(Op0->getType());
     Value *Size = Builder.CreateIntCast(CI->getArgOperand(2), IntPtr,
                                         /* isSigned */ false);
-    Value *Ops[3];
-    Ops[0] = Op0;
-    // Extend the amount to i32.
-    Ops[1] = Builder.CreateIntCast(CI->getArgOperand(1),
-                                   Type::getInt32Ty(Context),
-                                   /* isSigned */ false);
-    Ops[2] = Size;
-    ReplaceCallWith("memset", CI, Ops, Ops+3, CI->getArgOperand(0)->getType());
+    CallingConv::ID CallingConv = CI->getFunction()->getCallingConv();
+    if (CallingConv == CallingConv::Go_Internal) {
+      Value *Ops[2];
+      Ops[0] = Op0;
+      Ops[1] = Size;
+      CallInst *NewCI = ReplaceCallWith("runtime.memclrNoHeapPointers", CI, Ops, Ops+2, Type::getVoidTy(Context));
+      NewCI->setCallingConv(CI->getFunction()->getCallingConv());
+    } else {
+      Value *Ops[3];
+      Ops[0] = Op0;
+      // Extend the amount to i32.
+      Ops[1] = Builder.CreateIntCast(CI->getArgOperand(1),
+                                     Type::getInt32Ty(Context),
+                                     /* isSigned */ false);
+      Ops[2] = Size;
+      ReplaceCallWith("memset", CI, Ops, Ops+3, CI->getArgOperand(0)->getType());
+    }
     break;
   }
   case Intrinsic::sqrt: {

@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file implements the SelectionDAG::Legalize method.
@@ -1098,6 +1100,9 @@ void SelectionDAGLegalize::LegalizeOp(SDNode *Node) {
   case ISD::FRAMEADDR:
   case ISD::RETURNADDR:
   case ISD::ADDROFRETURNADDR:
+  case ISD::GO_STACKADDR:
+  case ISD::GO_DIV128:
+  case ISD::GO_AVG64U:  
   case ISD::SPONENTRY:
     // These operations lie about being legal: when they claim to be legal,
     // they should actually be custom-lowered.

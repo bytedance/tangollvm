@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 /// \file
@@ -1452,7 +1454,7 @@ static ArrayRef<MCPhysReg> get64BitArgumentXMMs(MachineFunction &MF,
 }
 
 #ifndef NDEBUG
-static bool isSortedByValueNo(ArrayRef<CCValAssign> ArgLocs) {
+static bool isSortedByValueNo(ArrayRef<CCValAssign> ArgLocs, int index) {
   return llvm::is_sorted(
       ArgLocs, [](const CCValAssign &A, const CCValAssign &B) -> bool {
         return A.getValNo() < B.getValNo();
@@ -1705,7 +1707,7 @@ SDValue X86TargetLowering::LowerFormalArguments(
 
   // The next loop assumes that the locations are in the same order of the
   // input arguments.
-  assert(isSortedByValueNo(ArgLocs) &&
+  assert(isSortedByValueNo(ArgLocs, 0) &&
          "Argument Location list must be sorted before lowering");
 
   SDValue ArgValue;
@@ -1988,6 +1990,25 @@ SDValue X86TargetLowering::getMOVL(SelectionDAG &DAG, const SDLoc &dl, MVT VT,
   return DAG.getVectorShuffle(VT, dl, V1, V2, Mask);
 }
 
+// TANGOLLVM
+static bool CC_X86_Go_Closure(unsigned ValNo, MVT ValVT, MVT LocVT, CCValAssign::LocInfo LocInfo,
+            ISD::ArgFlagsTy ArgFlags, CCState &State) {
+  if (!static_cast<const X86Subtarget&>(State.getMachineFunction().getSubtarget()).is64Bit()) {
+    llvm_unreachable("CC_Go is not supported for 32-bit target");
+  }
+  CallingConv::ID CC = State.getCallingConv();
+  if (CC != CallingConv::Go_Internal) {
+    llvm_unreachable("All incoming/out-coming parameters should be handled by intrinsics");
+  }
+  if (ValNo == 0) {
+    assert(LocVT == MVT::i64 && "must be 64bit");
+    State.addLoc(CCValAssign::getReg(ValNo, ValVT, X86::RDX, LocVT, LocInfo));
+    return false;
+  } else {
+    return CC_X86(ValNo, ValVT, LocVT, LocInfo, ArgFlags, State);
+  }
+}
+
 SDValue
 X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
                              SmallVectorImpl<SDValue> &InVals) const {
@@ -2002,6 +2023,7 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   bool &isTailCall                      = CLI.IsTailCall;
   bool isVarArg                         = CLI.IsVarArg;
   const auto *CB                        = CLI.CB;
+  bool isGoClosureCall                  = CLI.IsGoClosureCall;
 
   MachineFunction &MF = DAG.getMachineFunction();
   bool Is64Bit        = Subtarget.is64Bit();
@@ -2019,6 +2041,53 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   const Module *M = MF.getFunction().getParent();
   Metadata *IsCFProtectionSupported = M->getModuleFlag("cf-protection-branch");
 
+  // TANGOLLVM
+  enum GoAdHocABI {
+    None,
+    GoWB,
+    DuffCopy,
+    DuffZero,
+    PanicBoundsA,
+    PanicBoundsB,
+    PanicBoundsC
+  };
+
+  GoAdHocABI goAdHocABI = GoAdHocABI::None;
+  if (GlobalAddressSDNode *GA = dyn_cast<GlobalAddressSDNode>(Callee)) {
+    StringRef CalleeName = GA->getGlobal()->getName();
+    if (CalleeName.starts_with("runtime.")) {
+      CalleeName = CalleeName.substr(8); // 8 = strlen("runtime.")
+      if (CalleeName == "gcWriteBarrier") {
+        // AdHoc Calling Convention and Preserve All General Purposes
+        goAdHocABI = GoAdHocABI::GoWB;
+      } else if (CalleeName == "duffcopy") {
+        // C Calling Convention and Preserve All
+        goAdHocABI = GoAdHocABI::DuffCopy;
+      } else if (CalleeName == "duffzero") {
+        // C Calling Convention and Preserve All
+        goAdHocABI = GoAdHocABI::DuffZero;
+      } else if (CalleeName.starts_with("panic")) {
+        CalleeName = CalleeName.substr(5); // 5 = strlen("panic")
+        if (CalleeName == "Slice3Alen" || CalleeName == "Slice3AlenU"
+            || CalleeName == "Slice3Acap" || CalleeName == "Slice3AcapU"
+            || CalleeName == "SliceConvert") {
+          // DX, BX
+          goAdHocABI = GoAdHocABI::PanicBoundsA;
+        } else if (CalleeName == "SliceAlen" || CalleeName == "SliceAlenU"
+            || CalleeName == "SliceAcap" || CalleeName == "SliceAcapU"
+           || CalleeName == "Slice3B" || CalleeName == "Slice3BU") {
+          // CX, DX
+          goAdHocABI = GoAdHocABI::PanicBoundsB;
+        } else if (CalleeName == "Index" || CalleeName == "IndexU"
+            || CalleeName == "SliceB" || CalleeName == "SliceBU"
+           || CalleeName == "Slice3C" || CalleeName == "Slice3CU") {
+          // AX, CX
+          goAdHocABI = GoAdHocABI::PanicBoundsC;
+        }
+      }
+    }
+  }
+
   MachineFunction::CallSiteInfo CSInfo;
   if (CallConv == CallingConv::X86_INTR)
     report_fatal_error("X86 interrupts may not be called directly");
@@ -2031,7 +2100,11 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   if (IsWin64)
     CCInfo.AllocateStack(32, Align(8));
 
-  CCInfo.AnalyzeArguments(Outs, CC_X86);
+  // TANGOLLVM
+  if (isGoClosureCall)
+    CCInfo.AnalyzeArguments(Outs, CC_X86_Go_Closure);
+  else
+    CCInfo.AnalyzeArguments(Outs, CC_X86);
 
   // In vectorcall calling convention a second pass is required for the HVA
   // types.
@@ -2144,12 +2217,62 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
 
   // The next loop assumes that the locations are in the same order of the
   // input arguments.
-  assert(isSortedByValueNo(ArgLocs) &&
+  assert(isSortedByValueNo(ArgLocs, 1) &&
          "Argument Location list must be sorted before lowering");
 
   // Walk the register/memloc assignments, inserting copies/loads.  In the case
   // of tail call optimization arguments are handle later.
   const X86RegisterInfo *RegInfo = Subtarget.getRegisterInfo();
+if (goAdHocABI == GoAdHocABI::GoWB) {
+    assert(ArgLocs.size() == 2 && "write barrier takes two inputs");
+
+    CCValAssign &DstVA = ArgLocs[0];
+    assert(DstVA.getLocInfo() == CCValAssign::Full);
+    // EVT DstRegVT = DstVA.getLocVT();
+    SDValue DstArg = OutVals[0];
+
+    CCValAssign &SrcVA = ArgLocs[1];
+    assert(SrcVA.getLocInfo() == CCValAssign::Full);
+    // EVT SrcRegVT = SrcVA.getLocVT();
+    SDValue SrcArg = OutVals[1];
+
+    // TODO: x86-64 only
+    RegsToPass.push_back(std::make_pair(X86::RDI, DstArg));
+
+    MachineRegisterInfo &MRI = MF.getRegInfo();
+    const TargetRegisterClass *AddrRegClass = &X86::GR64GoWBSrcRegClass; // getRegClassFor(PVT);
+    Register Vreg = MRI.createVirtualRegister(AddrRegClass);
+
+    RegsToPass.push_back(std::make_pair(Vreg, SrcArg));
+
+  } else if (goAdHocABI >= GoAdHocABI::PanicBoundsA && goAdHocABI <= GoAdHocABI::PanicBoundsC) {
+    assert(ArgLocs.size() == 2 && "panic bounds takes two inputs");
+
+    CCValAssign &FirstVA = ArgLocs[0];
+    assert(FirstVA.getLocInfo() == CCValAssign::Full);
+    SDValue FirstArg = OutVals[0];
+
+    CCValAssign &SecondVA = ArgLocs[1];
+    assert(SecondVA.getLocInfo() == CCValAssign::Full);
+    SDValue SecondArg = OutVals[1];
+
+    Register FirstReg, SecondReg;
+    if (goAdHocABI == GoAdHocABI::PanicBoundsA) {
+      FirstReg = X86::RDX;
+      SecondReg = X86::RBX;
+    } else if (goAdHocABI == GoAdHocABI::PanicBoundsB) {
+      FirstReg = X86::RCX;
+      SecondReg = X86::RDX;
+    } else {
+      assert(goAdHocABI == GoAdHocABI::PanicBoundsC && "must be C");
+      FirstReg = X86::RAX;
+      SecondReg = X86::RCX;
+    }
+
+    // TODO: x86-64 only
+    RegsToPass.push_back(std::make_pair(FirstReg, FirstArg));
+    RegsToPass.push_back(std::make_pair(SecondReg, SecondArg));
+  } else  
   for (unsigned I = 0, OutIndex = 0, E = ArgLocs.size(); I != E;
        ++I, ++OutIndex) {
     assert(OutIndex < Outs.size() && "Invalid Out index");
@@ -2446,6 +2569,10 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     // to use the CSR_NoRegs_RegMask.
     if (CB && CB->hasFnAttr("no_callee_saved_registers"))
       AdaptedCC = (CallingConv::ID)CallingConv::GHC;
+    // TANGOLLVM  
+    if (goAdHocABI == GoAdHocABI::GoWB) return RegInfo->getGoWriteBarrierPreservedMask();
+    if (goAdHocABI == GoAdHocABI::DuffCopy || goAdHocABI == GoAdHocABI::DuffZero)
+      AdaptedCC = (CallingConv::ID)CallingConv::AnyReg;
     return RegInfo->getCallPreservedMask(MF, AdaptedCC);
   }();
   assert(Mask && "Missing call preserved mask for calling convention");

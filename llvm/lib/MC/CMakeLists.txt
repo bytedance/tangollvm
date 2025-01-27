@@ -24,6 +24,9 @@ add_llvm_component_library(LLVMMC
   MCELFStreamer.cpp
   MCExpr.cpp
   MCFragment.cpp
+# TANGOLLVM  
+  MCGoAuxData.cpp
+  MCGoGCProgWriter.cpp
   MCGOFFStreamer.cpp
   MCInst.cpp
   MCInstPrinter.cpp

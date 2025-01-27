@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file contains the X86 implementation of TargetFrameLowering class.
@@ -24,10 +26,15 @@
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
+#include "llvm/CodeGen/StackMaps.h"
 #include "llvm/CodeGen/WinEHFuncInfo.h"
+#include "llvm/CodeGen/TangoLLVM.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/EHPersonalities.h"
+#include "llvm/IR/Statepoint.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/DebugInfo.h"
+#include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCObjectFileInfo.h"
@@ -91,6 +98,102 @@ bool X86FrameLowering::needsFrameIndexResolution(
          MF.getInfo<X86MachineFunctionInfo>()->getHasPushSequences();
 }
 
+
+// return true if we must preserve FP for Go
+static bool requireGoFP(const MachineFunction &MF) {
+  if (MF.getFunction().getCallingConv() != CallingConv::Go_Internal) {
+    return false;
+  }
+
+  // by default: maintain FP for all Go functions.
+  // TODO: eliminate FP
+  return true;
+}
+
+static bool canEliminateGoFP(bool HasFP, size_t SlotSize, MachineFunction &MF) {
+  if (MF.getFunction().getCallingConv() != CallingConv::Go_Internal) {
+    return false;
+  }
+
+  assert(HasFP && "for Go we must assume there is FP during codegen");
+
+  Function &F = MF.getFunction();
+  if (!HasFP) {
+    if (!F.hasFnAttribute("go-no-frame-checked")) {
+      F.addFnAttr("go-no-frame-checked", "true");
+      return true;
+    }
+    assert(F.getFnAttribute("go-no-frame-checked").getValueAsString() == "true" && "invariant");
+    return true;
+  }
+
+  // Use go-no-frame-checked
+  if (F.hasFnAttribute("go-no-frame-checked")) {
+    auto Attr = F.getFnAttribute("go-no-frame-checked").getValueAsString();
+    if (Attr == "true") {
+      // can if it is no-frame
+      return true;
+    }
+    return false;
+  }
+
+  const MachineFrameInfo &MFI = MF.getFrameInfo();
+  size_t StackSize = MFI.getStackSize();
+  if (HasFP) {
+    // FP may be set by default
+    StackSize -= SlotSize;
+  }
+  dbgs() << "StackSize: " << StackSize << " " << MF.getFunction().getName() << "\n";
+  bool RequireFP = true;
+  if (StackSize == 0) {
+    if (F.hasFnAttribute("go-no-split")) {
+      RequireFP = false;
+    } else {
+      bool leaf = true;
+      for (auto &MBB : MF) {
+        for (auto &MI : MBB) {
+          if (!MI.isCall())
+            continue;
+
+          // Get callee operand.
+          const MachineOperand &MO = MI.getOpcode() == TargetOpcode::STATEPOINT ?
+            StatepointOpers(&MI).getCallTarget() : MI.getOperand(0);
+
+          if (!MO.isGlobal()) {
+            leaf = false;
+            goto leafSearchDone;
+          }
+
+          const Function *F = dyn_cast<Function>(MO.getGlobal());
+          if (!F) {
+            leaf = false;
+            goto leafSearchDone;
+          }
+
+          // TODO: gcWriterBarrier now is simulated as a normal call.
+          // It should be implemented as an intrinsic.
+          if (!TangoLLVM::isGCWriteBarrier(F->getName())) {
+            leaf = false;
+            goto leafSearchDone;
+          }
+        }
+      }
+
+leafSearchDone:
+      if (leaf) {
+        RequireFP = false;
+      }
+    }
+  }
+
+  if (RequireFP) {
+    F.addFnAttr("go-no-frame-checked", "false");
+  } else {
+    F.addFnAttr("go-no-frame-checked", "true");
+  }
+  return !RequireFP;
+}
+
 /// hasFP - Return true if the specified function should have a dedicated frame
 /// pointer register.  This is true if the function has variable sized allocas
 /// or if frame pointer elimination is disabled.
@@ -103,7 +206,8 @@ bool X86FrameLowering::hasFP(const MachineFunction &MF) const {
           MF.getInfo<X86MachineFunctionInfo>()->hasPreallocatedCall() ||
           MF.callsUnwindInit() || MF.hasEHFunclets() || MF.callsEHReturn() ||
           MFI.hasStackMap() || MFI.hasPatchPoint() ||
-          (isWin64Prologue(MF) && MFI.hasCopyImplyingStackAdjustment()));
+          (isWin64Prologue(MF) && MFI.hasCopyImplyingStackAdjustment())) ||
+          requireGoFP(MF);
 }
 
 static unsigned getSUBriOpcode(bool IsLP64) {
@@ -1541,6 +1645,7 @@ void X86FrameLowering::emitPrologue(MachineFunction &MF,
       MF.hasEHFunclets() && Personality == EHPersonality::CoreCLR;
   bool IsClrFunclet = IsFunclet && FnHasClrFunclet;
   bool HasFP = hasFP(MF);
+  bool CanElimFP = canEliminateGoFP(HasFP, SlotSize, MF);
   bool IsWin64Prologue = isWin64Prologue(MF);
   bool NeedsWin64CFI = IsWin64Prologue && Fn.needsUnwindTableEntry();
   // FIXME: Emit FPO data for EH funclets.
@@ -1736,11 +1841,12 @@ void X86FrameLowering::emitPrologue(MachineFunction &MF,
     if (TRI->hasStackRealignment(MF) && !IsWin64Prologue)
       NumBytes = alignTo(NumBytes, MaxAlign);
 
-    // Save EBP/RBP into the appropriate stack slot.
-    BuildMI(MBB, MBBI, DL,
-            TII.get(getPUSHOpcode(MF.getSubtarget<X86Subtarget>())))
+    if (!CanElimFP) {
+      // Save EBP/RBP into the appropriate stack slot.
+      BuildMI(MBB, MBBI, DL, TII.get(Is64Bit ? X86::PUSH64r : X86::PUSH32r))
         .addReg(MachineFramePtr, RegState::Kill)
         .setMIFlag(MachineInstr::FrameSetup);
+    }
 
     if (NeedsDwarfCFI && !ArgBaseReg.isValid()) {
       // Mark the place where EBP/RBP was saved.
@@ -1768,7 +1874,7 @@ void X86FrameLowering::emitPrologue(MachineFunction &MF,
     }
 
     if (!IsFunclet) {
-      if (X86FI->hasSwiftAsyncContext()) {
+      if (X86FI->hasSwiftAsyncContext() & !CanElimFP) {
         assert(!IsWin64Prologue &&
                "win64 prologue does not store async context right below rbp");
         const auto &Attrs = MF.getFunction().getAttributes();
@@ -2365,6 +2471,8 @@ void X86FrameLowering::emitEpilogue(MachineFunction &MF,
   unsigned CSSize = X86FI->getCalleeSavedFrameSize();
   unsigned TailCallArgReserveSize = -X86FI->getTCReturnAddrDelta();
   bool HasFP = hasFP(MF);
+  // TANGOLLVM+
+  bool CanElimFP = canEliminateGoFP(HasFP, SlotSize, MF);
   uint64_t NumBytes = 0;
 
   bool NeedsDwarfCFI = (!MF.getTarget().getTargetTriple().isOSDarwin() &&
@@ -2424,11 +2532,13 @@ void X86FrameLowering::emitEpilogue(MachineFunction &MF,
       int Offset = 16 + mergeSPUpdates(MBB, MBBI, true);
       emitSPUpdate(MBB, MBBI, DL, Offset, /*InEpilogue*/ true);
     }
-    // Pop EBP.
-    BuildMI(MBB, MBBI, DL,
-            TII.get(getPOPOpcode(MF.getSubtarget<X86Subtarget>())),
-            MachineFramePtr)
+
+    if (!CanElimFP) {
+      // Pop EBP.
+      BuildMI(MBB, MBBI, DL, TII.get(Is64Bit ? X86::POP64r : X86::POP32r),
+          MachineFramePtr)
         .setMIFlag(MachineInstr::FrameDestroy);
+    }
 
     // We need to reset FP to its untagged state on return. Bit 60 is currently
     // used to show the presence of an extended frame.
@@ -3212,6 +3322,399 @@ void X86FrameLowering::adjustForSegmentedStacks(
   // at the right place and update the branches to PrologueMBB.
   assert(&(*MF.begin()) == &PrologueMBB && "Shrink-wrapping not supported yet");
 
+  // Check Go NoSplit
+  if (MF.getFunction().getCallingConv() == CallingConv::Go_Internal) {
+    StackSize = MFI.getStackSize();
+
+    bool HasFP = hasFP(MF);
+    bool RequireFP = [&MF](){
+      auto &F = MF.getFunction();
+      if (F.hasFnAttribute("go-no-frame-checked")) {
+        auto Attr = F.getFnAttribute("go-no-frame-checked").getValueAsString();
+        if (Attr == "true") {
+          // can if it is no-frame
+          return false;
+        }
+        return true;
+      }
+      return true;
+    }();
+
+    assert(HasFP && "all Go functions are compiled with FP");
+
+    if (!RequireFP) {
+      // no push rbp
+      StackSize -= SlotSize;
+    }
+
+    // Go ABI Internal
+    // The following code is copied from stacksplit in obj6.go
+    // g is in r14
+    assert(Is64Bit && "GoInternal supports 64bit only");
+
+    // The following constants are copied from Go
+    // STACKSYSTEM = 0
+    // StackSystem = STACKSYSTEM
+    // StackBig    = 4096
+    // StackSmall  = 128
+    const uint64_t StackBig    = 4096;
+    const uint64_t StackSmall  = 128;
+
+    if (MF.getFunction().hasFnAttribute("go-no-split")) {
+      return;
+    }
+
+    // dbgs() << "NoSplit: StackSize: " << StackSize << " " << RequireFP << " " << MF.getFunction().getName() << "\n";
+
+    if (StackSize < StackSmall) {
+      // see obj6.go
+      // check whether this function is a leaf function with only call to some
+      // runtime functions.
+      bool leaf = true;
+      for (auto &MBB : MF) {
+        for (auto &MI : MBB) {
+          if (!MI.isCall())
+            continue;
+
+          // Get callee operand.
+          const MachineOperand &MO = MI.getOpcode() == TargetOpcode::STATEPOINT ?
+            StatepointOpers(&MI).getCallTarget() : MI.getOperand(0);
+
+          if (MO.isGlobal()) {
+            const Function *F = dyn_cast<Function>(MO.getGlobal());
+            if (!F) {
+              leaf = false;
+              goto leafSearchDone;
+            }
+
+            if (!TangoLLVM::isZeroArgRuntimeCall(F->getName())) {
+              leaf = false;
+              goto leafSearchDone;
+            }
+          } else if (MO.isSymbol() && !TangoLLVM::isZeroArgRuntimeCall(MO.getSymbolName())) {
+            leaf = false;
+            goto leafSearchDone;
+          } else {
+            leaf = false;
+            goto leafSearchDone;
+          }
+
+          if (!(StackSize < StackSmall - 8)) {
+            leaf = false;
+            goto leafSearchDone;
+          }
+        }
+      }
+
+leafSearchDone:
+      if (leaf) {
+        // mark function is no-split
+        MF.getFunction().addFnAttr("go-no-split", "true");
+        return;
+      }
+    }
+
+
+    // TOOD: use go-no-split == "false"??
+    MF.getFunction().addFnAttr("go-split", "true");
+
+    // See a.out.go
+    // REGENTRYTMP0 is R12
+    unsigned ScratchReg = X86::R12;
+
+    auto SP = MF.getFunction().getSubprogram();
+    if (SP)
+      DL = DILocation::get(SP->getContext(), SP->getLine(), 1, SP);
+
+    MachineBasicBlock *entryMBB = MF.CreateMachineBasicBlock();
+    MachineBasicBlock *checkMBB = MF.CreateMachineBasicBlock();
+    MachineBasicBlock *allocMBB = MF.CreateMachineBasicBlock();
+    allocMBB->setSectionID(MBBSectionID::ColdSectionID);
+    MachineBasicBlock *checkMBB2 = nullptr;
+    for (const auto &LI : PrologueMBB.liveins()) {
+      entryMBB->addLiveIn(LI);
+      allocMBB->addLiveIn(LI);
+      checkMBB->addLiveIn(LI);
+    }
+
+    const char* morestackSymbol = "runtime.morestack_noctxt";
+    if (MF.getFunction().hasFnAttribute("go-need-ctxt")) {
+      morestackSymbol = "runtime.morestack";
+      // RDX is the context ptr
+      checkMBB->addLiveIn(X86::RDX);
+    }
+    // TODO: we allow frontend to use internal name mangling
+    if (MF.getFunction().hasFnAttribute("go-sym-morestack")) {
+      Attribute attr = MF.getFunction().getFnAttribute("go-sym-morestack");
+      assert(attr.isStringAttribute() && "must be string attribute");
+      morestackSymbol = MF.createExternalSymbolName(attr.getValueAsString());
+    }
+
+    MF.push_front(checkMBB);
+    MF.push_front(entryMBB);
+    entryMBB->addSuccessor(checkMBB, BranchProbability::getOne());
+    MF.push_back(allocMBB);
+
+    TlsReg = X86::R14; // not tls but loaded g
+    TlsOffset = 16; // G.stackguard0
+
+    auto InsertCheck = [&](MachineBasicBlock *CheckMBB, MachineBasicBlock *AllocMBB) {
+      MachineBasicBlock * CheckMBB2 = nullptr;
+      if (StackSize <= StackSmall) {
+        // build cmp and jae
+        //
+        // small stack: SP <= stackguard
+        // CMPQ SP, stackguard
+        addRegOffset(BuildMI(CheckMBB, DL, TII.get(X86::CMP64rm)).addReg(X86::RSP), TlsReg, false, TlsOffset);
+      } else if (StackSize < StackBig) {
+        // large stack: SP-framesize <= stackguard-StackSmall
+        //  LEAQ -xxx(SP), tmp
+        //  CMPQ tmp, stackguard
+        BuildMI(CheckMBB, DL, TII.get(X86::LEA64r), ScratchReg).addReg(X86::RSP)
+          .addImm(1).addReg(0).addImm(-(StackSize - StackSmall)).addReg(0);
+        addRegOffset(BuildMI(CheckMBB, DL, TII.get(X86::CMP64rm)).addReg(ScratchReg), TlsReg, false, TlsOffset);
+      } else {
+        // Such a large stack we need to protect against underflow.
+        // The runtime guarantees SP > objabi.StackBig, but
+        // framesize is large enough that SP-framesize may
+        // underflow, causing a direct comparison with the
+        // stack guard to incorrectly succeed. We explicitly
+        // guard against underflow.
+        //
+        //  MOVQ  SP, tmp
+        //  SUBQ  $(framesize - StackSmall), tmp
+        //  // If subtraction wrapped (carry set), morestack.
+        //  JCS  label-of-call-to-morestack
+        //  CMPQ  tmp, stackguard
+        BuildMI(CheckMBB, DL, TII.get(X86::MOV64rr), ScratchReg).addReg(X86::RSP);
+        BuildMI(CheckMBB, DL, TII.get(X86::SUB64ri32), ScratchReg)
+          .addReg(ScratchReg).addImm(StackSize - StackSmall);
+        BuildMI(CheckMBB, DL, TII.get(X86::JCC_1)).addMBB(AllocMBB).addImm(X86::COND_B);
+
+        CheckMBB2 = MF.CreateMachineBasicBlock();
+        MF.insert(std::next(CheckMBB->getIterator()), CheckMBB2);
+        CheckMBB2->addLiveIn(ScratchReg);
+        addRegOffset(BuildMI(CheckMBB2, DL, TII.get(X86::CMP64rm)).addReg(ScratchReg), TlsReg, false, TlsOffset);
+      }
+
+
+      if (CheckMBB2) {
+        BuildMI(CheckMBB2, DL, TII.get(X86::JCC_1)).addMBB(AllocMBB).addImm(X86::COND_BE);
+      } else {
+        BuildMI(CheckMBB, DL, TII.get(X86::JCC_1)).addMBB(AllocMBB).addImm(X86::COND_BE);
+      }
+
+
+      return CheckMBB2;
+    };
+
+    checkMBB2 = InsertCheck(checkMBB, allocMBB);
+
+    // RAX, RBX, RCX, RDI, RSI, R8, R9, R10, R11
+    const unsigned GoABIInternalIntRegs[] = {
+      // 8 bit
+      X86::AL, X86::BL, X86::CL, X86::DIL, X86::SIL, X86::R8B, X86::R9B, X86::R10B, X86::R11B,
+      X86::AX, X86::BX, X86::CX, X86::DI, X86::SI, X86::R8W, X86::R9W, X86::R10W, X86::R11W,
+      X86::EAX, X86::EBX, X86::ECX, X86::EDI, X86::ESI, X86::R8D, X86::R9D, X86::R10D, X86::R11D,
+      X86::RAX, X86::RBX, X86::RCX, X86::RDI, X86::RSI, X86::R8, X86::R9, X86::R10, X86::R11
+    };
+    const unsigned GoABIInternalFloatRegs[] = {
+      X86::XMM0, X86::XMM1, X86::XMM2, X86::XMM3, X86::XMM4, X86::XMM5, X86::XMM6, X86::XMM7,
+      X86::XMM8, X86::XMM9, X86::XMM10, X86::XMM11, X86::XMM12, X86::XMM13, X86::XMM14
+    };
+
+    if (auto n = MF.getFunction().getMetadata("go.caller.args.area")) {
+      assert(n->getNumOperands() >= 2 && "must have at least two operands");
+      unsigned numOp = n->getNumOperands();
+
+      if (numOp > 2) {
+        assert(((numOp - 2) % 4 == 0) && "must be quadruple array");
+        for (unsigned i = 2; i < numOp; i += 4) {
+          // (regidx, offset, size)
+          int64_t regidx = dyn_cast<ConstantAsMetadata>(n->getOperand(i + 0))
+                                      ->getValue()
+                                      ->getUniqueInteger()
+                                      .getSExtValue();
+          int64_t offset = dyn_cast<ConstantAsMetadata>(n->getOperand(i + 1))
+                                      ->getValue()
+                                      ->getUniqueInteger()
+                                      .getSExtValue();
+          int64_t size = dyn_cast<ConstantAsMetadata>(n->getOperand(i + 2))
+                                      ->getValue()
+                                      ->getUniqueInteger()
+                                      .getSExtValue();
+          int64_t isPtr = dyn_cast<ConstantAsMetadata>(n->getOperand(i + 3))
+                                      ->getValue()
+                                      ->getUniqueInteger()
+                                      .getSExtValue();
+
+          unsigned reg = 0;
+          unsigned op = 0; // for reg
+          // See getLoadStoreRegOpcode in X86InstrInfo.cpp
+          if (regidx < 0) {
+            // float
+            regidx = -regidx;
+            // index starting from 0
+            regidx --;
+            // XMM0 to XMM14
+            assert((regidx >= 0 && regidx < 15) && "index must be non-negative");
+            reg = GoABIInternalFloatRegs[regidx];
+            switch (size) {
+            case 4:
+              op = X86::MOVSSmr;
+              break;
+            case 8:
+              op = X86::MOVSDmr;
+              break;
+            default:
+              report_fatal_error("Unsupported size for float reg.");
+            }
+
+          } else {
+            regidx --;
+            assert((regidx >= 0 && regidx < 9) && "index must be non-negative");
+            switch (size) {
+            case 1:
+              reg = GoABIInternalIntRegs[regidx];
+              op = X86::MOV8mr;
+              break;
+            case 2:
+              reg = GoABIInternalIntRegs[9 + regidx];
+              op = X86::MOV16mr;
+              break;
+            case 4:
+              reg = GoABIInternalIntRegs[9 + 9 + regidx];
+              op = X86::MOV32mr;
+              break;
+            case 8:
+              reg = GoABIInternalIntRegs[9 + 9 + 9 + regidx];
+              op = X86::MOV64mr;
+              break;
+            default:
+              // panic
+              report_fatal_error("Unsupported size for int reg.");
+            }
+          }
+          if (allocMBB->isLiveIn(reg)) {
+            // not an unused dead argument
+            addRegOffset(BuildMI(allocMBB, DL, TII.get(op)), X86::RSP, false, unsigned(offset)).addReg(reg);
+          } else if (isPtr) {
+            // clear pointer
+            // TODO: on 64 bit only since we assume pointer is 64bit here.
+            assert(op == X86::MOV64mr && "must be pointer");
+            addRegOffset(BuildMI(allocMBB, DL, TII.get(X86::MOV64mi32)), X86::RSP, false, unsigned(offset)).addImm(0);
+          }
+        }
+      }
+    }
+
+    // TODO: simply use CALL64pcrel32?
+    BuildMI(allocMBB, DL, TII.get(X86::CALL64pcrel32))
+      .addExternalSymbol(morestackSymbol);
+
+    // restore register
+    // TODO: refactor
+    if (auto n = MF.getFunction().getMetadata("go.caller.args.area")) {
+      assert(n->getNumOperands() >= 2 && "must have at least two operands");
+      unsigned numOp = n->getNumOperands();
+
+      if (numOp > 2) {
+        assert(((numOp - 2) % 4 == 0) && "must be quadruple array");
+        for (unsigned i = 2; i < numOp; i += 4) {
+          // (regidx, offset, size)
+          int64_t regidx = dyn_cast<ConstantAsMetadata>(n->getOperand(i + 0))
+                                      ->getValue()
+                                      ->getUniqueInteger()
+                                      .getSExtValue();
+          int64_t offset = dyn_cast<ConstantAsMetadata>(n->getOperand(i + 1))
+                                      ->getValue()
+                                      ->getUniqueInteger()
+                                      .getSExtValue();
+          int64_t size = dyn_cast<ConstantAsMetadata>(n->getOperand(i + 2))
+                                      ->getValue()
+                                      ->getUniqueInteger()
+                                      .getSExtValue();
+          int64_t isPtr = dyn_cast<ConstantAsMetadata>(n->getOperand(i + 3))
+                                      ->getValue()
+                                      ->getUniqueInteger()
+                                      .getSExtValue();
+          unsigned reg = 0;
+          unsigned op = 0;
+          // See getLoadStoreRegOpcode in X86InstrInfo.cpp
+          if (regidx < 0) {
+            // float
+            regidx = -regidx;
+            // index starting from 0
+            regidx --;
+            // XMM0 to XMM14
+            assert((regidx >= 0 && regidx < 15) && "index must be non-negative");
+            reg = GoABIInternalFloatRegs[regidx];
+            switch (size) {
+            case 4:
+              op = X86::MOVSSrm_alt;
+              break;
+            case 8:
+              op = X86::MOVSDrm_alt;
+              break;
+            default:
+              report_fatal_error("Unsupported size for float reg.");
+            }
+          } else {
+            regidx --;
+            assert((regidx >= 0 && regidx < 9) && "index must be non-negative");
+            switch (size) {
+            case 1:
+              reg = GoABIInternalIntRegs[regidx];
+              op = X86::MOV8rm;
+              break;
+            case 2:
+              reg = GoABIInternalIntRegs[9 + regidx];
+              op = X86::MOV16rm;
+              break;
+            case 4:
+              reg = GoABIInternalIntRegs[9 + 9 + regidx];
+              op = X86::MOV32rm;
+              break;
+            case 8:
+              reg = GoABIInternalIntRegs[9 + 9 + 9 + regidx];
+              op = X86::MOV64rm;
+              break;
+            default:
+              // panic
+              report_fatal_error("Unsupported size for int reg.");
+            }
+          }
+          if (allocMBB->isLiveIn(reg)) {
+            // only save & restore live argument regs
+            addRegOffset(BuildMI(allocMBB, DL, TII.get(op)).addReg(reg, RegState::Define), X86::RSP, false, unsigned(offset));
+          } else if (isPtr) {
+            BuildMI(allocMBB, DL, TII.get(X86::XOR64rr), reg)
+                .addReg(reg, RegState::Undef)
+                .addReg(reg, RegState::Undef);
+          }
+        }
+      }
+    }
+
+    BuildMI(allocMBB, DL, TII.get(X86::JMP_1)).addMBB(checkMBB);
+    allocMBB->addSuccessor(checkMBB, BranchProbability::getOne());
+
+    checkMBB->addSuccessor(allocMBB, BranchProbability::getZero());
+    if (checkMBB2) {
+      checkMBB->addSuccessor(checkMBB2, BranchProbability::getOne());
+
+      checkMBB2->addSuccessor(allocMBB, BranchProbability::getZero());
+      checkMBB2->addSuccessor(&PrologueMBB, BranchProbability::getOne());
+    } else {
+      checkMBB->addSuccessor(&PrologueMBB, BranchProbability::getOne());
+    }
+
+#ifdef EXPENSIVE_CHECKS
+    MF.verify();
+#endif
+    return;
+  }
+
   unsigned ScratchReg = GetScratchRegister(Is64Bit, IsLP64, MF, true);
   assert(!MF.getRegInfo().isLiveIn(ScratchReg) &&
          "Scratch register is live-in");
@@ -3741,6 +4244,10 @@ MachineBasicBlock::iterator X86FrameLowering::eliminateCallFramePseudoInstr(
     return I;
 
   if (!reserveCallFrame) {
+    // Go ABIInternal reserve call frames for all callees.
+    if (MF.getFunction().getCallingConv() == CallingConv::Go_Internal) {
+      assert(Amount == 0 && "Must reserve call frame for Go ABIInternal");
+    }
     // If the stack pointer can be changed after prologue, turn the
     // adjcallstackup instruction into a 'sub ESP, <amt>' and the
     // adjcallstackdown instruction into 'add ESP, <amt>'

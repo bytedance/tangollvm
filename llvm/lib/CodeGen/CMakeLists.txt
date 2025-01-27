@@ -71,6 +71,8 @@ add_llvm_component_library(LLVMCodeGen
   GCMetadataPrinter.cpp
   GCRootLowering.cpp
   GlobalMerge.cpp
+# TANGOLLVM
+  GoFixupPreRegAlloc.cpp
   HardwareLoops.cpp
   IfConversion.cpp
   ImplicitNullChecks.cpp

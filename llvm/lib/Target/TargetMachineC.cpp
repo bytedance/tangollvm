@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file implements the LLVM-C part of TargetMachine.h
@@ -24,6 +26,11 @@
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/TargetParser/Host.h"
 #include "llvm/TargetParser/SubtargetFeature.h"
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/Transforms/IPO.h"
+#include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Utils.h"
+#include "llvm/Analysis/LoopPass.h"
 #include <cstring>
 #include <optional>
 
@@ -299,7 +306,32 @@ static LLVMBool LLVMTargetMachineEmit(LLVMTargetMachineRef T, LLVMModuleRef M,
   std::string error;
 
   Mod->setDataLayout(TM->createDataLayout());
+  // TANGOLLVM: Go modules are created without a target triple. Set it from
+  // their Go target machine without changing the behavior of other LLVM-C
+  // clients, which may intentionally retain a different or empty triple.
+  if (TM->getTargetTriple().isGoEnvironment() && Mod->getTargetTriple().empty())
+    Mod->setTargetTriple(TM->getTargetTriple().getTriple());
+  PassInstrumentationCallbacks PIC;
+  PassBuilder PB(TM, PipelineTuningOptions(), std::nullopt, &PIC);
+  LoopAnalysisManager LAM;
+  FunctionAnalysisManager FAM;
+  CGSCCAnalysisManager CGAM;
+  ModuleAnalysisManager MAM;
 
+  PB.registerModuleAnalyses(MAM);
+  PB.registerCGSCCAnalyses(CGAM);
+  PB.registerFunctionAnalyses(FAM);
+  PB.registerLoopAnalyses(LAM);
+  PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+
+  ModulePassManager MPM = PB.buildPerModuleDefaultPipeline(
+        OptimizationLevel::O3);
+  // dbgs() << "Pipeline: \n";
+  // MPM.printPipeline(outs(), [&PIC](StringRef ClassName) {
+  //     auto PassName = PIC.getPassNameForClassName(ClassName);
+  //     return PassName.empty() ? ClassName : PassName;
+  // });
+  MPM.run(*Mod, MAM);
   CodeGenFileType ft;
   switch (codegen) {
     case LLVMAssemblyFile:

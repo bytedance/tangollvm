@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file declares codegen opcodes and related utilities.
@@ -99,6 +101,22 @@ enum NodeType {
   /// the parent's frame or return address, and so on.
   FRAMEADDR,
   RETURNADDR,
+
+  /// STACKADDR - Represents llvm.go.stackaddress on the DAG. These nodes take one
+  /// operand, the offset from the top of stack.
+  GO_STACKADDR,
+
+  /// DIV128 - Represents llvm.go.div128 on the DAG. These nodes take three operands
+  /// and return a struct with 2 fields which the first field is quotient and the
+  /// second field is remainder.
+  /// The first and the second operand form the 128-bit dividend, the third operand is
+  /// the 64-bit divisor.
+  GO_DIV128,
+
+  /// AVG64U - Represents llvm.go.avg64 on the DAG. These nodes take two operands
+  /// and return 64-bit average integer of two operands.
+  /// The first and the second operand both are 64-bit integer.
+  GO_AVG64U,
 
   /// ADDROFRETURNADDR - Represents the llvm.addressofreturnaddress intrinsic.
   /// This node takes no operand, returns a target-specific pointer to the

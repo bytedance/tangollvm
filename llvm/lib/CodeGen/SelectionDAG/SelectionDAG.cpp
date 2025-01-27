@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This implements the SelectionDAG class.
@@ -7826,6 +7828,8 @@ static SDValue getMemcpyLoadsAndStores(SelectionDAG &DAG, const SDLoc &dl,
   FrameIndexSDNode *FI = dyn_cast<FrameIndexSDNode>(Dst);
   if (FI && !MFI.isFixedObjectIndex(FI->getIndex()))
     DstAlignCanChange = true;
+  if (DAG.getMachineFunction().getFunction().getCallingConv() == CallingConv::Go_Internal)
+    DstAlignCanChange = false;
   MaybeAlign SrcAlign = DAG.InferPtrAlign(Src);
   if (!SrcAlign || Alignment > *SrcAlign)
     SrcAlign = Alignment;
@@ -8027,6 +8031,8 @@ static SDValue getMemmoveLoadsAndStores(SelectionDAG &DAG, const SDLoc &dl,
   FrameIndexSDNode *FI = dyn_cast<FrameIndexSDNode>(Dst);
   if (FI && !MFI.isFixedObjectIndex(FI->getIndex()))
     DstAlignCanChange = true;
+  if (DAG.getMachineFunction().getFunction().getCallingConv() == CallingConv::Go_Internal)
+    DstAlignCanChange = false;    
   MaybeAlign SrcAlign = DAG.InferPtrAlign(Src);
   if (!SrcAlign || Alignment > *SrcAlign)
     SrcAlign = Alignment;
@@ -8148,6 +8154,8 @@ static SDValue getMemsetStores(SelectionDAG &DAG, const SDLoc &dl,
   FrameIndexSDNode *FI = dyn_cast<FrameIndexSDNode>(Dst);
   if (FI && !MFI.isFixedObjectIndex(FI->getIndex()))
     DstAlignCanChange = true;
+  if (DAG.getMachineFunction().getFunction().getCallingConv() == CallingConv::Go_Internal)
+    DstAlignCanChange = false;
   bool IsZeroVal = isNullConstant(Src);
   unsigned Limit = AlwaysInline ? ~0 : TLI.getMaxStoresPerMemset(OptSize);
 
@@ -8283,6 +8291,17 @@ SDValue SelectionDAG::getMemcpy(
       return Result;
   }
 
+  if (getMachineFunction().getFunction().getCallingConv() == CallingConv::Go_Internal) {
+    dbgs() << "==========> Seeing a bad memcpy intrinsic: \n";
+    dbgs() << "=====> Dst: ";
+    Dst.dump();
+    dbgs() << "=====> Src: ";
+    Src.dump();
+    dbgs() << "=====> Size: ";
+    Size.dump();
+    llvm_unreachable("Can't generate a runtime stub call for memcpy intrinsic.");
+  }
+
   // If we really need inline code and the target declined to provide it,
   // use a (potentially long) sequence of loads and stores.
   if (AlwaysInline) {
@@ -8410,6 +8429,13 @@ SDValue SelectionDAG::getMemmove(SDValue Chain, const SDLoc &dl, SDValue Dst,
       return Result;
   }
 
+  // TANGOLLVm
+  if (getMachineFunction().getFunction().getCallingConv() == CallingConv::Go_Internal) {
+    // Caller should check and report fatal error.
+    return SDValue();
+  }
+
+
   checkAddrSpaceIsValidForLibcall(TLI, DstPtrInfo.getAddrSpace());
   checkAddrSpaceIsValidForLibcall(TLI, SrcPtrInfo.getAddrSpace());
 
@@ -8535,6 +8561,17 @@ SDValue SelectionDAG::getMemset(SDValue Chain, const SDLoc &dl, SDValue Dst,
     assert(Result &&
            "getMemsetStores must return a valid sequence when AlwaysInline");
     return Result;
+  }
+
+  if (getMachineFunction().getFunction().getCallingConv() == CallingConv::Go_Internal) {
+    dbgs() << "==========> Seeing a bad memset intrinsic: \n";
+    dbgs() << "=====> Dst: ";
+    Dst.dump();
+    dbgs() << "=====> Src: ";
+    Src.dump();
+    dbgs() << "=====> Size: ";
+    Size.dump();
+    llvm_unreachable("Can't generate a runtime stub call for memset intrinsic.");
   }
 
   checkAddrSpaceIsValidForLibcall(TLI, DstPtrInfo.getAddrSpace());

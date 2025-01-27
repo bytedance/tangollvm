@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file contains the X86 implementation of the TargetInstrInfo class.
@@ -425,6 +427,46 @@ int X86InstrInfo::getSPAdjust(const MachineInstr &MI) const {
   const MachineFunction *MF = MI.getParent()->getParent();
   const TargetFrameLowering *TFI = MF->getSubtarget().getFrameLowering();
 
+  if (MF->getFunction().getCallingConv() == CallingConv::Go_Internal) {
+    if (isFrameInstr(MI)) {
+      int SPAdj = alignTo(getFrameSize(MI), TFI->getStackAlign());
+      SPAdj -= getFrameAdjustment(MI);
+      if (!isFrameSetup(MI))
+        SPAdj = -SPAdj;
+      return SPAdj;
+    }
+
+    switch (MI.getOpcode()) {
+      default:
+        if (MI.getFlag(MachineInstr::FrameSetup)) {
+          if (MI.getNumOperands() == 4 && MI.getOperand(2).isImm()) {
+            return (int)MI.getOperand(2).getImm();
+          }
+        } else if (MI.getFlag(MachineInstr::FrameDestroy)) {
+          if (MI.getNumOperands() == 4 && MI.getOperand(2).isImm()) {
+            return -(int)MI.getOperand(2).getImm();
+          }
+        }
+        return 0;
+      case X86::PUSH32i8:
+      case X86::PUSH32r:
+      case X86::PUSH32rmm:
+      case X86::PUSH32rmr:
+      case X86::PUSH32i:
+        return 4;
+      case X86::PUSH64i8:
+      case X86::PUSH64r:
+      case X86::PUSH64rmm:
+      case X86::PUSH64rmr:
+      case X86::PUSH64i32:
+        return 8;
+      case X86::POP32r:
+        return -4;
+      case X86::POP64r:
+        return -8;
+    }
+  }
+
   if (isFrameInstr(MI)) {
     int SPAdj = alignTo(getFrameSize(MI), TFI->getStackAlign());
     SPAdj -= getFrameAdjustment(MI);
@@ -685,6 +727,30 @@ static bool isFrameStoreOpcode(int Opcode, unsigned &MemBytes) {
   }
   return false;
 }
+
+unsigned X86InstrInfo::isLoadStackSlotAddress(const MachineInstr &MI,
+                                       int &FrameIndex) const {
+  auto IsFrameAddress = [](const MachineInstr &MI, unsigned int Op,
+      int &FrameIndex) {
+    if (MI.getOperand(Op + X86::AddrBaseReg).isFI() &&
+        MI.getOperand(Op + X86::AddrScaleAmt).isImm() &&
+        MI.getOperand(Op + X86::AddrIndexReg).isReg() &&
+        MI.getOperand(Op + X86::AddrDisp).isImm()) {
+      FrameIndex = MI.getOperand(Op + X86::AddrBaseReg).getIndex();
+      return true;
+    }
+    return false;
+  };
+
+  // TODO: x86-64 only
+  if (MI.getOpcode() == X86::LEA64r) {
+    if (MI.getOperand(0).getSubReg() == 0 && IsFrameAddress(MI, 1, FrameIndex))
+      return MI.getOperand(0).getReg();
+  }
+
+  return 0;
+}
+
 
 Register X86InstrInfo::isLoadFromStackSlot(const MachineInstr &MI,
                                            int &FrameIndex) const {

@@ -37,6 +37,9 @@ static_library("MC") {
     "MCELFStreamer.cpp",
     "MCExpr.cpp",
     "MCFragment.cpp",
+# TANGOLLVM
+    "MCGoAuxData.cpp",
+    "MCGoGCProgWriter.cpp",
     "MCGOFFStreamer.cpp",
     "MCInst.cpp",
     "MCInstPrinter.cpp",

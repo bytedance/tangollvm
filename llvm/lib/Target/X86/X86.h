@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file contains the entry points for global functions defined in the x86
@@ -69,6 +71,13 @@ FunctionPass *createX86FixupVectorConstants();
 /// Return a pass that removes redundant LEA instructions and redundant address
 /// recalculations.
 FunctionPass *createX86OptimizeLEAs();
+
+/// Return a pass that rename gcWriteBarrier
+FunctionPass *createX86GoFixupPostRegAlloc();
+
+/// Return a pass that removes redundant LEA instructions and redundant address
+/// recalculations.
+FunctionPass *createX86GoFixupPreRegAlloc();
 
 /// Return a pass that transforms setcc + movzx pairs into xor + setcc.
 FunctionPass *createX86FixupSetCC();
@@ -191,6 +200,8 @@ void initializeX86FastTileConfigPass(PassRegistry &);
 void initializeX86FixupSetCCPassPass(PassRegistry &);
 void initializeX86WinFixupBufferSecurityCheckPassPass(PassRegistry &);
 void initializeX86FlagsCopyLoweringPassPass(PassRegistry &);
+void initializeX86GoFixupPostRegAllocPassPass(PassRegistry &);
+void initializeX86GoFixupPreRegAllocPassPass(PassRegistry &);
 void initializeX86LoadValueInjectionLoadHardeningPassPass(PassRegistry &);
 void initializeX86LoadValueInjectionRetHardeningPassPass(PassRegistry &);
 void initializeX86LowerAMXIntrinsicsLegacyPassPass(PassRegistry &);

@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file contains the X86 implementation of the TargetInstrInfo class.
@@ -254,6 +256,10 @@ public:
   ///
   /// FIXME: This should become part of our instruction tables.
   static bool isDataInvariant(MachineInstr &MI);
+
+  // TANGOLLVM
+  unsigned isLoadStackSlotAddress(const MachineInstr &MI,
+                                       int &FrameIndex) const override;
 
   /// Returns true if the instruction has no behavior (specified or otherwise)
   /// that is based on the value loaded from memory or the value of any

@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This implements the SelectionDAGISel class.
@@ -2444,6 +2446,8 @@ void SelectionDAGISel::Select_READ_REGISTER(SDNode *Op) {
   Register Reg =
       TLI->getRegisterByName(RegStr->getString().data(), Ty,
                              CurDAG->getMachineFunction());
+  MachineFunction &MF = CurDAG->getMachineFunction();
+  Reg = MF.addLiveIn(Reg, MF.getSubtarget().getTargetLowering()->getRegClassFor(VT.getSimpleVT()));
   SDValue New = CurDAG->getCopyFromReg(
                         Op->getOperand(0), dl, Reg, Op->getValueType(0));
   New->setNodeId(-1);

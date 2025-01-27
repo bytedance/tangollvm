@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file contains the X86 implementation of the TargetRegisterInfo class.
@@ -426,6 +428,9 @@ X86RegisterInfo::getCallPreservedMask(const MachineFunction &MF,
   bool HasAVX512 = Subtarget.hasAVX512();
 
   switch (CC) {
+  // TANGOVLLM
+  case CallingConv::Go_Internal:
+  case CallingConv::Go_0:
   case CallingConv::GHC:
   case CallingConv::HiPE:
     return CSR_NoRegs_RegMask;
@@ -533,9 +538,22 @@ const uint32_t *X86RegisterInfo::getDarwinTLSCallPreservedMask() const {
   return CSR_64_TLS_Darwin_RegMask;
 }
 
+// TANGOLLVM
+const uint32_t *X86RegisterInfo::getGoWriteBarrierPreservedMask() const {
+  return CSR_64_AllRegs_NoSSE_RegMask;
+}
+
 BitVector X86RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   BitVector Reserved(getNumRegs());
   const X86FrameLowering *TFI = getFrameLowering(MF);
+  if (MF.getFunction().getCallingConv() == CallingConv::Go_Internal) {
+    // the current goroutine pointer
+    for (const MCPhysReg &SubReg : subregs_inclusive(X86::R14))
+      Reserved.set(SubReg);
+
+    for (MCRegAliasIterator AI(MF.getSubtarget<X86Subtarget>().hasAVX() ? X86::YMM15 : X86::XMM15, this, true); AI.isValid(); ++AI)
+      Reserved.set(*AI);
+  }
 
   // Set the floating point control register as reserved.
   Reserved.set(X86::FPCW);
@@ -778,6 +796,10 @@ bool X86RegisterInfo::hasBasePointer(const MachineFunction &MF) const {
 bool X86RegisterInfo::canRealignStack(const MachineFunction &MF) const {
   if (!TargetRegisterInfo::canRealignStack(MF))
     return false;
+
+  if (MF.getFunction().getCallingConv() == CallingConv::Go_Internal) {
+    return false;
+  }
 
   const MachineFrameInfo &MFI = MF.getFrameInfo();
   const MachineRegisterInfo *MRI = &MF.getRegInfo();
@@ -1121,4 +1143,95 @@ bool X86RegisterInfo::getRegAllocationHints(Register VirtReg,
 #undef DEBUG_TYPE
 
   return true;
+}
+
+void
+X86RegisterInfo::replaceFramePtrWithStackPtr(const MachineFunction &MF, MachineInstr &MI, int SPAdj) const {
+  const MachineFrameInfo &MFI = MF.getFrameInfo();
+
+  assert(!CantUseSP(MF.getFrameInfo()) && "Must be able to use SP");
+
+  if (MI.getFlag(MachineInstr::FrameSetup) || MI.getFlag(MachineInstr::FrameDestroy)) {
+    return;
+  }
+
+  int FPIdx = -1;
+  for (unsigned i = 0, e = MI.getNumOperands(); i != e; ++i) {
+    MachineOperand &MO = MI.getOperand(i);
+    if (!MO.isReg()) {
+      continue;
+    }
+    if (MO.getReg() == FramePtr) {
+      if (i + 4 < MI.getNumOperands() && MI.getOperand(i + 1).isImm() && MI.getOperand(i + 2).isReg() && MI.getOperand(i + 3).isImm()) {
+        if (FPIdx == -1) {
+          FPIdx = int(i);
+        } else {
+          // TODO: if an instruction has two FP, it is mostly used for rbp spill.
+          // We can ignore such cases.
+          // TODO: we should not spill rbp.
+          // errs() << "TODO: two FP operands in " << MI << ", ignore it";
+          return;
+        }
+      }
+    }
+  }
+
+  if (FPIdx == -1) {
+    return;
+  }
+
+  assert(FPIdx + 4 < int(MI.getNumOperands()) && "must be checked");
+  assert(MI.getOperand(FPIdx + 1).isImm() && MI.getOperand(FPIdx + 2).isReg() && MI.getOperand(FPIdx + 3).isImm() && "must be checked");
+  const X86FrameLowering *TFI = getFrameLowering(MF);
+  bool HasFP = TFI->hasFP(MF);
+  assert(TFI->hasFP(MF) && "hasFP must be true when FP is found");
+
+  const Function &Fn = MF.getFunction();
+  assert(Fn.hasFnAttribute("go-no-frame-checked") && "prologue and epilogue must be inserted");
+  auto Attr = Fn.getFnAttribute("go-no-frame-checked").getValueAsString();
+  bool RequireFP = Attr == "false";
+
+
+  uint64_t StackSize = MFI.getStackSize();
+  assert((!HasFP || StackSize >= SlotSize) && "must have space for save BP");
+  int64_t OldOffset = MI.getOperand(FPIdx + 3).getImm();
+
+#if 0
+  dbgs() << "MF: " << MF.getFunction().getName() << "\n";
+  dbgs() << "Before MI: " << MI;
+  dbgs() << "RPOffset: " << OldOffset << "\n";
+  dbgs() << "StackSize: " << StackSize << "\n";
+  dbgs() << "SlotSize: " << SlotSize << "\n";
+#endif
+
+  if (HasFP) {
+    // If there is FP, we must substract BP size to get the distance between RBP and RSP
+    StackSize -= SlotSize;
+    if (!RequireFP) {
+      if (OldOffset > 0) {
+        // preallocated: return address and saved rbp
+        assert(OldOffset >= SlotSize && "relative to RBP");
+        OldOffset -= SlotSize;
+      }
+    } else {
+      // the same for both case
+    }
+  }
+
+  int64_t Offset = int64_t(StackSize) + int64_t(SPAdj) + OldOffset;
+  MI.getOperand(FPIdx + 3).setImm(Offset);
+  MI.getOperand(FPIdx + 0).setReg(StackPtr);
+#if 0
+  dbgs() << "After MI: " << MI;
+  dbgs() << "FPIdx: " << FPIdx << "\n";
+  dbgs() << "RPOffset: " << OldOffset << "\n";
+  dbgs() << "SPAdj: " << SPAdj << "\n";
+  dbgs() << "StackSize: " << StackSize << "\n";
+  dbgs() << "SPOffset: " << Offset << "\n";
+  dbgs() << "0: " << MI.getOperand(FPIdx + 0) << "\n";
+  dbgs() << "1: " << MI.getOperand(FPIdx + 1) << "\n";
+  dbgs() << "2: " << MI.getOperand(FPIdx + 2) << "\n";
+  dbgs() << "3: " << MI.getOperand(FPIdx + 3) << "\n";
+#endif
+  return;
 }

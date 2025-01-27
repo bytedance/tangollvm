@@ -29,6 +29,8 @@ add_llvm_component_library(LLVMCore
   FPEnv.cpp
   Function.cpp
   GCStrategy.cpp
+# TangoLLVM  
+  GoGC.cpp
   GVMaterializer.cpp
   Globals.cpp
   IRBuilder.cpp

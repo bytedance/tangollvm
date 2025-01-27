@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file includes support code use by SelectionDAGBuilder when lowering a
@@ -75,6 +77,48 @@ static cl::opt<unsigned> MaxRegistersForGCPointers(
     cl::desc("Max number of VRegs allowed to pass GC pointer meta args in"));
 
 typedef FunctionLoweringInfo::StatepointRelocationRecord RecordType;
+
+static SDValue getSDValue(const Value *V, SelectionDAGBuilder &Builder) {
+  if (const Argument *Arg = dyn_cast<Argument>(V)) {
+    // If this is a function argument at a static frame index, generate it as
+    // the frame index.
+    int FI = Builder.FuncInfo.getArgumentFrameIndex(Arg);
+    if (FI != INT_MAX)
+      return Builder.DAG.getFrameIndex(FI, Builder.getFrameIndexTy());
+    return Builder.getValue(V);
+  }
+  if (const AllocaInst *AI = dyn_cast<AllocaInst>(V)) {
+    auto SI = Builder.FuncInfo.StaticAllocaMap.find(AI);
+    if (SI != Builder.FuncInfo.StaticAllocaMap.end())
+      return Builder.DAG.getFrameIndex(SI->second, Builder.getFrameIndexTy());
+    return Builder.getValue(V);
+  }
+  // Intrinsic are not translated into GCStatepointInst
+  if (const CallInst *Call = dyn_cast<CallInst>(V)) {
+    if (auto Fn = Call->getCalledFunction()) {
+      if (Fn->getIntrinsicID() == Intrinsic::go_preallocated) {
+        int64_t Offset = cast<ConstantInt>(Call->getArgOperand(0))->getZExtValue();
+        uint64_t Size = cast<ConstantInt>(Call->getArgOperand(1))->getSExtValue();
+        bool Aliased = Call->hasMetadata("go.stackobject.gcdata");
+        MachineFunction &MF = Builder.DAG.getMachineFunction();
+        MachineFrameInfo &MFI = MF.getFrameInfo();
+        int FI = MFI.getObjectIndexBegin();
+        for (; MFI.isFixedObjectIndex(FI); ++FI) {
+          if (MFI.getObjectOffset(FI) == Offset) {
+            break;
+          }
+        }
+        if (!MFI.isFixedObjectIndex(FI)) {
+          FI = MFI.CreateFixedObject(Size, Offset, false, Aliased);
+        }
+        return Builder.DAG.getFrameIndex(FI, Builder.getFrameIndexTy());
+      }
+    }
+    return Builder.getValue(V);
+  }
+
+  return Builder.getValue(V);
+}
 
 static void pushStackMapConstant(SmallVectorImpl<SDValue>& Ops,
                                  SelectionDAGBuilder &Builder, uint64_t Value) {
@@ -268,7 +312,7 @@ static bool willLowerDirectly(SDValue Incoming) {
 /// values on the stack between calls.
 static void reservePreviousStackSlotForValue(const Value *IncomingValue,
                                              SelectionDAGBuilder &Builder) {
-  SDValue Incoming = Builder.getValue(IncomingValue);
+  SDValue Incoming = getSDValue(IncomingValue, Builder);
 
   // If we won't spill this, we don't need to check for previously allocated
   // stack slots.
@@ -552,8 +596,8 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
       LandingPadInst *LPI = StInvoke->getLandingPadInst();
       for (const auto *Relocate : SI.GCRelocates)
         if (Relocate->getOperand(0) == LPI) {
-          LPadPointers.insert(Builder.getValue(Relocate->getBasePtr()));
-          LPadPointers.insert(Builder.getValue(Relocate->getDerivedPtr()));
+          LPadPointers.insert(getSDValue(Relocate->getBasePtr(), Builder));
+          LPadPointers.insert(getSDValue(Relocate->getDerivedPtr(), Builder));
         }
     }
 
@@ -575,7 +619,7 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
   };
 
   auto processGCPtr = [&](const Value *V) {
-    SDValue PtrSD = Builder.getValue(V);
+    SDValue PtrSD = getSDValue(V, Builder);
     if (!LoweredGCPtrs.insert(PtrSD))
       return; // skip duplicates
     GCPtrIndexMap[PtrSD] = LoweredGCPtrs.size() - 1;
@@ -603,10 +647,10 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
 
   auto requireSpillSlot = [&](const Value *V) {
     if (!Builder.DAG.getTargetLoweringInfo().isTypeLegal(
-             Builder.getValue(V).getValueType()))
+             getSDValue(V, Builder).getValueType()))
       return true;
     if (isGCValue(V, Builder))
-      return !LowerAsVReg.count(Builder.getValue(V));
+      return !LowerAsVReg.count(getSDValue(V, Builder));
     return !(LiveInDeopt || UseRegistersForDeoptValues);
   };
 
@@ -621,13 +665,13 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
   }
 
   for (const Value *V : SI.Ptrs) {
-    SDValue SDV = Builder.getValue(V);
+    SDValue SDV = getSDValue(V, Builder);
     if (!LowerAsVReg.count(SDV))
       reservePreviousStackSlotForValue(V, Builder);
   }
 
   for (const Value *V : SI.Bases) {
-    SDValue SDV = Builder.getValue(V);
+    SDValue SDV = getSDValue(V, Builder);
     if (!LowerAsVReg.count(SDV))
       reservePreviousStackSlotForValue(V, Builder);
   }
@@ -641,21 +685,30 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
   // The vm state arguments are lowered in an opaque manner.  We do not know
   // what type of values are contained within.
   LLVM_DEBUG(dbgs() << "Lowering deopt state\n");
+  auto &MF = Builder.DAG.getMachineFunction();
+  bool GoGC = MF.getFunction().hasGC() && MF.getFunction().getGC() == "go";
   for (const Value *V : SI.DeoptState) {
-    SDValue Incoming;
-    // If this is a function argument at a static frame index, generate it as
-    // the frame index.
-    if (const Argument *Arg = dyn_cast<Argument>(V)) {
-      int FI = Builder.FuncInfo.getArgumentFrameIndex(Arg);
-      if (FI != INT_MAX)
-        Incoming = Builder.DAG.getFrameIndex(FI, Builder.getFrameIndexTy());
+    SDValue Incoming = getSDValue(V, Builder);
+    if (GoGC) {
+      LLVM_DEBUG(dbgs() << "Value " << *V << " GoGC\n");
+      lowerIncomingStatepointValue(Incoming, false, Ops, MemRefs, Builder);
+    } else {
+      LLVM_DEBUG(dbgs() << "Value " << *V
+          << " requireSpillSlot = " << requireSpillSlot(V) << "\n");
+      lowerIncomingStatepointValue(Incoming, requireSpillSlot(V), Ops, MemRefs,
+          Builder);
     }
-    if (!Incoming.getNode())
-      Incoming = Builder.getValue(V);
-    LLVM_DEBUG(dbgs() << "Value " << *V
-                      << " requireSpillSlot = " << requireSpillSlot(V) << "\n");
-    lowerIncomingStatepointValue(Incoming, requireSpillSlot(V), Ops, MemRefs,
-                                 Builder);
+  }
+
+  // TODO: we only care about Deopt for GoGC;
+  if (GoGC) {
+    // GCPtrs
+    pushStackMapConstant(Ops, Builder, 0);
+    // GC alloca
+    pushStackMapConstant(Ops, Builder, 0);
+    // GC base ptr map
+    pushStackMapConstant(Ops, Builder, 0);
+    return;
   }
 
   // Finally, go ahead and lower all the gc arguments.
@@ -674,7 +727,7 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
   // the alloca
   SmallVector<SDValue, 4> Allocas;
   for (Value *V : SI.GCArgs) {
-    SDValue Incoming = Builder.getValue(V);
+    SDValue Incoming = getSDValue(V, Builder);
     if (FrameIndexSDNode *FI = dyn_cast<FrameIndexSDNode>(Incoming)) {
       // This handles allocas as arguments to the statepoint
       assert(Incoming.getValueType() == Builder.getFrameIndexTy() &&
@@ -694,11 +747,11 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
   pushStackMapConstant(Ops, Builder, SI.Ptrs.size());
   SDLoc L = Builder.getCurSDLoc();
   for (unsigned i = 0; i < SI.Ptrs.size(); ++i) {
-    SDValue Base = Builder.getValue(SI.Bases[i]);
+    SDValue Base = getSDValue(SI.Bases[i], Builder);
     assert(GCPtrIndexMap.count(Base) && "base not found in index map");
     Ops.push_back(
         Builder.DAG.getTargetConstant(GCPtrIndexMap[Base], L, MVT::i64));
-    SDValue Derived = Builder.getValue(SI.Ptrs[i]);
+    SDValue Derived = getSDValue(SI.Ptrs[i], Builder);
     assert(GCPtrIndexMap.count(Derived) && "derived not found in index map");
     Ops.push_back(
         Builder.DAG.getTargetConstant(GCPtrIndexMap[Derived], L, MVT::i64));
@@ -1016,6 +1069,31 @@ SelectionDAGBuilder::LowerStatepoint(const GCStatepointInst &I,
   assert(I.getCallingConv() != CallingConv::AnyReg &&
          "anyregcc is not supported on statepoints!");
 
+  if (I.getCallingConv() == CallingConv::Go_Internal) {
+    // Try to lower some Go runtime function differently
+    Value* Callee = I.getActualCalledOperand();
+    if (auto *Fn = dyn_cast<Function>(Callee)) {
+      if (Fn->getName() == "runtime.memmove") {
+        // we can lower to memmove
+        unsigned ArgBeginIndex = GCStatepointInst::CallArgsBeginPos;
+        SDValue Op1 = getValue(I.getOperand(ArgBeginIndex + 0));
+        SDValue Op2 = getValue(I.getOperand(ArgBeginIndex + 1));
+        SDValue Op3 = getValue(I.getOperand(ArgBeginIndex + 2));
+        SDValue MM = DAG.getMemmove(
+            getRoot(), getCurSDLoc(), Op1, Op2, Op3, Align(8), false,
+            cast<CallInst>(&I), std::optional<bool>(false), 
+            MachinePointerInfo(I.getOperand(ArgBeginIndex + 0)),
+            MachinePointerInfo(I.getOperand(ArgBeginIndex + 1)),
+            I.getAAMetadata());
+        if (MM.getNode()) {
+          DAG.setRoot(MM);
+          setValue(&I, DAG.getIntPtrConstant(-1, getCurSDLoc()));
+          return;
+        }
+      }
+    }
+  }
+
 #ifndef NDEBUG
   // Check that the associated GCStrategy expects to encounter statepoints.
   assert(GFI->getStrategy().useStatepoints() &&
@@ -1046,6 +1124,10 @@ SelectionDAGBuilder::LowerStatepoint(const GCStatepointInst &I,
                            I.getNumCallArgs(), ActualCallee,
                            I.getActualReturnType(), retAttrs,
                            /*IsPatchPoint=*/false);
+  // Most Go Closure Calls are GCStatepoint
+  if (I.hasFnAttr("go.closurecall")) {
+    SI.CLI.IsGoClosureCall = true;
+  }
 
   // There may be duplication in the gc.relocate list; such as two copies of
   // each relocation on normal and exceptional path for an invoke.  We only

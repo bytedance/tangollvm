@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file defines the interfaces that X86 uses to lower LLVM code into a
@@ -18608,6 +18610,13 @@ SDValue X86TargetLowering::LowerGlobalOrExternal(SDValue Op, SelectionDAG &DAG,
   CodeModel::Model M = DAG.getTarget().getCodeModel();
   auto PtrVT = getPointerTy(DAG.getDataLayout());
   SDValue Result;
+  // TANGOLLVM
+  if (DAG.getMachineFunction().getFunction().getCallingConv() == CallingConv::Go_Internal) {
+    // TODO: by default Go compiles and links everything into a monolithic binary.
+    // No GOT is needed.
+    HasPICReg = false;
+    NeedsLoad = false;
+  }
 
   if (GV) {
     // Create a target global address if this is a global. If possible, fold the
@@ -27305,6 +27314,44 @@ SDValue X86TargetLowering::LowerRETURNADDR(SDValue Op,
                      MachinePointerInfo());
 }
 
+SDValue X86TargetLowering::LowerGO_STACKADDR(SDValue Op,
+                                             SelectionDAG &DAG) const {
+  SDLoc dl(Op);
+  EVT VT = Op.getValueType();
+  const X86RegisterInfo *RegInfo = Subtarget.getRegisterInfo();
+  unsigned StackReg =
+      RegInfo->getPtrSizedStackRegister(DAG.getMachineFunction());
+  SDValue StackAddr = DAG.getCopyFromReg(DAG.getEntryNode(), dl, StackReg, VT);
+  return DAG.getNode(ISD::ADD, dl, VT, StackAddr, Op.getOperand(0));
+}
+
+SDValue X86TargetLowering::LowerGO_DIV128(SDValue Op,
+                                         SelectionDAG &DAG) const {
+  SDLoc dl(Op);
+  EVT VT = Op->getValueType(0);
+  SDValue InFlag = DAG.getCopyToReg(DAG.getEntryNode(), dl, X86::RDX,
+                                    Op.getOperand(0), SDValue()).getValue(1);
+  InFlag = DAG.getCopyToReg(DAG.getEntryNode(), dl, X86::RAX,
+                            Op.getOperand(1), InFlag).getValue(1);
+  InFlag = SDValue(DAG.getMachineNode(X86::DIV64r, dl, MVT::Glue,
+                                      Op.getOperand(2), InFlag), 0);
+  SDValue Result1 = DAG.getCopyFromReg(DAG.getEntryNode(), dl,
+                                       X86::RAX, VT, InFlag);
+  InFlag = Result1.getValue(2);
+  SDValue Result2 = DAG.getCopyFromReg(DAG.getEntryNode(), dl,
+                                       X86::RDX, VT, InFlag);
+  return DAG.getMergeValues({Result1, Result2}, dl);
+}
+
+SDValue X86TargetLowering::LowerGO_AVG64U(SDValue Op,
+                                          SelectionDAG &DAG) const {
+  SDLoc dl(Op);
+  EVT VT = Op.getValueType();
+  SDValue add = DAG.getNode(ISD::ADD, dl, VT, Op.getOperand(0), Op.getOperand(1));
+  return SDValue(DAG.getMachineNode(X86::RCR64ri, dl, VT, add,
+                                    DAG.getTargetConstant(1, dl, MVT::i64)), 0);
+}
+
 SDValue X86TargetLowering::LowerADDROFRETURNADDR(SDValue Op,
                                                  SelectionDAG &DAG) const {
   DAG.getMachineFunction().getFrameInfo().setReturnAddressIsTaken(true);
@@ -27363,6 +27410,12 @@ Register X86TargetLowering::getRegisterByName(const char* RegName, LLT VT,
                      .Case("r14", X86::R14)
                      .Case("r15", X86::R15)
                      .Default(0);
+
+  // TANGOLLVM: RDX carries the closure context for Go ABIInternal calls.
+  // Keep it unavailable to non-Go functions because it is allocatable there.
+  if (!Reg && StringRef(RegName) == "rdx" &&
+      TangoLLVM::isGoABIInternal(MF.getFunction()))
+    Reg = X86::RDX;
 
   if (Reg == X86::EBP || Reg == X86::RBP) {
     if (!TFI.hasFP(MF))
@@ -32350,7 +32403,9 @@ SDValue X86TargetLowering::visitMaskedStore(SelectionDAG &DAG, const SDLoc &DL,
 SDValue X86TargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const {
   switch (Op.getOpcode()) {
   // clang-format off
-  default: llvm_unreachable("Should not custom lower this!");
+  default: 
+    Op.dump();
+    llvm_unreachable("Should not custom lower this!");
   case ISD::ATOMIC_FENCE:       return LowerATOMIC_FENCE(Op, Subtarget, DAG);
   case ISD::ATOMIC_CMP_SWAP_WITH_SUCCESS:
     return LowerCMP_SWAP(Op, Subtarget, DAG);
@@ -32435,6 +32490,9 @@ SDValue X86TargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const {
   case ISD::RETURNADDR:         return LowerRETURNADDR(Op, DAG);
   case ISD::ADDROFRETURNADDR:   return LowerADDROFRETURNADDR(Op, DAG);
   case ISD::FRAMEADDR:          return LowerFRAMEADDR(Op, DAG);
+  case ISD::GO_STACKADDR:       return LowerGO_STACKADDR(Op, DAG);
+  case ISD::GO_DIV128:          return LowerGO_DIV128(Op, DAG);
+  case ISD::GO_AVG64U:          return LowerGO_AVG64U(Op, DAG);
   case ISD::FRAME_TO_ARGS_OFFSET:
                                 return LowerFRAME_TO_ARGS_OFFSET(Op, DAG);
   case ISD::DYNAMIC_STACKALLOC: return LowerDYNAMIC_STACKALLOC(Op, DAG);

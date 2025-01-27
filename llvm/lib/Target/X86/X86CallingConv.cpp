@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file contains the implementation of custom routines for the X86
@@ -339,6 +341,71 @@ static bool CC_X86_64_Pointer(unsigned &ValNo, MVT &ValVT, MVT &LocVT,
     LocInfo = CCValAssign::ZExt;
   }
   return false;
+}
+
+static bool CC_Go(unsigned &ValNo, MVT &ValVT, MVT &LocVT,
+                  CCValAssign::LocInfo &LocInfo,
+                  ISD::ArgFlagsTy &ArgFlags, CCState &State) {
+  if (!static_cast<const X86Subtarget&>(State.getMachineFunction().getSubtarget()).is64Bit()) {
+    llvm_unreachable("CC_Go is not supported for 32-bit target");
+  }
+  CallingConv::ID CC = State.getCallingConv();
+  if (CC != CallingConv::Go_Internal) {
+    llvm_unreachable("All incoming/out-coming parameters should be handled by intrinsics");
+  }
+  if (LocVT == MVT::i8) {
+    static const MCPhysReg RegList1[] = {X86::AL, X86::BL, X86::CL,
+                                         X86::DIL, X86::SIL, X86::R8B,
+                                         X86::R9B,  X86::R10B, X86::R11B};
+    if (unsigned Reg = State.AllocateReg(RegList1)) {
+      State.addLoc(CCValAssign::getReg(ValNo, ValVT, Reg, LocVT, LocInfo));
+      return true;
+    }
+    llvm_unreachable("Unable to allocate register");
+  }
+  if (LocVT == MVT::i16) {
+    static const MCPhysReg RegList2[] = {X86::AX, X86::BX, X86::CX,
+                                         X86::DI, X86::SI, X86::R8W,
+                                         X86::R9W,  X86::R10W, X86::R11W};
+    if (unsigned Reg = State.AllocateReg(RegList2)) {
+      State.addLoc(CCValAssign::getReg(ValNo, ValVT, Reg, LocVT, LocInfo));
+      return true;
+    }
+    llvm_unreachable("Unable to allocate register");
+  }
+  if (LocVT == MVT::i32) {
+    static const MCPhysReg RegList3[] = {X86::EAX, X86::EBX, X86::ECX,
+                                         X86::EDI, X86::ESI, X86::R8D,
+                                         X86::R9D,  X86::R10D, X86::R11D};
+    if (unsigned Reg = State.AllocateReg(RegList3)) {
+      State.addLoc(CCValAssign::getReg(ValNo, ValVT, Reg, LocVT, LocInfo));
+      return true;
+    }
+    llvm_unreachable("Unable to allocate register");
+  }
+  if (LocVT == MVT::i64) {
+    static const MCPhysReg RegList4[] = {X86::RAX, X86::RBX, X86::RCX,
+                                         X86::RDI, X86::RSI, X86::R8,
+                                         X86::R9,  X86::R10, X86::R11};
+    if (unsigned Reg = State.AllocateReg(RegList4)) {
+      State.addLoc(CCValAssign::getReg(ValNo, ValVT, Reg, LocVT, LocInfo));
+      return true;
+    }
+    llvm_unreachable("Unable to allocate register");
+  }
+  if (LocVT == MVT::f32 || LocVT == MVT::f64) {
+    static const MCPhysReg RegList5[] = { X86::XMM0, X86::XMM1, X86::XMM2,
+                                          X86::XMM3, X86::XMM4, X86::XMM5,
+                                          X86::XMM6, X86::XMM7, X86::XMM8,
+                                          X86::XMM9, X86::XMM10, X86::XMM11,
+                                          X86::XMM12, X86::XMM13, X86::XMM14};
+    if (unsigned Reg = State.AllocateReg(RegList5)) {
+      State.addLoc(CCValAssign::getReg(ValNo, ValVT, Reg, LocVT, LocInfo));
+      return true;
+    }
+    llvm_unreachable("Unable to allocate register");
+  }
+  llvm_unreachable("Unhandled incoming value type");
 }
 
 // Provides entry points of CC_X86 and RetCC_X86.

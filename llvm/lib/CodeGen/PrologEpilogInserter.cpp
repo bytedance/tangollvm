@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This pass is responsible for finalizing the functions frame layout, saving
@@ -859,6 +861,8 @@ void PEI::calculateFrameObjectOffsets(MachineFunction &MF) {
   assert(LocalAreaOffset >= 0
          && "Local area offset should be in direction of stack growth");
   int64_t Offset = LocalAreaOffset;
+  // Skew to be applied to alignment.
+  // unsigned Skew = TFI.getStackAlignmentSkew(MF);
 
 #ifdef EXPENSIVE_CHECKS
   for (unsigned i = 0, e = MFI.getObjectIndexEnd(); i != e; ++i)
@@ -918,6 +922,31 @@ void PEI::calculateFrameObjectOffsets(MachineFunction &MF) {
   // FixedCSEnd is the stack offset to the end of the fixed and callee-save
   // stack area.
   int64_t FixedCSEnd = Offset;
+  // TANGOLLVM
+  // FixedCSEnd is the stack offset to the end of the fixed and callee-save
+  // stack area.
+  if (MF.getFunction().getCallingConv() == CallingConv::Go_Internal) {
+    // this is a special Go function.
+    if (auto n = MF.getFunction().getMetadata("go.local.variable.area")) {
+      assert(n->getNumOperands() == 2 && "must have at least two operands");
+      int64_t LocalVariableArea = dyn_cast<ConstantAsMetadata>(n->getOperand(0))
+                                      ->getValue()
+                                      ->getUniqueInteger()
+                                      .getSExtValue();
+      Offset += LocalVariableArea; // this is the go local variable area when having opendefer.
+      Align StackAlign = TFI.getStackAlign();
+      Align MaxAlign = MFI.getMaxAlign();
+      StackAlign = std::max(StackAlign, MaxAlign);
+      int64_t OffsetBeforeAlignment = Offset;
+      Offset = alignTo(Offset, StackAlign);
+      if (Offset != OffsetBeforeAlignment) {
+        LLVM_DEBUG(llvm::dbgs() << "Adjusting offset " << Offset << " from "
+                                << OffsetBeforeAlignment
+                                << " for Go's MaxCallFrameSize ("
+                                << LocalVariableArea << ")";);
+      }
+    }
+  }
 
   // Make sure the special register scavenging spill slot is closest to the
   // incoming stack pointer if a frame pointer is required and is closer
@@ -1147,6 +1176,29 @@ void PEI::calculateFrameObjectOffsets(MachineFunction &MF) {
     }
   }
 
+  // TANGOLLVM
+  if (MF.getFunction().getCallingConv() == CallingConv::Go_Internal) {
+    // this is a special Go function.
+    if (auto n = MF.getFunction().getMetadata("go.callee.args.area")) {
+      assert(n->getNumOperands() == 2 && "must have at least two operands");
+      int64_t CalleeArgAreaSize = dyn_cast<ConstantAsMetadata>(n->getOperand(0))
+                                      ->getValue()
+                                      ->getUniqueInteger()
+                                      .getSExtValue();
+      Offset += CalleeArgAreaSize; // the is the Go version of MaxCallFrameSize
+      Align StackAlign = TFI.getStackAlign();
+      StackAlign = std::max(StackAlign, MaxAlign);
+      int64_t OffsetBeforeAlignment = Offset;
+      Offset = alignTo(Offset, StackAlign, 0);
+      if (Offset != OffsetBeforeAlignment) {
+        LLVM_DEBUG(llvm::dbgs() << "Adjusting offset " << Offset << " from "
+                                << OffsetBeforeAlignment
+                                << " for Go's MaxCallFrameSize ("
+                                << CalleeArgAreaSize << ")";);
+      }
+    }
+  }
+
   // Update frame info to pretend that this is part of the stack...
   int64_t StackSize = Offset - LocalAreaOffset;
   MFI.setStackSize(StackSize);
@@ -1178,6 +1230,19 @@ void PEI::insertPrologEpilogCode(MachineFunction &MF) {
   // for segmented stacks (libgcc is one), will result in allocating stack
   // space in small chunks instead of one large contiguous block.
   if (MF.shouldSplitStack()) {
+    for (MachineBasicBlock *SaveBlock : SaveBlocks)
+      TFI.adjustForSegmentedStacks(MF, *SaveBlock);
+  }
+    // Record that there are split-stack functions, so we will emit a
+    // special section to tell the linker.
+  //   MF.getMMI().setHasSplitStack(true);
+  // } else
+  //   MF.getMMI().setHasNosplitStack(true);
+
+  // TANGOLLVM
+  if (MF.getFunction().getCallingConv() == CallingConv::Go_Internal) {
+    assert(!MF.shouldSplitStack() && "should not use GNU split stack for cconv Go ABIInternal");
+    assert(SaveBlocks.size() == 1 && "must be a single entry");
     for (MachineBasicBlock *SaveBlock : SaveBlocks)
       TFI.adjustForSegmentedStacks(MF, *SaveBlock);
   }
@@ -1516,6 +1581,9 @@ void PEI::replaceFrameIndices(MachineBasicBlock *BB, MachineFunction &MF,
   const TargetFrameLowering *TFI = MF.getSubtarget().getFrameLowering();
 
   bool InsideCallSequence = false;
+  // TANGOLLVM
+  bool replaceFP = MF.getFunction().getCallingConv() == CallingConv::Go_Internal;
+  int preSPAdj = SPAdj; // SPAdj may be updated after eliminating frame index.
 
   for (MachineBasicBlock::iterator I = BB->begin(); I != BB->end(); ) {
     if (TII.isFrameInstr(*I)) {
@@ -1559,6 +1627,9 @@ void PEI::replaceFrameIndices(MachineBasicBlock *BB, MachineFunction &MF,
       DidFinishLoop = false;
       break;
     }
+
+    // TANGOLLVM
+    if (replaceFP) TRI.replaceFramePtrWithStackPtr(MF, MI, preSPAdj);
 
     // If we are looking at a call sequence, we need to keep track of
     // the SP adjustment made by each instruction in the sequence.

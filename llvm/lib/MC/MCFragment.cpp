@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 
 #include "llvm/MC/MCFragment.h"
@@ -55,6 +57,9 @@ void MCFragment::destroy() {
     case FT_Dwarf:
       cast<MCDwarfLineAddrFragment>(this)->~MCDwarfLineAddrFragment();
       return;
+    case FT_GoPCData:
+      delete cast<MCGoPCDataFragment>(this);
+      return;      
     case FT_DwarfFrame:
       cast<MCDwarfCallFrameFragment>(this)->~MCDwarfCallFrameFragment();
       return;
@@ -116,6 +121,7 @@ LLVM_DUMP_METHOD void MCFragment::dump() const {
   case MCFragment::FT_Relaxable:  OS << "MCRelaxableFragment"; break;
   case MCFragment::FT_Org:   OS << "MCOrgFragment"; break;
   case MCFragment::FT_Dwarf: OS << "MCDwarfFragment"; break;
+  case MCFragment::FT_GoPCData: OS << "MCGoPCDataFragment"; break;
   case MCFragment::FT_DwarfFrame: OS << "MCDwarfCallFrameFragment"; break;
   case MCFragment::FT_LEB:   OS << "MCLEBFragment"; break;
   case MCFragment::FT_BoundaryAlign: OS<<"MCBoundaryAlignFragment"; break;
@@ -216,6 +222,13 @@ LLVM_DUMP_METHOD void MCFragment::dump() const {
        << " LineDelta:" << OF->getLineDelta();
     break;
   }
+  case MCFragment::FT_GoPCData:  {
+    const auto *OF = cast<MCGoPCDataFragment>(this);
+    OS << "\n       ";
+    OS << " AddrDelta:" << OF->getAddrDelta()
+       << " ValueDelta:" << OF->getValueDelta();
+    break;
+  }  
   case MCFragment::FT_DwarfFrame:  {
     const auto *CF = cast<MCDwarfCallFrameFragment>(this);
     OS << "\n       ";

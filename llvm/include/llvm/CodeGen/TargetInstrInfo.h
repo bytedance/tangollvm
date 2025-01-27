@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file describes the target machine instruction set to the code generator.
@@ -266,6 +268,16 @@ public:
     return false;
   }
 
+  /// If the specified machine instruction is a direct
+  /// load address from a stack slot, return the virtual or physical register
+  /// number of the destination along with the FrameIndex of the loaded stack slot.
+  /// If not, return 0.  This predicate must return 0 if the instruction has
+  /// any side effects other than loading the address from the stack slot.
+  virtual unsigned isLoadStackSlotAddress(const MachineInstr &MI,
+                                       int &FrameIndex) const {
+    return 0;
+  }
+  
   /// If the specified machine instruction is a direct
   /// load from a stack slot, return the virtual or physical register number of
   /// the destination along with the FrameIndex of the loaded stack slot.  If

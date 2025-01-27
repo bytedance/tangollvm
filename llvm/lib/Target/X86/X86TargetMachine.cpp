@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file defines the X86 specific subclass of TargetMachine.
@@ -63,7 +65,7 @@ static cl::opt<bool> EnableMachineCombinerPass("x86-machine-combiner",
 static cl::opt<bool>
     EnableTileRAPass("x86-tile-ra",
                      cl::desc("Enable the tile register allocation pass"),
-                     cl::init(true), cl::Hidden);
+                     cl::init(false), cl::Hidden);
 
 extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeX86Target() {
   // Register the target.
@@ -167,6 +169,11 @@ static std::string computeDataLayout(const Triple &TT) {
     Ret += "-a:0:32-S32";
   else
     Ret += "-S128";
+
+  if (TT.isGoEnvironment()) {
+    Ret += "-v128:64:64";
+    Ret += "-z1";
+  }
 
   return Ret;
 }
@@ -548,6 +555,9 @@ bool X86PassConfig::addPreISel() {
 }
 
 void X86PassConfig::addPreRegAlloc() {
+   // TANGOLLVM Add pass for Go fixup
+  addPass(createX86GoFixupPreRegAlloc());
+ 
   if (getOptLevel() != CodeGenOptLevel::None) {
     addPass(&LiveRangeShrinkID);
     addPass(createX86WinFixupBufferSecurityCheckPass());
@@ -581,6 +591,8 @@ void X86PassConfig::addPostRegAlloc() {
   // analyses needed by the LVIHardening pass when compiling at -O0.
   if (getOptLevel() != CodeGenOptLevel::None)
     addPass(createX86LoadValueInjectionLoadHardeningPass());
+  // TANGOLLVM.
+  addPass(createX86GoFixupPostRegAlloc());
 }
 
 void X86PassConfig::addPreSched2() {

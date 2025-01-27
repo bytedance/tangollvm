@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 
 #ifndef LLVM_MC_MCFRAGMENT_H
@@ -51,6 +53,8 @@ public:
     FT_CVInlineLines,
     FT_CVDefRange,
     FT_PseudoProbe,
+    // TANGOLLVM
+    FT_GoPCData,
     FT_Dummy
   };
 
@@ -140,6 +144,8 @@ public:
     case MCFragment::FT_Data:
     case MCFragment::FT_Dwarf:
     case MCFragment::FT_DwarfFrame:
+    // TANGOLLVM
+    case MCFragment::FT_GoPCData:
     case MCFragment::FT_PseudoProbe:
       return true;
     }
@@ -222,7 +228,8 @@ public:
     MCFragment::FragmentType Kind = F->getKind();
     return Kind == MCFragment::FT_Relaxable || Kind == MCFragment::FT_Data ||
            Kind == MCFragment::FT_CVDefRange || Kind == MCFragment::FT_Dwarf ||
-           Kind == MCFragment::FT_DwarfFrame;
+           // TANGOLLVM.
+           Kind == MCFragment::FT_DwarfFrame || Kind == MCFragment::FT_GoPCData;
   }
 };
 
@@ -610,6 +617,22 @@ public:
 
   static bool classof(const MCFragment *F) {
     return F->getKind() == MCFragment::FT_PseudoProbe;
+  }
+};
+
+// TANGOLLVM
+class MCGoPCDataFragment : public MCEncodedFragmentWithFixups<8, 1> {
+  int64_t ValueDelta;
+  const MCExpr *AddrDelta;
+public:
+  MCGoPCDataFragment(int64_t ValueDelta, const MCExpr &AddrDelta,
+                          MCSection *Sec = nullptr)
+      : MCEncodedFragmentWithFixups<8, 1>(FT_GoPCData, false),
+        ValueDelta(ValueDelta), AddrDelta(&AddrDelta) {}
+  int64_t getValueDelta() const { return ValueDelta; }
+  const MCExpr *getAddrDelta() const { return AddrDelta; }
+  static bool classof(const MCFragment *F) {
+    return F->getKind() == MCFragment::FT_GoPCData;
   }
 };
 } // end namespace llvm

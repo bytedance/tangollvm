@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 
 #include "llvm/MC/MCObjectStreamer.h"
@@ -20,6 +22,7 @@
 #include "llvm/MC/MCSection.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/MCValue.h"
+#include "llvm/Support/EndianStream.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/SourceMgr.h"
 using namespace llvm;
@@ -823,4 +826,88 @@ void MCObjectStreamer::finishImpl() {
 
   resolvePendingFixups();
   getAssembler().Finish();
+}
+
+// Almost the same as emitBytes
+// Let caller to do the encoding
+void MCObjectStreamer::emitGoBytes(StringRef Data) {
+  MCDataFragment *DF = getOrCreateDataFragment();
+  // flushPendingLabels(DF, DF->getContents().size());
+  DF->getContents().append(Data.begin(), Data.end());
+}
+
+
+void MCObjectStreamer::emitGoStackObjects(ArrayRef<MCGoStackObjectRecord> StackObjects) {
+  MCDataFragment *DF = getOrCreateDataFragment();
+  SmallVectorImpl<char> &Data = DF->getContents();
+  size_t Offset = Data.size();
+  raw_svector_ostream OSE(Data);
+
+  support::endian::write(OSE, uint64_t(StackObjects.size()), endianness::little);
+  Offset += 8;
+
+  for (auto &R : StackObjects) {
+    support::endian::write(OSE, uint32_t(R.FrameOffset), endianness::little);
+    support::endian::write(OSE, uint32_t(R.ObjectSize), endianness::little);
+    support::endian::write(OSE, uint32_t(R.PtrData), endianness::little);
+
+    Offset += 4 + 4 + 4;
+    visitUsedSymbol(R.GCData->getSymbol());
+    DF->getFixups().push_back(MCFixup::create(Offset, R.GCData, MCFixup::getKindForSize(4, false)));
+    support::endian::write(OSE, uint32_t(0), endianness::little);
+    Offset += 4;
+  }
+}
+
+void MCObjectStreamer::emitGoFuncInfo(MCGoFuncInfo &FuncInfo) {
+  MCDataFragment *DF = getOrCreateDataFragment();
+  SmallVectorImpl<char> &Data = DF->getContents();
+  size_t Offset = Data.size();
+  raw_svector_ostream OSE(Data);
+
+  support::endian::write(OSE, uint32_t(FuncInfo.Args), endianness::little);
+  support::endian::write(OSE, uint32_t(FuncInfo.Locals), endianness::little);
+  support::endian::write(OSE, uint8_t(FuncInfo.FuncID), endianness::little);
+  support::endian::write(OSE, uint8_t(FuncInfo.FuncFlag), endianness::little);
+  support::endian::write(OSE, uint8_t(0), endianness::little);
+  support::endian::write(OSE, uint8_t(0), endianness::little);
+
+  Offset += 4 + 4 + 1 + 1 + 1 + 1;
+
+  support::endian::write(OSE, uint32_t(FuncInfo.File.size()), endianness::little);
+  Offset += 4;
+  for (uint32_t F : FuncInfo.File) {
+    support::endian::write(OSE, uint32_t(F), endianness::little);
+    Offset += 4;
+  }
+
+  support::endian::write(OSE, uint32_t(FuncInfo.InlTree.size()), endianness::little);
+  Offset += 4;
+  for (auto &N : FuncInfo.InlTree) {
+    support::endian::write(OSE, uint32_t(N->Parent), endianness::little);
+    support::endian::write(OSE, uint32_t(N->File), endianness::little);
+    support::endian::write(OSE, uint32_t(N->Line), endianness::little);
+    Offset += 4 + 4 + 4;
+
+    visitUsedSymbol(N->Func->getSymbol());
+    DF->getFixups().push_back(MCFixup::create(Offset, N->Func, MCFixup::getKindForSize(4, false)));
+    support::endian::write(OSE, uint32_t(0), endianness::little);
+    support::endian::write(OSE, uint32_t(0), endianness::little);
+    Offset += 8;
+
+    if (N->ParentPC != nullptr) {
+      // see MCGoAuxData.cpp
+      // nullptr is constant 0
+      DF->getFixups().push_back(MCFixup::create(Offset, N->ParentPC, MCFixup::getKindForSize(4, false)));
+    }
+    support::endian::write(OSE, uint32_t(0), endianness::little);
+    Offset += 4;
+  }
+
+  assert(Offset == Data.size() && "invariant");
+}
+
+void MCObjectStreamer::emitGoPCDataEntry(int64_t ValueDelta, const MCExpr *AddrDelta) {
+  // caller should do the right section switch
+  insert(new MCGoPCDataFragment(ValueDelta, *AddrDelta));
 }

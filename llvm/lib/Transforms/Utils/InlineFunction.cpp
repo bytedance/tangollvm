@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file implements inlining of a function into a call site, resolving
@@ -108,6 +110,11 @@ static cl::opt<unsigned> InlinerAttributeWindow(
     cl::desc("the maximum number of instructions analyzed for may throw during "
              "attribute inference in inlined body"),
     cl::init(4));
+
+// TANGOLLVM
+static cl::opt<bool> InsertGoInlMark(
+        "insert-go-inlmark", cl::init(true), cl::Hidden,
+            cl::desc("Insert a nop instruction as the inline mark"));
 
 namespace {
 
@@ -2449,6 +2456,27 @@ llvm::InlineResult llvm::InlineFunction(CallBase &CB, InlineFunctionInfo &IFI,
     // instructions inlined from a function whose DISubprogram is not null.
     fixupLineNumbers(Caller, FirstNewBlock, &CB,
                      CalledFunc->getSubprogram() != nullptr);
+    // TANGOLLVM
+    if (InsertGoInlMark && Caller->getCallingConv() == CallingConv::Go_Internal) {
+      // Insert InlMark
+      Instruction *Pos = FirstNewBlock->getFirstNonPHIOrDbg();
+      DebugLoc DL = CB.getDebugLoc();
+      Type *VoidTy = Type::getVoidTy(Caller->getContext());
+      FunctionType *FT = FunctionType::get(VoidTy, {}, false);
+      InlineAsm * Nop = InlineAsm::get(FT, "nop", "", false);
+      CallInst *Call = CallInst::Create(Nop);
+      Call->setDebugLoc(DL);
+      Call->insertBefore(Pos);
+      // if (IFI.CG) {
+      //   // We need to update CallGraph manually here.
+      //   // Note that UpdateCallGraphAfterInlining only handles existing
+      //   // instructions.
+      //   CallGraph &CG = *CG;
+      //   CallGraphNode *CalleeNode = CG.getCallsExternalNode();
+      //   CallGraphNode *CallerNode = CG[Caller];
+      //   CallerNode->addCalledFunction(Call, CalleeNode);
+      // }
+    }
 
     if (isAssignmentTrackingEnabled(*Caller->getParent())) {
       // Interpret inlined stores to caller-local variables as assignments.

@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file defines interfaces to access the target independent code generation
@@ -177,6 +179,9 @@ namespace llvm {
   extern char &VirtRegRewriterID;
   FunctionPass *createVirtRegRewriter(bool ClearVirtRegs = true);
 
+  extern char &GoFixupPreRegAllocID;
+  FunctionPass *createGoFixupPreRegAllocPass();
+
   /// UnreachableMachineBlockElimination - This pass removes unreachable
   /// machine basic blocks.
   extern char &UnreachableMachineBlockElimID;
@@ -328,6 +333,9 @@ namespace llvm {
   /// prior to output, and importantly after all CFG transformations (such as
   /// branch folding).
   extern char &GCMachineCodeAnalysisID;
+
+  /// Creates a pass to build GCStatepoint
+  ModulePass *createGoStatepointsLegacyPass();
 
   /// MachineCSE - This pass performs global CSE on machine instructions.
   extern char &MachineCSEID;

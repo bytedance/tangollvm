@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 
 #ifndef LLVM_MC_MCASSEMBLER_H
@@ -122,6 +124,8 @@ private:
   bool relaxLEB(MCLEBFragment &IF);
   bool relaxBoundaryAlign(MCBoundaryAlignFragment &BF);
   bool relaxDwarfLineAddr(MCDwarfLineAddrFragment &DF);
+  // TANGOLLVM
+  bool relaxGoPCData(MCGoPCDataFragment &DF);
   bool relaxDwarfCallFrameFragment(MCDwarfCallFrameFragment &DF);
   bool relaxCVInlineLineTable(MCCVInlineLineTableFragment &DF);
   bool relaxCVDefRange(MCCVDefRangeFragment &DF);

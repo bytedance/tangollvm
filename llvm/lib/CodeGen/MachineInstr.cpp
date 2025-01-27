@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // Methods common to all machine instructions.
@@ -948,6 +950,17 @@ MachineInstr::getRegClassConstraint(unsigned OpIdx,
   assert(getParent() && "Can't have an MBB reference here!");
   assert(getMF() && "Can't have an MF reference here!");
   const MachineFunction &MF = *getMF();
+
+  // TANGOLLVM
+  if (isCall() && getOpcode() != TargetOpcode::STATEPOINT) {
+    const MachineOperand &MO = getOperand(OpIdx);
+    if (OpIdx != 0 && MO.isReg() && Register::isVirtualRegister(MO.getReg())) {
+      const MachineOperand &Callee = getOperand(0);
+      if (Callee.isGlobal() && Callee.getGlobal()->getName() == "runtime.gcWriteBarrier") {
+        return MF.getRegInfo().getRegClass(MO.getReg());
+      }
+    }
+  }
 
   // Most opcodes have fixed constraints in their MCInstrDesc.
   if (!isInlineAsm())

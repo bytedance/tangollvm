@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This describes the calling conventions for the X86-32 and X86-64
@@ -518,6 +520,9 @@ def RetCC_X86_64 : CallingConv<[
 // This is the return-value convention used for the entire X86 backend.
 let Entry = 1 in
 def RetCC_X86 : CallingConv<[
+  // TangoLLVM Handle go returns.
+  CCIfCC<"CallingConv::Go_0", CCCustom<"CC_Go">>,
+  CCIfCC<"CallingConv::Go_Internal", CCCustom<"CC_Go">>,
 
   // Check if this is the Intel OpenCL built-ins calling convention
   CCIfCC<"CallingConv::Intel_OCL_BI", CCDelegateTo<RetCC_Intel_OCL_BI>>,
@@ -1127,6 +1132,10 @@ def CC_X86_64 : CallingConv<[
 // This is the argument convention used for the entire X86 backend.
 let Entry = 1 in
 def CC_X86 : CallingConv<[
+  // TangoLLVM: Handle go calls.
+  CCIfCC<"CallingConv::Go_0", CCCustom<"CC_Go">>,
+  CCIfCC<"CallingConv::Go_Internal", CCCustom<"CC_Go">>,
+  
   CCIfCC<"CallingConv::Intel_OCL_BI", CCDelegateTo<CC_Intel_OCL_BI>>,
   CCIfSubtarget<"is64Bit()", CCDelegateTo<CC_X86_64>>,
   CCDelegateTo<CC_X86_32>

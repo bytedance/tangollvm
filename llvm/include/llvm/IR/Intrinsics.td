@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file defines properties of all LLVM intrinsics.
@@ -1067,6 +1069,13 @@ let IntrProperties = [IntrNoMem, IntrSpeculatable, IntrWillReturn] in {
 
   // TODO: Should constrain all element counts to match
   def int_frexp : DefaultAttrsIntrinsic<[llvm_anyfloat_ty, llvm_anyint_ty], [LLVMMatchType<0>]>;
+
+  // TANGOLLVM
+  def int_go_div128 : DefaultAttrsIntrinsic<[llvm_i64_ty, llvm_i64_ty], [llvm_i64_ty, llvm_i64_ty, llvm_i64_ty]>;
+  def int_go_hmul64 : DefaultAttrsIntrinsic<[llvm_i64_ty], [llvm_i64_ty, llvm_i64_ty]>;
+  def int_go_hmul64u : DefaultAttrsIntrinsic<[llvm_i64_ty], [llvm_i64_ty, llvm_i64_ty]>;
+  def int_go_mul64uhilo : DefaultAttrsIntrinsic<[llvm_i64_ty, llvm_i64_ty], [llvm_i64_ty, llvm_i64_ty]>;
+  def int_go_avg64u : DefaultAttrsIntrinsic<[llvm_i64_ty], [llvm_i64_ty, llvm_i64_ty]>;
 }
 
 def int_minnum : DefaultAttrsIntrinsic<[llvm_anyfloat_ty],
@@ -2732,6 +2741,13 @@ def int_ptrauth_blend :
 // can be computed using @llvm.ptrauth.sign_generic, and compared with icmp.
 def int_ptrauth_sign_generic :
   DefaultAttrsIntrinsic<[llvm_i64_ty], [llvm_i64_ty, llvm_i64_ty], [IntrNoMem]>;
+
+// TANGOLLVM
+def int_go_preallocated : DefaultAttrsIntrinsic<[llvm_anyptr_ty], [llvm_i64_ty, llvm_i64_ty],
+                                 [IntrNoMem, ImmArg<ArgIndex<0>>, ImmArg<ArgIndex<1>>]>;
+
+def int_go_stackaddress : DefaultAttrsIntrinsic<[llvm_anyptr_ty], [llvm_i64_ty],
+                                 [IntrNoMem, ImmArg<ArgIndex<0>>]>;
 
 //===----------------------------------------------------------------------===//
 //===------- Convergence Intrinsics ---------------------------------------===//

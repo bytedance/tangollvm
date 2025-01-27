@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file implements the mechanics required to implement inlining without
@@ -205,6 +207,35 @@ void makeFunctionBodyUnreachable(Function &F) {
   new UnreachableInst(F.getContext(), BB);
 }
 
+// TANGOLLVM
+static int64_t getArgAreaSize(Function *F) {
+  if (auto n = F->getMetadata("go.callee.args.area")) {
+    assert(n->getNumOperands() == 2 && "must have at least two operands");
+    int64_t argAreaSize = dyn_cast<ConstantAsMetadata>(n->getOperand(0))
+                              ->getValue()
+                              ->getUniqueInteger()
+                              .getSExtValue();
+    return argAreaSize;
+  }
+  return 0;
+}
+// update go.callee.args.area metadata when inlining
+static void updateGoCalleeArgsArea(Function *Callee, Function *Caller) {
+  int64_t CalleeArgAreaSize = getArgAreaSize(Callee);
+  int64_t CallerArgAreaSize = getArgAreaSize(Caller);
+  // no need to update if the caller has enough arg area
+  if (CallerArgAreaSize >= CalleeArgAreaSize)
+    return;
+  // Caller's go.callee.args.area is too small, update
+  auto newSize = ConstantAsMetadata::get(ConstantInt::get(
+      Type::getInt64Ty(Caller->getContext()), CalleeArgAreaSize));
+  auto newType =
+      ConstantAsMetadata::get(ConstantAggregateZero::get(ArrayType::get(
+          Type::getInt8Ty(Caller->getContext()), CalleeArgAreaSize)));
+  Caller->setMetadata("go.callee.args.area",
+                      MDNode::get(Caller->getContext(), {newSize, newType}));
+}
+
 PreservedAnalyses InlinerPass::run(LazyCallGraph::SCC &InitialC,
                                    CGSCCAnalysisManager &AM, LazyCallGraph &CG,
                                    CGSCCUpdateResult &UR) {
@@ -377,6 +408,7 @@ PreservedAnalyses InlinerPass::run(LazyCallGraph::SCC &InitialC,
               *CB, InlineConstants::FunctionInlineCostMultiplierAttributeName)
               .value_or(1);
 
+      Function *Caller = CB->getCaller();
       // Setup the data structure used to plumb customization into the
       // `InlineFunction` routine.
       InlineFunctionInfo IFI(
@@ -395,6 +427,8 @@ PreservedAnalyses InlinerPass::run(LazyCallGraph::SCC &InitialC,
       DidInline = true;
       InlinedCallees.insert(&Callee);
       ++NumInlined;
+      // TANGOLLVM
+      updateGoCalleeArgsArea(&Callee, Caller);
 
       LLVM_DEBUG(dbgs() << "    Size after inlining: "
                         << F.getInstructionCount() << "\n");

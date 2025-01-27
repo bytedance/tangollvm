@@ -136,7 +136,7 @@ Migration Instructions
 
 In order to support opaque pointers, two types of changes tend to be necessary.
 The first is the removal of all calls to ``PointerType::getElementType()`` and
-``Type::getPointerElementType()``.
+``Type::getElementType()``.
 
 In the LLVM middle-end and backend, this is usually accomplished by inspecting
 the type of relevant operations instead. For example, memory access related

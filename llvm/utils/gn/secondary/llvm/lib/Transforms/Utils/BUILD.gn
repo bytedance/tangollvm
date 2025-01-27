@@ -37,6 +37,7 @@ static_library("Utils") {
     "FlattenCFG.cpp",
     "FunctionComparator.cpp",
     "FunctionImportUtils.cpp",
+    "GoStatepoints.cpp",
     "GlobalStatus.cpp",
     "GuardUtils.cpp",
     "HelloWorld.cpp",

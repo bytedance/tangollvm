@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This pass performs various transformations related to eliminating memcpy
@@ -451,6 +453,17 @@ Instruction *MemCpyOptPass::tryMergingIntoMemset(Instruction *StartInst,
   if (Ranges.empty())
     return nullptr;
 
+  // TANGOLLVM: Only memclr is available in Golang.
+  if (StartInst->getFunction()->getCallingConv() == CallingConv::Go_Internal) {
+    if (auto *C = dyn_cast<Constant>(ByteVal)) {
+      if (!C->isZeroValue()) {
+        return nullptr;
+      }
+    } else {
+      return nullptr;
+    }
+  }
+
   // If we had at least one store that could be merged in, add the starting
   // store as well.  We try to avoid this unless there is at least something
   // interesting as a small compile-time optimization.
@@ -798,6 +811,17 @@ bool MemCpyOptPass::processStore(StoreInst *SI, BasicBlock::iterator &BBI) {
   // 0xA0A0A0A0 and 0.0.
   auto *V = SI->getOperand(0);
   if (Value *ByteVal = isBytewiseValue(V, DL)) {
+    // TANGOLLVM: Only memclr is available in Golang.
+    if (SI->getFunction()->getCallingConv() == CallingConv::Go_Internal) {
+      if (auto *C = dyn_cast<Constant>(ByteVal)) {
+        if (!C->isZeroValue()) {
+          return false;
+        }
+      } else {
+        return false;
+      }
+    }
+
     if (Instruction *I =
             tryMergingIntoMemset(SI, SI->getPointerOperand(), ByteVal)) {
       BBI = I->getIterator(); // Don't invalidate iterator.
@@ -1332,6 +1356,17 @@ bool MemCpyOptPass::processMemSetMemCpyDependence(MemCpyInst *MemCpy,
     return true;
   }
 
+  // TANGOLLVM: Only memclr is available in Golang.
+  if (MemSet->getFunction()->getCallingConv() == CallingConv::Go_Internal) {
+    if (auto *C = dyn_cast<Constant>(MemSet->getValue())) {
+      if (!C->isZeroValue()) {
+        return false;
+      }
+    } else {
+      return false;
+    }
+  }
+
   // By default, create an unaligned memset.
   Align Alignment = Align(1);
   // If Dest is aligned, and SrcSize is constant, use the minimum alignment
@@ -1435,6 +1470,17 @@ static bool hasUndefContents(MemorySSA *MSSA, BatchAAResults &AA, Value *V,
 bool MemCpyOptPass::performMemCpyToMemSetOptzn(MemCpyInst *MemCpy,
                                                MemSetInst *MemSet,
                                                BatchAAResults &BAA) {
+  // TANGOLLVM Only memclr is available in Golang.
+  if (MemSet->getFunction()->getCallingConv() == CallingConv::Go_Internal) {
+    if (auto *C = dyn_cast<Constant>(MemSet->getValue())) {
+      if (!C->isZeroValue()) {
+        return false;
+      }
+    } else {
+      return false;
+    }
+  }
+
   // Make sure that memcpy(..., memset(...), ...), that is we are memsetting and
   // memcpying from the same address. Otherwise it is hard to reason about.
   if (!BAA.isMustAlias(MemSet->getRawDest(), MemCpy->getRawSource()))
@@ -1751,6 +1797,17 @@ bool MemCpyOptPass::processMemCpy(MemCpyInst *M, BasicBlock::iterator &BBI) {
     if (GV->isConstant() && GV->hasDefinitiveInitializer())
       if (Value *ByteVal = isBytewiseValue(GV->getInitializer(),
                                            M->getDataLayout())) {
+        // TANGOLLVM Only memclr is available in Golang.
+        if (M->getFunction()->getCallingConv() == CallingConv::Go_Internal) {
+          if (auto *C = dyn_cast<Constant>(ByteVal)) {
+            if (!C->isZeroValue()) {
+              return false;
+            }
+          } else {
+            return false;
+          }
+        }
+
         IRBuilder<> Builder(M);
         Instruction *NewM = Builder.CreateMemSet(
             M->getRawDest(), ByteVal, M->getLength(), M->getDestAlign(), false);

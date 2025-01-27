@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file contains the X86 implementation of the TargetRegisterInfo class.
@@ -112,6 +114,9 @@ public:
   // normal calls, so they need a different mask to represent this.
   const uint32_t *getDarwinTLSCallPreservedMask() const;
 
+  // TANGOLLVM
+  const uint32_t *getGoWriteBarrierPreservedMask() const;
+
   /// getReservedRegs - Returns a bitset indexed by physical register number
   /// indicating if a register is a special register that has particular uses and
   /// should be considered unavailable at all times, e.g. SP, RA. This is used by
@@ -135,6 +140,9 @@ public:
   bool hasBasePointer(const MachineFunction &MF) const;
 
   bool canRealignStack(const MachineFunction &MF) const override;
+
+  // TANGOLLVM (tanxiaogu)
+  void replaceFramePtrWithStackPtr(const MachineFunction &MF, MachineInstr &MI, int SPAdj) const override;
 
   bool shouldRealignStack(const MachineFunction &MF) const override;
 

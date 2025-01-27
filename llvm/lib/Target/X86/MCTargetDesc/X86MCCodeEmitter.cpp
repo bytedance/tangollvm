@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file implements the X86MCCodeEmitter class.
@@ -1436,9 +1438,11 @@ PrefixKind X86MCCodeEmitter::emitREXPrefix(int MemOperand, const MCInst &MI,
   }
   Prefix.setM((TSFlags & X86II::OpMapMask) == X86II::TB);
   PrefixKind Kind = Prefix.determineOptimalKind();
-  if (Kind && UsesHighByteReg)
+  if (Kind && UsesHighByteReg) {
+    dbgs() << "TSFlags: " << (TSFlags & X86II::FormMask) << "\n";
     report_fatal_error(
         "Cannot encode high byte register in REX-prefixed instruction");
+  }
   Prefix.emit(CB);
   return Kind;
 }

@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This implements routines for translating from LLVM IR into SelectionDAG IR.
@@ -6419,6 +6421,44 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
              DAG.getNode(ISD::ADDROFRETURNADDR, sdl,
                          TLI.getValueType(DAG.getDataLayout(), I.getType())));
     return;
+  case Intrinsic::go_stackaddress:
+    setValue(&I, DAG.getNode(ISD::GO_STACKADDR, sdl,
+                             TLI.getPointerTy(DAG.getDataLayout()),
+                             getValue(I.getArgOperand(0))));
+    return;
+  case Intrinsic::go_div128:
+    setValue(&I,DAG.getNode(ISD::GO_DIV128, sdl,
+                            DAG.getVTList(MVT::i64, MVT::i64),
+                            getValue(I.getArgOperand(0)),
+                            getValue(I.getArgOperand(1)),
+                            getValue(I.getArgOperand(2))));
+    return;
+  case Intrinsic::go_hmul64:
+    setValue(&I, DAG.getNode(ISD::MULHS, sdl,
+                             MVT::i64,
+                             getValue(I.getArgOperand(0)),
+                             getValue(I.getArgOperand(1))));
+    return;
+  case Intrinsic::go_hmul64u:
+    setValue(&I, DAG.getNode(ISD::MULHU, sdl,
+                             MVT::i64,
+                             getValue(I.getArgOperand(0)),
+                             getValue(I.getArgOperand(1))));
+    return;
+  case Intrinsic::go_mul64uhilo: {
+    SDValue LoHi = DAG.getNode(ISD::UMUL_LOHI, sdl,
+                               DAG.getVTList(MVT::i64, MVT::i64),
+                               getValue(I.getArgOperand(0)),
+                               getValue(I.getArgOperand(1)));
+    setValue(&I, DAG.getMergeValues({LoHi.getValue(1), LoHi.getValue(0)}, sdl));
+    return;
+  }
+  case Intrinsic::go_avg64u:
+    setValue(&I, DAG.getNode(ISD::GO_AVG64U, sdl,
+                             MVT::i64,
+                             getValue(I.getArgOperand(0)),
+                             getValue(I.getArgOperand(1))));
+    return;    
   case Intrinsic::sponentry:
     setValue(&I,
              DAG.getNode(ISD::SPONENTRY, sdl,
@@ -6618,6 +6658,34 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
     DAG.setRoot(Res.getValue(1));
     return;
   }
+  case Intrinsic::go_preallocated: {
+    auto getOrCreateFixedObject = [&](const CallInst &I) {
+      int64_t Offset = cast<ConstantInt>(I.getArgOperand(0))->getZExtValue();
+      uint64_t  Size = cast<ConstantInt>(I.getArgOperand(1))->getSExtValue();
+      bool Aliased = I.hasMetadata("go.stackobject.gcdata");
+      MachineFunction &MF = DAG.getMachineFunction();
+      MachineFrameInfo &MFI = MF.getFrameInfo();
+      int FI = MFI.getObjectIndexBegin();
+      for (; MFI.isFixedObjectIndex(FI); ++FI) {
+        if (MFI.getObjectOffset(FI) == Offset) {
+          if (MFI.getObjectSize(FI) != Size) {
+            dbgs() << "require: " << Size << ", got: " << MFI.getObjectSize(FI) << "\n";
+            report_fatal_error("mismatched size preallocated objects");
+          }
+          break;
+        }
+      }
+      if (!MFI.isFixedObjectIndex(FI)) {
+        FI = MFI.CreateFixedObject(Size, Offset, false, Aliased);
+      }
+      return FI;
+    };
+    int FI = getOrCreateFixedObject(I);
+    EVT PtrTy = TLI.getFrameIndexTy(DAG.getDataLayout());
+    SDValue FIN = DAG.getFrameIndex(FI, PtrTy);
+    setValue(&I, FIN);
+    return;
+  }  
   case Intrinsic::dbg_declare: {
     const auto &DI = cast<DbgDeclareInst>(I);
     // Debug intrinsics are handled separately in assignment tracking mode.

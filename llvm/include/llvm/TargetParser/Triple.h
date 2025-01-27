@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 
 #ifndef LLVM_TARGETPARSER_TRIPLE_H
@@ -269,6 +271,7 @@ public:
     CoreCLR,
     Simulator, // Simulator variants of other systems, e.g., Apple's iOS
     MacABI,    // Mac Catalyst variant of Apple's iOS deployment target.
+    GoABI, // support go abi in LLVM backend
 
     // Shader Stages
     // The order of these values matters, and must be kept in sync with the
@@ -571,6 +574,10 @@ public:
 
   bool isMacCatalystEnvironment() const {
     return getEnvironment() == Triple::MacABI;
+  }
+
+  bool isGoEnvironment() const {
+    return getEnvironment() == Triple::GoABI;
   }
 
   /// Returns true for targets that run on a macOS machine.

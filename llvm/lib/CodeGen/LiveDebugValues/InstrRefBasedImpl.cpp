@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 /// \file InstrRefBasedImpl.cpp
 ///
@@ -482,7 +484,10 @@ public:
     for (auto Location : MTracker->locations()) {
       LocIdx Idx = Location.Idx;
       ValueIDNum &VNum = MLocs[Idx.asU64()];
-      if (VNum == ValueIDNum::EmptyValue)
+      // Preserve EmptyValue slots for Go so VarLocs remains aligned with
+      // machine locations. Other targets retain the upstream crash guard.
+      if (VNum == ValueIDNum::EmptyValue &&
+          !MBB.getParent()->getTarget().getTargetTriple().isGoEnvironment())
         continue;
       VarLocs.push_back(VNum);
 

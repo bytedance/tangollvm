@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 /// \file
 /// This file implements the targeting of the RegisterBankInfo class for
@@ -629,7 +631,7 @@ bool AArch64RegisterBankInfo::isLoadFromFPType(const MachineInstr &MI) const {
       EltTy = EltTy->getArrayElementType();
   } else {
     // FIXME: grubbing around uses is pretty ugly, but with no more
-    // `getPointerElementType` there's not much else we can do.
+    // `getElementType` there's not much else we can do.
     for (const auto *LdUser : LdVal->users()) {
       if (isa<LoadInst>(LdUser)) {
         EltTy = LdUser->getType();

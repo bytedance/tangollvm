@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file implements the AsmPrinter class.
@@ -612,6 +614,9 @@ bool AsmPrinter::doInitialization(Module &M) {
   // Emit tables for any value of cfguard flag (i.e. cfguard=1 or cfguard=2).
   if (mdconst::extract_or_null<ConstantInt>(M.getModuleFlag("cfguard")))
     Handlers.push_back(std::make_unique<WinCFGuard>(this));
+
+  if (TM.getTargetTriple().isGoEnvironment())
+    Handlers.push_back(std::make_unique<MCGoAuxData>(this));
 
   for (auto &Handler : DebugHandlers)
     Handler->beginModule(&M);
@@ -1920,6 +1925,20 @@ void AsmPrinter::emitFunctionBody() {
     if (Noop.getOpcode()) {
       OutStreamer->AddComment("avoids zero-length function");
       emitNops(1);
+    }
+  }
+
+  // TANGOLLVM
+  if (MF->getFunction().getCallingConv() == CallingConv::Go_Internal) {
+    // if the last instruction is a call, we need to insert a nop at the end
+    if (!MF->empty()) {
+      MachineBasicBlock &MBB = MF->back();
+      if (!MBB.empty()) {
+        MachineInstr &MI = MBB.back();
+        if (MI.isCall()) {
+          emitNops(1); // need a Nop anyway
+        }
+      }
     }
   }
 

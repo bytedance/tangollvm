@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
 //===----------------------------------------------------------------------===//
 //
 // This file describes the X86 Register file, defining the registers themselves,
@@ -592,6 +594,10 @@ def GR64 : RegisterClass<"X86", [i64], 64,
 def GR64PLTSafe : RegisterClass<"X86", [i64], 64,
                               (add RAX, RCX, RDX, RSI, RDI, R8, R9,
                                    RBX, R14, R15, R12, R13, RBP)>;
+
+// TANGOLLVM
+def GR64GoWBSrc : RegisterClass<"X86", [i64], 64,
+                              (add RAX, RCX, RDX, RSI, R8, R9, RBX, RBP)>;
 
 // It includes the GPR that are used as scratch register for Linux64 calling
 // convention.
