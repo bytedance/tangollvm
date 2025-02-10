@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-02-10.
 //===----------------------------------------------------------------------===//
 
 #include "llvm/TargetParser/Triple.h"
@@ -332,6 +334,7 @@ StringRef Triple::getEnvironmentTypeName(EnvironmentType Kind) {
   case Itanium: return "itanium";
   case MSVC: return "msvc";
   case MacABI: return "macabi";
+  case GoABI: return "goabi";
   case Musl: return "musl";
   case MuslEABI: return "musleabi";
   case MuslEABIHF: return "musleabihf";

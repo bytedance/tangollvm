@@ -17,9 +17,7 @@
 
 
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/CodeGen/AsmPrinterHandler.h"
 #include <cassert>
 #include <cstdint>
 #include <string>
@@ -27,8 +25,10 @@
 
 namespace llvm {
 
-class AsmPrinter;
 class MCSymbol;
+class MCSymbolRefExpr;
+class MCExpr;
+class MachineInstr;
 class DILocation;
 
 
@@ -111,146 +111,6 @@ private:
   DILocation* findRealLocation(DILocation *DL);
   const MachineInstr* findInstr(DILocation *DL);
 };
-
-
-
-class MCGoAuxData : public AsmPrinterHandler {
-
-public:
-  struct PCData {
-    int32_t Value;
-    MCSymbol *PC;
-
-    PCData(int32_t value, MCSymbol *pc) : Value(value), PC(pc) {}
-  };
-
-
-  struct FileEntry {
-    StringRef Dir;
-    StringRef File;
-    int32_t Index;
-    FileEntry(StringRef D, StringRef F, int32_t I) : Dir(D), File(F), Index(I) {}
-  };
-
-private:
-  AsmPrinter *Asm;
-
-  // All following data are reset for each new function.
-  // the PC of method entry
-  MCSymbol* EntryPC;
-  MCSymbol* PrePC;
-  MCSymbol* PostPC;
-  MCGoFuncInfo FuncInfo;
-  std::vector<PCData> PCSP;
-  std::vector<PCData> PCFile;
-  std::vector<PCData> PCLine;
-  std::vector<PCData> PCInline;
-
-  std::vector<PCData> PCUnsafePoint;
-  std::vector<PCData> PCStackMapIndex;
-
-  std::vector<FileEntry> FileTable;
-
-  int32_t LastSPAdjust;
-  DenseMap<const MachineInstr*, int32_t> PostSPMap;
-
-  int32_t LastFileIndex;
-  int32_t LastLineNumber;
-  int32_t LastInlineTree;
-  bool    FileStarted;
-  bool    LineStarted;
-  bool    InlineTreeStarted;
-
-  int32_t LastStackMapIndex;
-  uint64_t MaxStatepointID;
-  uint64_t FunctionBeginID;
-public:
-  MCGoAuxData(AsmPrinter* A) : Asm(A) {
-    resetModule();
-  }
-
-  virtual ~MCGoAuxData() {
-    resetModule();
-  }
-
-  virtual void setSymbolSize(const MCSymbol *Sym, uint64_t Size) {}
-
-  virtual void beginModule(Module *M) override;
-
-  virtual void endModule() override {}
-
-  virtual void beginFunction(const MachineFunction *MF);
-
-  // mark the end of function code
-  virtual void markFunctionEnd() override {}
-
-  virtual void endFunction(const MachineFunction *MF) override;
-
-  virtual void beginInstruction(const MachineInstr *MI);
-
-  virtual void endInstruction();
-
-  static bool hasPointerTy(Type*);
-
-private:
-
-  void resetModule() {
-    resetFunction();
-
-    FileTable.clear();
-    MaxStatepointID = 0;
-  }
-
-
-  void resetFunction() {
-    EntryPC = nullptr;
-    PrePC = nullptr;
-    PostPC = nullptr;
-    LastSPAdjust = -1;
-    LastFileIndex = -1;
-    LastLineNumber = -1;
-    LastInlineTree = -1;
-    LastStackMapIndex = -1;
-    FileStarted = false;
-    LineStarted = false;
-    InlineTreeStarted = false;
-
-    PostSPMap.clear();
-    PCSP.clear();
-    PCFile.clear();
-    PCLine.clear();
-    PCInline.clear();
-    PCStackMapIndex.clear();
-
-    PCUnsafePoint.clear();
-    PCStackMapIndex.clear();
-
-    FuncInfo.clear();
-    // FunctionBeginID is the maximum ID seen in previous functions.
-    // See GoGC.cpp
-    FunctionBeginID = MaxStatepointID;
-  }
-
-  static unsigned ptrDataSize(const DataLayout&, Type*);
-  static std::string bitVecToString(const BitVector& Bits,
-                                    unsigned PtrDataSize,
-                                    unsigned PtrSize);
-  static void typeSetBits(const DataLayout&,Type*,unsigned,BitVector&);
-
-  void computeFunctionSP(const MachineFunction *MF);
-  void computeFuncInfo(const MachineFunction *MF);
-  MCGoInlTreeNode* addInlNode(DILocation* M, DISubprogram *Called);
-
-  int32_t getFileIndex(DIFile* F);
-  int32_t getInlineTreeNodeIndex(DILocation* DL);
-
-  MCSymbol* getOrCreatePrePCSymbol(const MachineInstr* MI);
-  MCSymbol* getOrCreatePostPCSymbol(const MachineInstr* MI);
-
-  void emitPCData(std::vector<PCData> &list, std::string &sym);
-  void appendPCData(std::vector<PCData> &list, int32_t value, MCSymbol* PC);
-};
-
 
 } // end namespace llvm
 

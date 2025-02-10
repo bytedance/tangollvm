@@ -44,7 +44,7 @@ static bool isNilCheckLoad(Instruction *I) {
 // trace backward to find the base pointer of V if exists, otherwise null
 // Here we back trace through GEPs and BitCasts; for GEPs, we conservatively
 // limits the offset value to be compile-time constants and cannot be greater
-// than "MinZeroPage" -- this is to make sure V will fault if the base ptr 
+// than "MinZeroPage" -- this is to make sure V will fault if the base ptr
 // faults. See internal/ssa/nilcheck.go for a similar handling.
 static Value *findBasePtr(Value *V, const DataLayout &DL) {
   if (auto *GEP = dyn_cast<GetElementPtrInst>(V)) {
@@ -85,7 +85,7 @@ static bool eliminateNilChecks(BasicBlock &BB) {
   if (NilCheckLoads.empty())
     return false;
 
-  // go over every load/store and find their base pointers -- NilChecks on 
+  // go over every load/store and find their base pointers -- NilChecks on
   // these base pointers are redundant
   SmallPtrSet<Value *, 8> FaultablePtrs;
   for (auto &I : BB) {
@@ -149,9 +149,9 @@ struct GoNilCheckElim : public FunctionPass {
 PreservedAnalyses GoNilCheckElimPass::run(Function &F, FunctionAnalysisManager &AM) {
 
  GoNilCheckElim GNCE;
- 
+
  bool Changed = GNCE.runOnFunction(F);
- 
+
  if (!Changed)
    return PreservedAnalyses::all();
 

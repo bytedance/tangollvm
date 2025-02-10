@@ -19,8 +19,8 @@
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/CodeGen/AsmPrinter.h"
-#include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/GCMetadataPrinter.h"
+#include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/StackMaps.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/GCStrategy.h"
@@ -107,6 +107,7 @@ computeBitVector(Function * Fn, uint64_t StackSize, bool requireFP,
     case StackMaps::Location::Direct:
     case StackMaps::Location::Indirect: {
       // TODO: verify that the base register is SP.
+
       assert(Loc.Offset >= 0 && "replace FP to SP");
       assert(Loc.Offset % PtrSize == 0 && "must be ptr");
 

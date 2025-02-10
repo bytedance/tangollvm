@@ -16,6 +16,7 @@
 #include "CodeViewDebug.h"
 #include "DwarfDebug.h"
 #include "DwarfException.h"
+#include "GoAuxDataHandler.h"
 #include "PseudoProbePrinter.h"
 #include "WasmException.h"
 #include "WinCFGuard.h"

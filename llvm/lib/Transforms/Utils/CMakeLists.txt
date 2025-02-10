@@ -29,7 +29,7 @@ add_llvm_component_library(LLVMTransformUtils
   FlattenCFG.cpp
   FunctionComparator.cpp
   FunctionImportUtils.cpp
-# TANGOLLVM  
+# TANGOLLVM
   GoStatepoints.cpp
   GlobalStatus.cpp
   GuardUtils.cpp

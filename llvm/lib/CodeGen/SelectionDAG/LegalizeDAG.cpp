@@ -1102,7 +1102,7 @@ void SelectionDAGLegalize::LegalizeOp(SDNode *Node) {
   case ISD::ADDROFRETURNADDR:
   case ISD::GO_STACKADDR:
   case ISD::GO_DIV128:
-  case ISD::GO_AVG64U:  
+  case ISD::GO_AVG64U:
   case ISD::SPONENTRY:
     // These operations lie about being legal: when they claim to be legal,
     // they should actually be custom-lowered.

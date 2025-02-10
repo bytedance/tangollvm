@@ -1,4 +1,4 @@
-//===- MCGoGCProgWriter.h - Go GCProg support ---*- C++ -*-===//
+//===- GoGCProgWriter.h - Go GCProg support ---*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -7,14 +7,14 @@
 // Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
 //===----------------------------------------------------------------------===//
 //
-// This file contains the declaration of the MCGoGCProgWriter to support the
+// This file contains the declaration of the GoGCProgWriter to support the
 // generation of Go GCProg. ref: /go/src/cmd/internal/gcprog/gcprog.go
 // NOTE: we only compute the bitIndex of the current Type.
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_MC_MCGOGCPROG_H
-#define LLVM_MC_MCGOGCPROG_H
+#ifndef LLVM_CODEGEN_ASMPRINTER_GOGCPROGWRITER_H
+#define LLVM_CODEGEN_ASMPRINTER_GOGCPROGWRITER_H
 
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Type.h"
@@ -67,4 +67,4 @@ public:
 
 } // end namespace llvm
 
-#endif
+#endif // LLVM_CODEGEN_ASMPRINTER_GOGCPROGWRITER_H

@@ -6458,7 +6458,7 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
                              MVT::i64,
                              getValue(I.getArgOperand(0)),
                              getValue(I.getArgOperand(1))));
-    return;    
+    return;
   case Intrinsic::sponentry:
     setValue(&I,
              DAG.getNode(ISD::SPONENTRY, sdl,
@@ -6660,8 +6660,8 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
   }
   case Intrinsic::go_preallocated: {
     auto getOrCreateFixedObject = [&](const CallInst &I) {
-      int64_t Offset = cast<ConstantInt>(I.getArgOperand(0))->getZExtValue();
-      uint64_t  Size = cast<ConstantInt>(I.getArgOperand(1))->getSExtValue();
+      int64_t Offset = cast<ConstantInt>(I.getArgOperand(0))->getSExtValue();
+      int64_t  Size = cast<ConstantInt>(I.getArgOperand(1))->getSExtValue();
       bool Aliased = I.hasMetadata("go.stackobject.gcdata");
       MachineFunction &MF = DAG.getMachineFunction();
       MachineFrameInfo &MFI = MF.getFrameInfo();
@@ -6685,7 +6685,7 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
     SDValue FIN = DAG.getFrameIndex(FI, PtrTy);
     setValue(&I, FIN);
     return;
-  }  
+  }
   case Intrinsic::dbg_declare: {
     const auto &DI = cast<DbgDeclareInst>(I);
     // Debug intrinsics are handled separately in assignment tracking mode.

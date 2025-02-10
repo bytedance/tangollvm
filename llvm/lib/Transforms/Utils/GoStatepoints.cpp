@@ -217,7 +217,7 @@ static bool isStackBasePointer(Value *V) {
  * Get the element type of a Value in LLVM IR with opaque pointer support.
  * This function handles different instructions and attempts to determine the actual
  * element type that the Value is working with.
- * 
+ *
  * @param V The Value to analyze
  * @return The element Type, or the original type if cannot determine
  */
@@ -228,30 +228,30 @@ static Type* getValueElementType(Value *V) {
     if (auto AI = dyn_cast<AllocaInst>(I)) {
       return AI->getAllocatedType();
     }
-    
+
     // For load, return the loaded value type
     if (auto LI = dyn_cast<LoadInst>(I)) {
       return LI->getType();
     }
-    
+
     // For store, return the type of value being stored
     if (auto SI = dyn_cast<StoreInst>(I)) {
       return SI->getValueOperand()->getType();
     }
-    
+
     // For GEP, return the source element type
     if (auto GEP = dyn_cast<GetElementPtrInst>(I)) {
       return GEP->getSourceElementType();
     }
   }
-  
+
   // If it's a pointer type and we couldn't determine the element type,
   // return the pointer type itself
   Type *Ty = V->getType();
   if (Ty->isPointerTy()) {
     return Ty;
   }
-  
+
   return Ty;
 }
 
@@ -1027,7 +1027,7 @@ static BaseDefiningValueResult findBaseDefiningValue(Value *I) {
     auto *V = FI->getOperand(0);
     return findBaseDefiningValue(V);
   }
-  
+
   // The last two cases here don't return a base pointer.  Instead, they
   // return a value which dynamically selects from among several base
   // derived pointers (each with it's own base potentially).  It's the job of
@@ -2819,7 +2819,7 @@ bool GoStatepoints::runOnFunction(Function &F, DominatorTree &DT,
         Cond->moveBefore(TI);
       }
   }
-  
+
   MadeChange |= moveITPToDef(F);
   MadeChange |= insertParsePoints(F, DT, TTI, ParsePointNeeded);
   MadeChange |= replaceUndefPointerWithNullPointer(F);
@@ -2932,7 +2932,7 @@ static void computeLiveInValues(BasicBlock::reverse_iterator Begin,
 
           if (isa<BitCastInst>(I) ||
               isa<GetElementPtrInst>(I) || isa<ICmpInst>(I) ||
-              isa<InsertElementInst>(I) || isa<ExtractElementInst>(I) || 
+              isa<InsertElementInst>(I) || isa<ExtractElementInst>(I) ||
               isa<AddrSpaceCastInst>(I) || isa<PtrToIntInst>(I) ||
               isa<IntToPtrInst>(I)) {
             Gen.insert(Base);

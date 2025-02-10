@@ -43,8 +43,6 @@ static_library("IR") {
     "FPEnv.cpp",
     "Function.cpp",
     "GCStrategy.cpp",
-// TANGOLLVM    
-    "GoGC.cpp",
     "GVMaterializer.cpp",
     "Globals.cpp",
     "IRBuilder.cpp",

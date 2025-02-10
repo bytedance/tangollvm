@@ -4,10 +4,10 @@
 //
 // Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
 
-//===- lib/MC/MCGoGCProgWriter.cpp - MCGoGCProgWriter implementation ----------------===//
+//===- lib/CodeGen/AsmPrinter/GoGCProgWriter.cpp - GoGCProgWriter implementation ----------------===//
 
-#include "llvm/MC/MCGoGCProgWriter.h"
-#include "llvm/MC/MCGoAuxData.h"
+#include "GoGCProgWriter.h"
+#include "GoAuxDataHandler.h"
 
 void llvm::MCGoGCProgWriter::lit(uint8_t B) {
   Index++;

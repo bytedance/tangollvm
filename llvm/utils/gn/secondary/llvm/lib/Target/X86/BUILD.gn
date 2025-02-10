@@ -105,7 +105,7 @@ static_library("LLVMX86CodeGen") {
     "X86FlagsCopyLowering.cpp",
     "X86FloatingPoint.cpp",
     "X86FrameLowering.cpp",
-# TANGOLLVM    
+# TANGOLLVM
     "X86GoFixupPostRegAlloc.cpp"
     "X86GoFixupPreRegAlloc.cpp"
     "X86ISelDAGToDAG.cpp",

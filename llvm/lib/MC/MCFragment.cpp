@@ -59,7 +59,7 @@ void MCFragment::destroy() {
       return;
     case FT_GoPCData:
       delete cast<MCGoPCDataFragment>(this);
-      return;      
+      return;
     case FT_DwarfFrame:
       cast<MCDwarfCallFrameFragment>(this)->~MCDwarfCallFrameFragment();
       return;
@@ -228,7 +228,7 @@ LLVM_DUMP_METHOD void MCFragment::dump() const {
     OS << " AddrDelta:" << OF->getAddrDelta()
        << " ValueDelta:" << OF->getValueDelta();
     break;
-  }  
+  }
   case MCFragment::FT_DwarfFrame:  {
     const auto *CF = cast<MCDwarfCallFrameFragment>(this);
     OS << "\n       ";

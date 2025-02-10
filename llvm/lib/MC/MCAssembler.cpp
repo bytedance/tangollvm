@@ -1025,7 +1025,7 @@ void MCAssembler::layout() {
         Fixups = DF.getFixups();
         Contents = DF.getContents();
         break;
-      }      
+      }
       case MCFragment::FT_DwarfFrame: {
         MCDwarfCallFrameFragment &DF = cast<MCDwarfCallFrameFragment>(Frag);
         Fixups = DF.getFixups();

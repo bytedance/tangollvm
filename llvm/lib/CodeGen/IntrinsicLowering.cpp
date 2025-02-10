@@ -360,7 +360,7 @@ void IntrinsicLowering::LowerIntrinsicCall(CallInst *CI) {
       NewCI->setCallingConv(CallingConv::Go_Internal);
     } else {
       ReplaceCallWith("memcpy", CI, Ops, Ops+3, CI->getArgOperand(0)->getType());
-    }    
+    }
     break;
   }
   case Intrinsic::memmove: {

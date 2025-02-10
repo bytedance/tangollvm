@@ -1070,7 +1070,8 @@ bool TargetPassConfig::addISelPasses() {
   addIRPasses();
   addCodeGenPrepare();
   addPassesToHandleExceptions();
-  addPass(createGoStatepointsLegacyPass());
+  if (TM->getTargetTriple().isGoEnvironment())
+    addPass(createGoStatepointsLegacyPass());
   addISelPrepare();
 
   return addCoreISelPasses();
@@ -1501,8 +1502,9 @@ void TargetPassConfig::addMachineLateOptimization() {
   // Cleanup of redundant immediate/address loads.
   addPass(&MachineLateInstrsCleanupID);
 
-  // // Branch folding must be run after regalloc and prolog/epilog insertion.
-  // addPass(&BranchFolderPassID);
+  // Branch folding must be run after regalloc and prolog/epilog insertion.
+  if (!TM->getTargetTriple().isGoEnvironment())
+    addPass(&BranchFolderPassID);
 
   // Tail duplication.
   // Note that duplicating tail just increases code size and degrades

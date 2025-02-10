@@ -8429,7 +8429,7 @@ SDValue SelectionDAG::getMemmove(SDValue Chain, const SDLoc &dl, SDValue Dst,
       return Result;
   }
 
-  // TANGOLLVm
+  // TANGOLLVM
   if (getMachineFunction().getFunction().getCallingConv() == CallingConv::Go_Internal) {
     // Caller should check and report fatal error.
     return SDValue();
