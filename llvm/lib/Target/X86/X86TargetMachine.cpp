@@ -167,9 +167,12 @@ static std::string computeDataLayout(const Triple &TT) {
   // The stack is aligned to 32 bits on some ABIs and 128 bits on others.
   if ((!TT.isArch64Bit() && TT.isOSWindows()) || TT.isOSIAMCU())
     Ret += "-a:0:32-S32";
+  else if (TT.isGoEnvironment()) // TANGOLLVM
+    Ret += "-S64";
   else
     Ret += "-S128";
 
+  // TANGOLLVM
   if (TT.isGoEnvironment()) {
     Ret += "-v128:64:64";
     Ret += "-z1";

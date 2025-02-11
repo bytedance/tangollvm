@@ -740,6 +740,7 @@ static Triple::EnvironmentType parseEnvironment(StringRef EnvironmentName) {
       .StartsWith("opencl", Triple::OpenCL)
       .StartsWith("ohos", Triple::OpenHOS)
       .StartsWith("pauthtest", Triple::PAuthTest)
+      .StartsWith("goabi", Triple::GoABI)
       .Default(Triple::UnknownEnvironment);
 }
 

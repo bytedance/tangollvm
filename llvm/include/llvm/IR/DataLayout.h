@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-02-12.
 //===----------------------------------------------------------------------===//
 //
 // This file defines layout properties related to datatype size/offset/alignment
@@ -164,6 +166,9 @@ private:
   /// well-defined bitwise representation.
   SmallVector<unsigned, 8> NonIntegralAddressSpaces;
 
+  // TANGOLLVM
+  bool ExtraBytePadding = false;
+
   /// Attempts to set the alignment of the given type. Returns an error
   /// description on failure.
   Error setAlignment(AlignTypeEnum AlignType, Align ABIAlign, Align PrefAlign,
@@ -219,6 +224,8 @@ public:
     StructAlignment = DL.StructAlignment;
     Pointers = DL.Pointers;
     NonIntegralAddressSpaces = DL.NonIntegralAddressSpaces;
+    // TANGOLLVM
+    ExtraBytePadding = DL.ExtraBytePadding;
     return *this;
   }
 
@@ -229,6 +236,9 @@ public:
 
   /// Parse a data layout string (with fallback to default values).
   void reset(StringRef LayoutDescription);
+
+  // TANGOLLVM
+  bool needExtraBytePadding() const { return ExtraBytePadding; }
 
   /// Parse a data layout string and return the layout. Return an error
   /// description on failure.

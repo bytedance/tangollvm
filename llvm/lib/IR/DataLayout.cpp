@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-02-12.
 //===----------------------------------------------------------------------===//
 //
 // This file defines layout properties related to datatype size/offset/alignment
@@ -48,6 +50,8 @@ using namespace llvm;
 StructLayout::StructLayout(StructType *ST, const DataLayout &DL)
     : StructSize(TypeSize::getFixed(0)) {
   assert(!ST->isOpaque() && "Cannot get layout of opaque structs");
+  // TANGOLLVM
+  uint64_t LastZero = 0;
   IsPadded = false;
   NumElements = ST->getNumElements();
 
@@ -75,8 +79,22 @@ StructLayout::StructLayout(StructType *ST, const DataLayout &DL)
     StructAlignment = std::max(TyAlign, StructAlignment);
 
     getMemberOffsets()[i] = StructSize;
-    // Consume space for this data item
-    StructSize += DL.getTypeAllocSize(Ty);
+    // TANGOLLVM: Consume space for this data item
+    auto ElemSize = DL.getTypeAllocSize(Ty);
+    if (ElemSize.getFixedValue() == 0) {
+      LastZero = StructSize;
+    }
+    StructSize += ElemSize;
+  }
+
+  // refer to https://github.com/golang/go/issues/9401
+  // golang source code: types/size.go::calcStructOffset.
+  // For nonzero-sized structs which end in a zero-sized thing, we add
+  // an extra byte of padding to the type. This padding ensures that
+  // taking the address of the zero-sized thing can't manufacture a
+  // pointer to the next object in the heap.
+  if (DL.needExtraBytePadding() && StructSize > 0 && LastZero == StructSize) {
+    StructSize += TypeSize::getFixed(1);
   }
 
   // Add padding to the end of the struct so that it could be put in an array
@@ -222,6 +240,7 @@ void DataLayout::reset(StringRef Desc) {
 
 Expected<DataLayout> DataLayout::parse(StringRef LayoutDescription) {
   DataLayout Layout("");
+  dbgs() << "LayoutDescription " << LayoutDescription.str() << "\n";
   if (Error Err = Layout.parseSpecifier(LayoutDescription))
     return std::move(Err);
   return Layout;
@@ -246,8 +265,9 @@ static Error split(StringRef Str, char Separator,
 /// Get an unsigned integer, including error checks.
 template <typename IntTy> static Error getInt(StringRef R, IntTy &Result) {
   bool error = R.getAsInteger(10, Result); (void)error;
-  if (error)
+  if (error) {
     return reportError("not a number, or does not fit in an unsigned int");
+  }
   return Error::success();
 }
 
@@ -541,6 +561,13 @@ Error DataLayout::parseSpecifier(StringRef Desc) {
         break;
       }
       break;
+    case 'z': { // extra byte padding, only used for GoABI
+        unsigned Flag;
+        if (Error Err = getInt(Tok, Flag))
+          return Err;
+        ExtraBytePadding = Flag == 1;
+        break;
+      }
     default:
       return reportError("Unknown specifier in datalayout string");
       break;
@@ -570,6 +597,7 @@ bool DataLayout::operator==(const DataLayout &Other) const {
              FloatAlignments == Other.FloatAlignments &&
              VectorAlignments == Other.VectorAlignments &&
              StructAlignment == Other.StructAlignment &&
+             ExtraBytePadding == Other.ExtraBytePadding &&
              Pointers == Other.Pointers;
   // Note: getStringRepresentation() might differs, it is not canonicalized
   return Ret;

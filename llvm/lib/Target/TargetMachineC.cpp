@@ -31,6 +31,8 @@
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Utils.h"
 #include "llvm/Analysis/LoopPass.h"
+#include "llvm/Passes/StandardInstrumentations.h"
+#include "llvm/IR/PrintPasses.h"
 #include <cstring>
 #include <optional>
 
@@ -219,7 +221,6 @@ LLVMCreateTargetMachine(LLVMTargetRef T, const char *Triple, const char *CPU,
                         const char *Features, LLVMCodeGenOptLevel Level,
                         LLVMRelocMode Reloc, LLVMCodeModel CodeModel) {
   auto *Options = LLVMCreateTargetMachineOptions();
-
   LLVMTargetMachineOptionsSetCPU(Options, CPU);
   LLVMTargetMachineOptionsSetFeatures(Options, Features);
   LLVMTargetMachineOptionsSetCodeGenOptLevel(Options, Level);
@@ -317,13 +318,13 @@ static LLVMBool LLVMTargetMachineEmit(LLVMTargetMachineRef T, LLVMModuleRef M,
   FunctionAnalysisManager FAM;
   CGSCCAnalysisManager CGAM;
   ModuleAnalysisManager MAM;
-
+  StandardInstrumentations SI(Mod->getContext(), false, true);
+  SI.registerCallbacks(PIC, &MAM);
   PB.registerModuleAnalyses(MAM);
   PB.registerCGSCCAnalyses(CGAM);
   PB.registerFunctionAnalyses(FAM);
   PB.registerLoopAnalyses(LAM);
   PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
-
   ModulePassManager MPM = PB.buildPerModuleDefaultPipeline(
         OptimizationLevel::O3);
   // dbgs() << "Pipeline: \n";

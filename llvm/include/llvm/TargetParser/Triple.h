@@ -271,7 +271,6 @@ public:
     CoreCLR,
     Simulator, // Simulator variants of other systems, e.g., Apple's iOS
     MacABI,    // Mac Catalyst variant of Apple's iOS deployment target.
-    GoABI,     // Support Go ABI
 
     // Shader Stages
     // The order of these values matters, and must be kept in sync with the
@@ -301,7 +300,8 @@ public:
     GNUEABIT64,
     GNUEABIHFT64,
 
-    LastEnvironmentType = GNUEABIHFT64
+    GoABI,     // Support Go ABI
+    LastEnvironmentType = GoABI
   };
   enum ObjectFormatType {
     UnknownObjectFormat,
