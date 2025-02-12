@@ -1891,7 +1891,7 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
   }
 
   ArrayRef<Value *> GCArgs(PtrFields);
-#if 1
+#if 0
   dbgs() << "Call: " << *Call << "\n";
   for (Value *V : BasePtrs)
     dbgs() << "BasePtr: " << *V << "\n";

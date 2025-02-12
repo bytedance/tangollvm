@@ -18,7 +18,6 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/PostOrderIterator.h"
-#include "llvm/CodeGen/LiveVariables.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
@@ -29,8 +28,6 @@
 #include "llvm/CodeGen/TargetOpcodes.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/MachineDominators.h"
-#include "llvm/CodeGen/SlotIndexes.h"
-#include "llvm/CodeGen/LiveIntervals.h"
 #include "llvm/IR/Function.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cassert>
@@ -73,8 +70,6 @@ public:
   static char ID;
 
   void getAnalysisUsage(AnalysisUsage &AU) const override {
-    AU.setPreservesCFG();
-    AU.addRequired<LiveVariablesWrapperPass>();
     MachineFunctionPass::getAnalysisUsage(AU);
   }
 
@@ -83,9 +78,6 @@ private:
   const X86RegisterInfo *TRI = nullptr;
   const X86InstrInfo * TII = nullptr;
   MachineRegisterInfo *MRI = nullptr;
-
-  LiveVariables *LV = nullptr;
-  LiveIntervals *LIS = nullptr;
 
   bool isGoStackPointerRegister(Register Reg) {
     StringRef RegName = TRI->getRegAsmName(Reg);
@@ -144,8 +136,6 @@ bool X86GoFixupPreRegAllocPass::runOnMachineFunction(MachineFunction &fn) {
   TRI = MF->getSubtarget<X86Subtarget>().getRegisterInfo();
   TII = MF->getSubtarget<X86Subtarget>().getInstrInfo();
   MRI = &MF->getRegInfo();
-  LV = &(getAnalysisIfAvailable<LiveVariablesWrapperPass>()->getLV());
-  LIS = &(getAnalysisIfAvailable<LiveIntervalsWrapperPass>()->getLIS());
 
   bool Changed = false;
 
@@ -222,10 +212,6 @@ void X86GoFixupPreRegAllocPass::AddOperandToStatePoint(
 bool X86GoFixupPreRegAllocPass::optimizeOpSP() {
   bool Changed = false;
 
-
-  LV = &(getAnalysisIfAvailable<LiveVariablesWrapperPass>()->getLV());
-  LIS = &(getAnalysisIfAvailable<LiveIntervalsWrapperPass>()->getLIS());
-
   while (true) {
     std::vector<RemoveRedundantCopy> RemoveOpSP;
 
@@ -285,7 +271,7 @@ bool X86GoFixupPreRegAllocPass::optimizeOpSP() {
           Op.replace(MI);
         }
         for (MachineInstr *MI : ToBeReplaced) {
-          MachineInstr *NewMI = TII->convertToThreeAddress(*MI, LV, LIS);
+          MachineInstr *NewMI = TII->convertToThreeAddress(*MI, nullptr, nullptr);
           if (!NewMI)
             report_fatal_error("cannot convert to three address");
           Op.replace(*NewMI);
@@ -392,7 +378,7 @@ bool X86GoFixupPreRegAllocPass::cloneStackPointers() {
                 assert(NewRegIdx != 0 && "invariant");
               } else {
                 // TODO: assert 64-bit
-                unsigned NewReg = MRI->createVirtualRegister(&X86::GR64RegClass);
+                unsigned NewReg = MRI->createVirtualRegister(MRI->getRegClass(MO.getReg()));
                 NewRegIdx = Register::virtReg2Index(NewReg);
                 RDefs[RegIdx] = NewRegIdx;
               }
@@ -539,7 +525,7 @@ bool X86GoFixupPreRegAllocPass::cloneStackPointers() {
           }
 
           if (Pos != nullptr) {
-            Register NewReg = MRI->createVirtualRegister(&X86::GR64RegClass);
+            Register NewReg = MRI->createVirtualRegister(MRI->getRegClass(Reg));
             unsigned NewRegIdx = Register::virtReg2Index(NewReg);
             MachineInstr &NewMI = TII->duplicate(*PreMBB, Pos->getIterator(), *OldMI);
             // LEAQ

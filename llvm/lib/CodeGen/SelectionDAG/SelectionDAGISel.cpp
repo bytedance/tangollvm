@@ -2446,6 +2446,7 @@ void SelectionDAGISel::Select_READ_REGISTER(SDNode *Op) {
   Register Reg =
       TLI->getRegisterByName(RegStr->getString().data(), Ty,
                              CurDAG->getMachineFunction());
+  // TANGOLLVM
   MachineFunction &MF = CurDAG->getMachineFunction();
   Reg = MF.addLiveIn(Reg, MF.getSubtarget().getTargetLowering()->getRegClassFor(VT.getSimpleVT()));
   SDValue New = CurDAG->getCopyFromReg(

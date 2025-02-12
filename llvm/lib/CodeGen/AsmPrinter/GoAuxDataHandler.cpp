@@ -375,7 +375,7 @@ void MCGoAuxData::typeSetBits(const DataLayout&DL, Type* T, unsigned Off, BitVec
       // interface struct { Itab *tab;	void *data; }
       // The first word of an interface is a pointer, but golang don't as such.
       // The pointer points to an itab or a _type, and it won't be GCd
-      if (ST->getName().starts_with("interface$")) {
+      if (ST->hasName() && ST->getName().starts_with("interface$")) {
         Bits.set(Off / DL.getPointerSize() + 1);
         return;
       }

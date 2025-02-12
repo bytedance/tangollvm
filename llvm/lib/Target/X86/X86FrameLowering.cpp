@@ -143,7 +143,7 @@ static bool canEliminateGoFP(bool HasFP, size_t SlotSize, MachineFunction &MF) {
     // FP may be set by default
     StackSize -= SlotSize;
   }
-  dbgs() << "StackSize: " << StackSize << " " << MF.getFunction().getName() << "\n";
+
   bool RequireFP = true;
   if (StackSize == 0) {
     if (F.hasFnAttribute("go-no-split")) {
