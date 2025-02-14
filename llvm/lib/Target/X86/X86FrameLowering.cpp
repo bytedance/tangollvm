@@ -53,6 +53,10 @@ STATISTIC(NumFunctionUsingPush2Pop2, "Number of funtions using push2/pop2");
 
 using namespace llvm;
 
+static cl::opt<bool>
+    GoGCSortFrameObjects("go-gc-sort-frame-objects", cl::Hidden, cl::init(true),
+                     cl::desc("Sort frame objects for Go GC"));
+
 X86FrameLowering::X86FrameLowering(const X86Subtarget &STI,
                                    MaybeAlign StackAlignOverride)
     : TargetFrameLowering(StackGrowsDown, StackAlignOverride.valueOrOne(),
@@ -1874,7 +1878,7 @@ void X86FrameLowering::emitPrologue(MachineFunction &MF,
     }
 
     if (!IsFunclet) {
-      if (X86FI->hasSwiftAsyncContext() & !CanElimFP) {
+      if (X86FI->hasSwiftAsyncContext()) {
         assert(!IsWin64Prologue &&
                "win64 prologue does not store async context right below rbp");
         const auto &Attrs = MF.getFunction().getAttributes();
@@ -1919,7 +1923,7 @@ void X86FrameLowering::emitPrologue(MachineFunction &MF,
 
       if (!IsWin64Prologue && !IsFunclet) {
         // Update EBP with the new base value.
-        if (!X86FI->hasSwiftAsyncContext())
+        if (!X86FI->hasSwiftAsyncContext() && !CanElimFP)
           BuildMI(MBB, MBBI, DL,
                   TII.get(Uses64BitFramePtr ? X86::MOV64rr : X86::MOV32rr),
                   FramePtr)
@@ -4610,6 +4614,60 @@ void X86FrameLowering::orderFrameObjects(
   // info).
   llvm::stable_sort(SortingObjects, X86FrameSortingComparator());
 
+  // TANGOLLVM
+  if (GoGCSortFrameObjects && TangoLLVM::hasGoGC(&MF.getFunction())) {
+    // Note that we generate code that access objects via RSP for Go
+    // but GC starts to scan live pointers from RBP (i.e., frame.varp).
+    //
+    // Collect all objects that have been accessed by STATEPOINT. These
+    // are objects that have live pointers.
+    BitVector Used(MFI.getObjectIndexEnd());
+    for (auto &MBB : MF) {
+      for (auto &MI : MBB) {
+        if (MI.getOpcode() != TargetOpcode::STATEPOINT)
+          continue;
+
+        StatepointOpers SO(&MI);
+
+        for (unsigned Idx = SO.getNumDeoptArgsIdx(), E = SO.getNumGCPtrIdx(); Idx < E;
+            ++Idx) {
+          const MachineOperand &MO = MI.getOperand(Idx);
+          if (!MO.isFI())
+            continue;
+
+          int index = MO.getIndex();
+          if (index >= 0) {
+            assert(index < MFI.getObjectIndexEnd() && "sanity check");
+            Used.set(index);
+          }
+        }
+      }
+    }
+    if (Used.any()) {
+      // Note that all Go functions have FP so objects are reversed at the end of
+      // this function. Thus we need to move all-pointer objects to the end so that
+      // they will be placed close to the frame pointer. Here, the implementation is
+      // to slide all non-pointer objects to the beginning.
+      std::vector<X86FrameSortingObject> NewSortingObjects(MFI.getObjectIndexEnd());
+      int i = 0;
+
+      for (auto &Obj : SortingObjects) {
+        if (!Obj.IsValid) break;
+
+        if (!(Obj.ObjectNumUses > 0 && Used[Obj.ObjectIndex]))
+          NewSortingObjects[i++] = Obj;
+      }
+
+      for (auto &Obj : SortingObjects) {
+        if (!Obj.IsValid) break;
+
+        if (Obj.ObjectNumUses > 0 && Used[Obj.ObjectIndex])
+          NewSortingObjects[i++] = Obj;
+      }
+
+      SortingObjects = std::move(NewSortingObjects);
+    }
+  }
   // Now modify the original list to represent the final order that
   // we want. The order will depend on whether we're going to access them
   // from the stack pointer or the frame pointer. For SP, the list should
