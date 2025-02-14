@@ -1231,11 +1231,6 @@ void PEI::insertPrologEpilogCode(MachineFunction &MF) {
     for (MachineBasicBlock *SaveBlock : SaveBlocks)
       TFI.adjustForSegmentedStacks(MF, *SaveBlock);
   }
-    // Record that there are split-stack functions, so we will emit a
-    // special section to tell the linker.
-  //   MF.getMMI().setHasSplitStack(true);
-  // } else
-  //   MF.getMMI().setHasNosplitStack(true);
 
   // TANGOLLVM
   if (MF.getFunction().getCallingConv() == CallingConv::Go_Internal) {

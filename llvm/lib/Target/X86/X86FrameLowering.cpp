@@ -3368,8 +3368,6 @@ void X86FrameLowering::adjustForSegmentedStacks(
       return;
     }
 
-    // dbgs() << "NoSplit: StackSize: " << StackSize << " " << RequireFP << " " << MF.getFunction().getName() << "\n";
-
     if (StackSize < StackSmall) {
       // see obj6.go
       // check whether this function is a leaf function with only call to some
@@ -3417,7 +3415,6 @@ leafSearchDone:
         return;
       }
     }
-
 
     // TOOD: use go-no-split == "false"??
     MF.getFunction().addFnAttr("go-split", "true");

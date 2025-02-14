@@ -18,7 +18,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/CodeGen/AsmPrinter.h"
-#include "llvm/CodeGen/AsmPrinterHandler.h"
+#include "llvm/CodeGen/DebugHandlerBase.h"
 #include "llvm/IR/Type.h"
 #include "llvm/MC/MCGoAuxData.h"
 #include <cassert>
@@ -32,7 +32,7 @@ class AsmPrinter;
 class MCSymbol;
 class DILocation;
 
-class MCGoAuxData : public AsmPrinterHandler {
+class MCGoAuxData : public DebugHandlerBase {
 
 public:
   struct PCData {
@@ -51,8 +51,6 @@ public:
   };
 
 private:
-  AsmPrinter *Asm;
-
   // All following data are reset for each new function.
   // the PC of method entry
   MCSymbol* EntryPC;
@@ -83,7 +81,7 @@ private:
   uint64_t MaxStatepointID;
   uint64_t FunctionBeginID;
 public:
-  MCGoAuxData(AsmPrinter* A) : Asm(A) {
+  MCGoAuxData(AsmPrinter* A) : DebugHandlerBase(A) {
     resetModule();
   }
 
@@ -91,22 +89,17 @@ public:
     resetModule();
   }
 
-  virtual void setSymbolSize(const MCSymbol *Sym, uint64_t Size) {}
-
   virtual void beginModule(Module *M) override;
 
   virtual void endModule() override {}
 
-  virtual void beginFunction(const MachineFunction *MF) override;
+  virtual void beginFunctionImpl(const MachineFunction *MF) override;
 
-  // mark the end of function code
-  virtual void markFunctionEnd() override {}
+  virtual void endFunctionImpl(const MachineFunction *MF) override;
 
-  virtual void endFunction(const MachineFunction *MF) override;
+  virtual void beginInstruction(const MachineInstr *MI) override;
 
-  virtual void beginInstruction(const MachineInstr *MI);
-
-  virtual void endInstruction();
+  virtual void endInstruction() override;
 
   static bool hasPointerTy(Type*);
 

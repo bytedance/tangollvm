@@ -617,7 +617,7 @@ bool AsmPrinter::doInitialization(Module &M) {
     Handlers.push_back(std::make_unique<WinCFGuard>(this));
 
   if (TM.getTargetTriple().isGoEnvironment())
-    Handlers.push_back(std::make_unique<MCGoAuxData>(this));
+    DebugHandlers.push_back(std::make_unique<MCGoAuxData>(this));
 
   for (auto &Handler : DebugHandlers)
     Handler->beginModule(&M);

@@ -391,7 +391,7 @@ void MCGoAuxData::typeSetBits(const DataLayout&DL, Type* T, unsigned Off, BitVec
   }
 }
 
-void MCGoAuxData::beginFunction(const MachineFunction *MF) {
+void MCGoAuxData::beginFunctionImpl(const MachineFunction *MF) {
   // reset for this function
   resetFunction();
 
@@ -500,7 +500,7 @@ static std::string getTypeString(Type* T) {
   return OS.str();
 }
 
-void MCGoAuxData::endFunction(const MachineFunction *MF) {
+void MCGoAuxData::endFunctionImpl(const MachineFunction *MF) {
   MCSymbol* EndFunc = Asm->OutStreamer->getContext().createTempSymbol();
   Asm->OutStreamer->emitLabel(EndFunc);
 

@@ -304,6 +304,8 @@ X86RegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
     return CSR_NoRegs_SaveList;
 
   switch (CC) {
+  case CallingConv::Go_0:
+  case CallingConv::Go_Internal:
   case CallingConv::GHC:
   case CallingConv::HiPE:
     return CSR_NoRegs_SaveList;
