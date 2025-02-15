@@ -16,6 +16,7 @@
 #include "llvm-c/TargetMachine.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/PassTimingInfo.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/TargetRegistry.h"
@@ -35,6 +36,7 @@
 #include "llvm/IR/PrintPasses.h"
 #include <cstring>
 #include <optional>
+#include <chrono>
 
 using namespace llvm;
 
@@ -325,6 +327,7 @@ static LLVMBool LLVMTargetMachineEmit(LLVMTargetMachineRef T, LLVMModuleRef M,
   PB.registerFunctionAnalyses(FAM);
   PB.registerLoopAnalyses(LAM);
   PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+
   ModulePassManager MPM = PB.buildPerModuleDefaultPipeline(
         OptimizationLevel::O3);
   // dbgs() << "Pipeline: \n";
@@ -349,7 +352,6 @@ static LLVMBool LLVMTargetMachineEmit(LLVMTargetMachineRef T, LLVMModuleRef M,
   }
 
   pass.run(*Mod);
-
   OS.flush();
   return false;
 }

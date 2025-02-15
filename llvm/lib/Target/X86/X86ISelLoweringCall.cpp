@@ -2272,7 +2272,7 @@ if (goAdHocABI == GoAdHocABI::GoWB) {
     // TODO: x86-64 only
     RegsToPass.push_back(std::make_pair(FirstReg, FirstArg));
     RegsToPass.push_back(std::make_pair(SecondReg, SecondArg));
-  } else  
+  } else
   for (unsigned I = 0, OutIndex = 0, E = ArgLocs.size(); I != E;
        ++I, ++OutIndex) {
     assert(OutIndex < Outs.size() && "Invalid Out index");
@@ -2569,7 +2569,7 @@ if (goAdHocABI == GoAdHocABI::GoWB) {
     // to use the CSR_NoRegs_RegMask.
     if (CB && CB->hasFnAttr("no_callee_saved_registers"))
       AdaptedCC = (CallingConv::ID)CallingConv::GHC;
-    // TANGOLLVM  
+    // TANGOLLVM
     if (goAdHocABI == GoAdHocABI::GoWB) return RegInfo->getGoWriteBarrierPreservedMask();
     if (goAdHocABI == GoAdHocABI::DuffCopy || goAdHocABI == GoAdHocABI::DuffZero)
       AdaptedCC = (CallingConv::ID)CallingConv::AnyReg;
@@ -2599,7 +2599,7 @@ if (goAdHocABI == GoAdHocABI::GoWB) {
   // from the reg mask. Create a new RegMask for such calling conventions.
   // RegMask for calling conventions that disable only return registers (e.g.
   // preserve_most) will be modified later in LowerCallResult.
-  bool ShouldDisableArgRegs = shouldDisableArgRegFromCSR(CallConv) || HasNCSR;
+  bool ShouldDisableArgRegs = shouldDisableArgRegFromCSR(CallConv) || HasNCSR || (goAdHocABI == GoAdHocABI::DuffCopy || goAdHocABI == GoAdHocABI::DuffZero);
   if (ShouldDisableArgRegs || shouldDisableRetRegFromCSR(CallConv)) {
     const TargetRegisterInfo *TRI = Subtarget.getRegisterInfo();
 
@@ -2614,6 +2614,21 @@ if (goAdHocABI == GoAdHocABI::GoWB) {
       for (auto const &RegPair : RegsToPass)
         for (MCPhysReg SubReg : TRI->subregs_inclusive(RegPair.first))
           RegMask[SubReg / 32] &= ~(1u << (SubReg % 32));
+    }
+
+    if ((goAdHocABI == GoAdHocABI::DuffCopy || goAdHocABI == GoAdHocABI::DuffZero) && Subtarget.hasAVX()) {
+      // All YMM registers are clobbered in duffcopy and duffzero due to vzeroupper instruction
+      // when AVX is available in general.
+      for (unsigned n = 0; n < 16; ++n) {
+        for (MCRegAliasIterator AI(X86::YMM0 + n, TRI, true); AI.isValid(); ++AI) {
+          RegMask[*AI / 32] &= ~(1u << (*AI % 32));
+        }
+      }
+    } else if (goAdHocABI == GoAdHocABI::DuffCopy && !Subtarget.hasAVX()) {
+      // Only XMM0 is clobbered in duffcopy when AVX is not available in general.
+      for (MCRegAliasIterator AI(X86::XMM0, TRI, true); AI.isValid(); ++AI) {
+        RegMask[*AI / 32] &= ~(1u << (*AI % 32));
+      }
     }
 
     // Create the RegMask Operand according to our updated mask.
