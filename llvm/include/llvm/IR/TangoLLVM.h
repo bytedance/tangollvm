@@ -6,8 +6,8 @@
 //
 // Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
 
-#ifndef LLVM_CODEGEN_TANGOLLVM_H_
-#define LLVM_CODEGEN_TANGOLLVM_H_
+#ifndef LLVM_IR_TANGOLLVM_H_
+#define LLVM_IR_TANGOLLVM_H_
 
 #include <llvm/IR/Function.h>
 #include <llvm/CodeGen/MachineInstr.h>
@@ -90,4 +90,4 @@ public:
 
 } // end namespace llvm
 
-#endif // LLVM_CODEGEN_TANGOLLVM_H_
+#endif // LLVM_IR_TANGOLLVM_H_
