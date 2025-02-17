@@ -74,6 +74,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/IR/TangoLLVM.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Value.h"
@@ -1012,7 +1013,7 @@ bool LoopIdiomRecognize::processLoopStridedStore(
   Module *M = TheStore->getModule();
   Value *SplatValue = isBytewiseValue(StoredVal, *DL);
   Constant *PatternValue = nullptr;
-  if (SplatValue && TheStore->getFunction()->getCallingConv() == CallingConv::Go_Internal) {
+  if (SplatValue && TangoLLVM::isGoABIInternal(*TheStore->getFunction())) {
     return false;
   }
 

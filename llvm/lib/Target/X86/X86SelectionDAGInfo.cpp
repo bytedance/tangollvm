@@ -22,6 +22,7 @@
 #include "llvm/CodeGen/TargetLowering.h"
 #include "llvm/Support/TypeSize.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/TangoLLVM.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
@@ -81,7 +82,7 @@ SDValue X86SelectionDAGInfo::EmitTargetCodeForMemset(
 
   // TANGOLLVM
   // Handle medium and large sizes for OpZero in Golang.
-  if (DAG.getMachineFunction().getFunction().getCallingConv() == CallingConv::Go_Internal) {
+  if (TangoLLVM::isGoABIInternal(DAG.getMachineFunction().getFunction())) {
     auto ConstantVal = dyn_cast<ConstantSDNode>(Val);
     if (ConstantSize && ConstantVal && ConstantVal->isZero()) {
       uint64_t SizeVal = dyn_cast<ConstantSDNode>(Size)->getZExtValue();
@@ -401,7 +402,7 @@ SDValue X86SelectionDAGInfo::EmitTargetCodeForMemcpy(
       DAG.getMachineFunction().getSubtarget<X86Subtarget>();
 
   // Handle medium and large sizes for OpMove in Golang.
-  if (DAG.getMachineFunction().getFunction().getCallingConv() == CallingConv::Go_Internal) {
+  if (TangoLLVM::isGoABIInternal(DAG.getMachineFunction().getFunction())) {
     ConstantSDNode *ConstantSize = dyn_cast<ConstantSDNode>(Size);
     if (ConstantSize) {
       uint64_t SizeVal = ConstantSize->getZExtValue();

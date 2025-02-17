@@ -54,6 +54,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/IR/TangoLLVM.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCExpr.h"
@@ -18611,7 +18612,7 @@ SDValue X86TargetLowering::LowerGlobalOrExternal(SDValue Op, SelectionDAG &DAG,
   auto PtrVT = getPointerTy(DAG.getDataLayout());
   SDValue Result;
   // TANGOLLVM
-  if (DAG.getMachineFunction().getFunction().getCallingConv() == CallingConv::Go_Internal) {
+  if (TangoLLVM::isGoABIInternal(DAG.getMachineFunction().getFunction())) {
     // TODO: by default Go compiles and links everything into a monolithic binary.
     // No GOT is needed.
     HasPICReg = false;

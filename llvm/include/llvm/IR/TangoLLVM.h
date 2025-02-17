@@ -63,26 +63,12 @@ public:
     return morestackSymbol;
   }
 
-  static bool isMoreStackCall(const MachineInstr &MI) {
-    if (!MI.isCall())
-      return false;
-    // see X86FrameLowering.cpp
-    // must be a call
-    // callee must be the first operand
-    const MachineOperand &MO = MI.getOperand(0);
-    StringRef morestackSymbol = getMoreStackSymbol(MI.getParent()->getParent()->getFunction());
-    if (!MO.isSymbol() || morestackSymbol != MO.getSymbolName())
-      return false;
-
-    return true;
+  static bool hasGoGC(const Function &Fn) {
+    return Fn.hasGC() && Fn.getGC() == "go";
   }
 
-  static bool hasGoGC(const Function *Fn) {
-    return Fn->hasGC() && Fn->getGC() == "go";
-  }
-
-  static bool isGoABIInternal(const Function *Fn) {
-    return Fn->getCallingConv() == CallingConv::Go_Internal;
+  static bool isGoABIInternal(const Function &Fn) {
+    return Fn.getCallingConv() == CallingConv::Go_Internal;
   }
 
 };

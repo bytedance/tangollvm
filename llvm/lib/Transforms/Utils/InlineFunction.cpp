@@ -60,6 +60,7 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/ProfDataUtils.h"
+#include "llvm/IR/TangoLLVM.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Value.h"
@@ -2457,7 +2458,7 @@ llvm::InlineResult llvm::InlineFunction(CallBase &CB, InlineFunctionInfo &IFI,
     fixupLineNumbers(Caller, FirstNewBlock, &CB,
                      CalledFunc->getSubprogram() != nullptr);
     // TANGOLLVM
-    if (InsertGoInlMark && Caller->getCallingConv() == CallingConv::Go_Internal) {
+    if (InsertGoInlMark && TangoLLVM::isGoABIInternal(*Caller)) {
       // Insert InlMark
       Instruction *Pos = FirstNewBlock->getFirstNonPHIOrDbg();
       DebugLoc DL = CB.getDebugLoc();

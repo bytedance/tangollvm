@@ -32,6 +32,7 @@
 #include "llvm/CodeGen/VirtRegMap.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/TangoLLVM.h"
 #include "llvm/IR/Type.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -548,7 +549,7 @@ const uint32_t *X86RegisterInfo::getGoWriteBarrierPreservedMask() const {
 BitVector X86RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   BitVector Reserved(getNumRegs());
   const X86FrameLowering *TFI = getFrameLowering(MF);
-  if (MF.getFunction().getCallingConv() == CallingConv::Go_Internal) {
+  if (TangoLLVM::isGoABIInternal(MF.getFunction())) {
     // the current goroutine pointer
     for (const MCPhysReg &SubReg : subregs_inclusive(X86::R14))
       Reserved.set(SubReg);
@@ -799,7 +800,7 @@ bool X86RegisterInfo::canRealignStack(const MachineFunction &MF) const {
   if (!TargetRegisterInfo::canRealignStack(MF))
     return false;
 
-  if (MF.getFunction().getCallingConv() == CallingConv::Go_Internal) {
+  if (TangoLLVM::isGoABIInternal(MF.getFunction())) {
     return false;
   }
 

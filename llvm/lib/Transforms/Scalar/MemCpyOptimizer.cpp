@@ -49,6 +49,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/IR/TangoLLVM.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Value.h"
@@ -454,7 +455,7 @@ Instruction *MemCpyOptPass::tryMergingIntoMemset(Instruction *StartInst,
     return nullptr;
 
   // TANGOLLVM: Only memclr is available in Golang.
-  if (StartInst->getFunction()->getCallingConv() == CallingConv::Go_Internal) {
+  if (TangoLLVM::isGoABIInternal(*StartInst->getFunction())) {
     if (auto *C = dyn_cast<Constant>(ByteVal)) {
       if (!C->isZeroValue()) {
         return nullptr;
@@ -812,7 +813,7 @@ bool MemCpyOptPass::processStore(StoreInst *SI, BasicBlock::iterator &BBI) {
   auto *V = SI->getOperand(0);
   if (Value *ByteVal = isBytewiseValue(V, DL)) {
     // TANGOLLVM: Only memclr is available in Golang.
-    if (SI->getFunction()->getCallingConv() == CallingConv::Go_Internal) {
+    if (TangoLLVM::isGoABIInternal(*SI->getFunction())) {
       if (auto *C = dyn_cast<Constant>(ByteVal)) {
         if (!C->isZeroValue()) {
           return false;
@@ -1357,7 +1358,7 @@ bool MemCpyOptPass::processMemSetMemCpyDependence(MemCpyInst *MemCpy,
   }
 
   // TANGOLLVM: Only memclr is available in Golang.
-  if (MemSet->getFunction()->getCallingConv() == CallingConv::Go_Internal) {
+  if (TangoLLVM::isGoABIInternal(*MemSet->getFunction())) {
     if (auto *C = dyn_cast<Constant>(MemSet->getValue())) {
       if (!C->isZeroValue()) {
         return false;
@@ -1471,7 +1472,7 @@ bool MemCpyOptPass::performMemCpyToMemSetOptzn(MemCpyInst *MemCpy,
                                                MemSetInst *MemSet,
                                                BatchAAResults &BAA) {
   // TANGOLLVM Only memclr is available in Golang.
-  if (MemSet->getFunction()->getCallingConv() == CallingConv::Go_Internal) {
+  if (TangoLLVM::isGoABIInternal(*MemSet->getFunction())) {
     if (auto *C = dyn_cast<Constant>(MemSet->getValue())) {
       if (!C->isZeroValue()) {
         return false;
@@ -1798,7 +1799,7 @@ bool MemCpyOptPass::processMemCpy(MemCpyInst *M, BasicBlock::iterator &BBI) {
       if (Value *ByteVal = isBytewiseValue(GV->getInitializer(),
                                            M->getDataLayout())) {
         // TANGOLLVM Only memclr is available in Golang.
-        if (M->getFunction()->getCallingConv() == CallingConv::Go_Internal) {
+        if (TangoLLVM::isGoABIInternal(*M->getFunction())) {
           if (auto *C = dyn_cast<Constant>(ByteVal)) {
             if (!C->isZeroValue()) {
               return false;

@@ -87,6 +87,7 @@
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/PseudoProbe.h"
 #include "llvm/IR/Type.h"
+#include "llvm/IR/TangoLLVM.h"
 #include "llvm/IR/Value.h"
 #include "llvm/IR/ValueHandle.h"
 #include "llvm/MC/MCAsmInfo.h"
@@ -1929,8 +1930,7 @@ void AsmPrinter::emitFunctionBody() {
     }
   }
 
-  // TANGOLLVM
-  if (MF->getFunction().getCallingConv() == CallingConv::Go_Internal) {
+  if (TangoLLVM::isGoABIInternal(MF->getFunction())) {
     // if the last instruction is a call, we need to insert a nop at the end
     if (!MF->empty()) {
       MachineBasicBlock &MBB = MF->back();

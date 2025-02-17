@@ -58,6 +58,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/Metadata.h"
+#include "llvm/IR/TangoLLVM.h"
 #include "llvm/IR/Type.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CodeGen.h"
@@ -7828,7 +7829,7 @@ static SDValue getMemcpyLoadsAndStores(SelectionDAG &DAG, const SDLoc &dl,
   FrameIndexSDNode *FI = dyn_cast<FrameIndexSDNode>(Dst);
   if (FI && !MFI.isFixedObjectIndex(FI->getIndex()))
     DstAlignCanChange = true;
-  if (DAG.getMachineFunction().getFunction().getCallingConv() == CallingConv::Go_Internal)
+  if (TangoLLVM::isGoABIInternal(DAG.getMachineFunction().getFunction()))
     DstAlignCanChange = false;
   MaybeAlign SrcAlign = DAG.InferPtrAlign(Src);
   if (!SrcAlign || Alignment > *SrcAlign)
@@ -8031,8 +8032,8 @@ static SDValue getMemmoveLoadsAndStores(SelectionDAG &DAG, const SDLoc &dl,
   FrameIndexSDNode *FI = dyn_cast<FrameIndexSDNode>(Dst);
   if (FI && !MFI.isFixedObjectIndex(FI->getIndex()))
     DstAlignCanChange = true;
-  if (DAG.getMachineFunction().getFunction().getCallingConv() == CallingConv::Go_Internal)
-    DstAlignCanChange = false;    
+  if (TangoLLVM::isGoABIInternal(DAG.getMachineFunction().getFunction()))
+    DstAlignCanChange = false;
   MaybeAlign SrcAlign = DAG.InferPtrAlign(Src);
   if (!SrcAlign || Alignment > *SrcAlign)
     SrcAlign = Alignment;
@@ -8154,7 +8155,7 @@ static SDValue getMemsetStores(SelectionDAG &DAG, const SDLoc &dl,
   FrameIndexSDNode *FI = dyn_cast<FrameIndexSDNode>(Dst);
   if (FI && !MFI.isFixedObjectIndex(FI->getIndex()))
     DstAlignCanChange = true;
-  if (DAG.getMachineFunction().getFunction().getCallingConv() == CallingConv::Go_Internal)
+  if (TangoLLVM::isGoABIInternal(DAG.getMachineFunction().getFunction()))
     DstAlignCanChange = false;
   bool IsZeroVal = isNullConstant(Src);
   unsigned Limit = AlwaysInline ? ~0 : TLI.getMaxStoresPerMemset(OptSize);
@@ -8291,7 +8292,7 @@ SDValue SelectionDAG::getMemcpy(
       return Result;
   }
 
-  if (getMachineFunction().getFunction().getCallingConv() == CallingConv::Go_Internal) {
+  if (TangoLLVM::isGoABIInternal(getMachineFunction().getFunction())) {
     dbgs() << "==========> Seeing a bad memcpy intrinsic: \n";
     dbgs() << "=====> Dst: ";
     Dst.dump();
@@ -8430,7 +8431,7 @@ SDValue SelectionDAG::getMemmove(SDValue Chain, const SDLoc &dl, SDValue Dst,
   }
 
   // TANGOLLVM
-  if (getMachineFunction().getFunction().getCallingConv() == CallingConv::Go_Internal) {
+  if (TangoLLVM::isGoABIInternal(getMachineFunction().getFunction())) {
     // Caller should check and report fatal error.
     return SDValue();
   }
@@ -8563,7 +8564,7 @@ SDValue SelectionDAG::getMemset(SDValue Chain, const SDLoc &dl, SDValue Dst,
     return Result;
   }
 
-  if (getMachineFunction().getFunction().getCallingConv() == CallingConv::Go_Internal) {
+  if (TangoLLVM::isGoABIInternal(getMachineFunction().getFunction())) {
     dbgs() << "==========> Seeing a bad memset intrinsic: \n";
     dbgs() << "=====> Dst: ";
     Dst.dump();

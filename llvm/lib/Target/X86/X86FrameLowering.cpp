@@ -105,7 +105,7 @@ bool X86FrameLowering::needsFrameIndexResolution(
 
 // return true if we must preserve FP for Go
 static bool requireGoFP(const MachineFunction &MF) {
-  if (MF.getFunction().getCallingConv() != CallingConv::Go_Internal) {
+  if (!TangoLLVM::isGoABIInternal(MF.getFunction())) {
     return false;
   }
 
@@ -115,7 +115,7 @@ static bool requireGoFP(const MachineFunction &MF) {
 }
 
 static bool canEliminateGoFP(bool HasFP, size_t SlotSize, MachineFunction &MF) {
-  if (MF.getFunction().getCallingConv() != CallingConv::Go_Internal) {
+  if (!TangoLLVM::isGoABIInternal(MF.getFunction())) {
     return false;
   }
 
@@ -3327,7 +3327,7 @@ void X86FrameLowering::adjustForSegmentedStacks(
   assert(&(*MF.begin()) == &PrologueMBB && "Shrink-wrapping not supported yet");
 
   // Check Go NoSplit
-  if (MF.getFunction().getCallingConv() == CallingConv::Go_Internal) {
+  if (TangoLLVM::isGoABIInternal(MF.getFunction())) {
     StackSize = MFI.getStackSize();
 
     bool HasFP = hasFP(MF);
@@ -4246,7 +4246,7 @@ MachineBasicBlock::iterator X86FrameLowering::eliminateCallFramePseudoInstr(
 
   if (!reserveCallFrame) {
     // Go ABIInternal reserve call frames for all callees.
-    if (MF.getFunction().getCallingConv() == CallingConv::Go_Internal) {
+    if (TangoLLVM::isGoABIInternal(MF.getFunction())) {
       assert(Amount == 0 && "Must reserve call frame for Go ABIInternal");
     }
     // If the stack pointer can be changed after prologue, turn the
@@ -4612,7 +4612,7 @@ void X86FrameLowering::orderFrameObjects(
   llvm::stable_sort(SortingObjects, X86FrameSortingComparator());
 
   // TANGOLLVM
-  if (GoGCSortFrameObjects && TangoLLVM::hasGoGC(&MF.getFunction())) {
+  if (GoGCSortFrameObjects && TangoLLVM::hasGoGC(MF.getFunction())) {
     // Note that we generate code that access objects via RSP for Go
     // but GC starts to scan live pointers from RBP (i.e., frame.varp).
     //

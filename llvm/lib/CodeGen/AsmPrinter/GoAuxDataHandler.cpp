@@ -12,13 +12,13 @@
 #include "llvm/IR/DebugLoc.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/Instructions.h"
-#include "llvm/IR/TangoLLVM.h"
 #include "llvm/ADT/BreadthFirstIterator.h"
 #include "llvm/ADT/DepthFirstIterator.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/StackMaps.h"
+#include "llvm/CodeGen/TangoLLVM.h"
 #include "llvm/CodeGen/TargetFrameLowering.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
@@ -800,7 +800,7 @@ void MCGoAuxData::beginInstruction(const MachineInstr *MI) {
       // A call inst may be a call to morestack, which is a Go target and may trigger GC and copystack.
       // A call may also be a call to an intrinsic, which is a libc function and cannot trigger any runtime.
       assert(MI->getNumOperands() > 0 && "must have callee");
-      bool isMoreStackCall = TangoLLVM::isMoreStackCall(*MI);
+      bool isMoreStackCall = TangoLLVMCodeGen::isMoreStackCall(*MI);
 
       if (isMoreStackCall) {
         int CurrentStackMapIndex = 0;

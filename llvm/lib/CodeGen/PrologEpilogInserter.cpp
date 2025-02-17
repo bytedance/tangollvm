@@ -52,6 +52,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/TangoLLVM.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/Pass.h"
@@ -920,10 +921,10 @@ void PEI::calculateFrameObjectOffsets(MachineFunction &MF) {
   // FixedCSEnd is the stack offset to the end of the fixed and callee-save
   // stack area.
   int64_t FixedCSEnd = Offset;
-  // TANGOLLVM
+
   // FixedCSEnd is the stack offset to the end of the fixed and callee-save
   // stack area.
-  if (MF.getFunction().getCallingConv() == CallingConv::Go_Internal) {
+  if (TangoLLVM::isGoABIInternal(MF.getFunction())) {
     // this is a special Go function.
     if (auto n = MF.getFunction().getMetadata("go.local.variable.area")) {
       assert(n->getNumOperands() == 2 && "must have at least two operands");
@@ -1175,7 +1176,7 @@ void PEI::calculateFrameObjectOffsets(MachineFunction &MF) {
   }
 
   // TANGOLLVM
-  if (MF.getFunction().getCallingConv() == CallingConv::Go_Internal) {
+  if (TangoLLVM::isGoABIInternal(MF.getFunction())) {
     // this is a special Go function.
     if (auto n = MF.getFunction().getMetadata("go.callee.args.area")) {
       assert(n->getNumOperands() == 2 && "must have at least two operands");
@@ -1233,7 +1234,7 @@ void PEI::insertPrologEpilogCode(MachineFunction &MF) {
   }
 
   // TANGOLLVM
-  if (MF.getFunction().getCallingConv() == CallingConv::Go_Internal) {
+  if (TangoLLVM::isGoABIInternal(MF.getFunction())) {
     assert(!MF.shouldSplitStack() && "should not use GNU split stack for cconv Go ABIInternal");
     assert(SaveBlocks.size() == 1 && "must be a single entry");
     for (MachineBasicBlock *SaveBlock : SaveBlocks)
@@ -1575,7 +1576,7 @@ void PEI::replaceFrameIndices(MachineBasicBlock *BB, MachineFunction &MF,
 
   bool InsideCallSequence = false;
   // TANGOLLVM
-  bool replaceFP = MF.getFunction().getCallingConv() == CallingConv::Go_Internal;
+  bool replaceFP = TangoLLVM::isGoABIInternal(MF.getFunction());
   int preSPAdj = SPAdj; // SPAdj may be updated after eliminating frame index.
 
   for (MachineBasicBlock::iterator I = BB->begin(); I != BB->end(); ) {

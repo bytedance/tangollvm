@@ -6231,7 +6231,7 @@ LSRInstance::LSRInstance(Loop *L, IVUsers &IU, ScalarEvolution &SE,
   if (Uses.empty())
     return;
 
-  if (TangoLLVM::isGoABIInternal(L->getHeader()->getParent())) {
+  if (TangoLLVM::isGoABIInternal(*L->getHeader()->getParent())) {
     // Go: skip when the use has address type. This is because SCEV may generate
     // out-of-bound GEPs that may lead to invalid stackmap entries and confuse GC
     for (const LSRUse &LU : Uses) {

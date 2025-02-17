@@ -39,6 +39,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/TangoLLVM.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCInst.h"
@@ -427,7 +428,7 @@ int X86InstrInfo::getSPAdjust(const MachineInstr &MI) const {
   const MachineFunction *MF = MI.getParent()->getParent();
   const TargetFrameLowering *TFI = MF->getSubtarget().getFrameLowering();
 
-  if (MF->getFunction().getCallingConv() == CallingConv::Go_Internal) {
+  if (TangoLLVM::isGoABIInternal(MF->getFunction())) {
     if (isFrameInstr(MI)) {
       int SPAdj = alignTo(getFrameSize(MI), TFI->getStackAlign());
       SPAdj -= getFrameAdjustment(MI);

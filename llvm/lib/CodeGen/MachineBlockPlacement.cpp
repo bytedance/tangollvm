@@ -46,6 +46,7 @@
 #include "llvm/CodeGen/MachinePostDominators.h"
 #include "llvm/CodeGen/MachineSizeOpts.h"
 #include "llvm/CodeGen/TailDuplicator.h"
+#include "llvm/CodeGen/TangoLLVM.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
 #include "llvm/CodeGen/TargetLowering.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
@@ -3824,7 +3825,7 @@ void MachineBlockPlacement::fixupGoSplitStack() {
   auto isAllocMBB = [](MachineBasicBlock &MBB) {
     // find the call to morestack
     for (auto &MI : MBB)
-      if (TangoLLVM::isMoreStackCall(MI))
+      if (TangoLLVMCodeGen::isMoreStackCall(MI))
         return true;
     return false;
   };
