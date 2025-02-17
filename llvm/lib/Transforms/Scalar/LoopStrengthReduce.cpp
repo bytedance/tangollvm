@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-02-17.
 //===----------------------------------------------------------------------===//
 //
 // This transformation analyzes and transforms the induction variables (and
@@ -97,6 +99,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/IR/TangoLLVM.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Use.h"
 #include "llvm/IR/User.h"
@@ -6227,6 +6230,16 @@ LSRInstance::LSRInstance(Loop *L, IVUsers &IU, ScalarEvolution &SE,
 
   if (Uses.empty())
     return;
+
+  if (TangoLLVM::isGoABIInternal(L->getHeader()->getParent())) {
+    // Go: skip when the use has address type. This is because SCEV may generate
+    // out-of-bound GEPs that may lead to invalid stackmap entries and confuse GC
+    for (const LSRUse &LU : Uses) {
+      if (LU.Kind == LSRUse::Address) {
+        return;
+      }
+    }
+  }
 
   LLVM_DEBUG(dbgs() << "LSR found " << Uses.size() << " uses:\n";
              print_uses(dbgs()));
