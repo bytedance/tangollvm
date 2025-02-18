@@ -263,7 +263,7 @@ bool X86GoFixupPreRegAllocPass::optimizeOpSP() {
             assert(MI.getNumOperands() >= 3 && "cannot handle more");
             assert(Dst.isReg() && Register::isVirtualRegister(Dst.getReg()) && "invariant: must be vreg");
             assert(Src.isReg() && Register::isVirtualRegister(Src.getReg()) && "invariant: must be vreg");
-            assert(Imm.isImm() && Imm.getImm() >= 0 && "invariant: must be imm");
+            assert(Imm.isImm() && "invariant: must be imm");
             ToBeReplaced.push_back(&MI);
             continue;
           }
