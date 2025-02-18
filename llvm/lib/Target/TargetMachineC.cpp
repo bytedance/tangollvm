@@ -314,28 +314,28 @@ static LLVMBool LLVMTargetMachineEmit(LLVMTargetMachineRef T, LLVMModuleRef M,
   // clients, which may intentionally retain a different or empty triple.
   if (TM->getTargetTriple().isGoEnvironment() && Mod->getTargetTriple().empty())
     Mod->setTargetTriple(TM->getTargetTriple().getTriple());
-  PassInstrumentationCallbacks PIC;
-  PassBuilder PB(TM, PipelineTuningOptions(), std::nullopt, &PIC);
-  LoopAnalysisManager LAM;
-  FunctionAnalysisManager FAM;
-  CGSCCAnalysisManager CGAM;
-  ModuleAnalysisManager MAM;
-  StandardInstrumentations SI(Mod->getContext(), false, true);
-  SI.registerCallbacks(PIC, &MAM);
-  PB.registerModuleAnalyses(MAM);
-  PB.registerCGSCCAnalyses(CGAM);
-  PB.registerFunctionAnalyses(FAM);
-  PB.registerLoopAnalyses(LAM);
-  PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+  // PassInstrumentationCallbacks PIC;
+  // PassBuilder PB(TM, PipelineTuningOptions(), std::nullopt, &PIC);
+  // LoopAnalysisManager LAM;
+  // FunctionAnalysisManager FAM;
+  // CGSCCAnalysisManager CGAM;
+  // ModuleAnalysisManager MAM;
+  // StandardInstrumentations SI(Mod->getContext(), false, true);
+  // SI.registerCallbacks(PIC, &MAM);
+  // PB.registerModuleAnalyses(MAM);
+  // PB.registerCGSCCAnalyses(CGAM);
+  // PB.registerFunctionAnalyses(FAM);
+  // PB.registerLoopAnalyses(LAM);
+  // PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
 
-  ModulePassManager MPM = PB.buildPerModuleDefaultPipeline(
-        OptimizationLevel::O3);
+  // ModulePassManager MPM = PB.buildPerModuleDefaultPipeline(
+  //       OptimizationLevel::O3);
   // dbgs() << "Pipeline: \n";
   // MPM.printPipeline(outs(), [&PIC](StringRef ClassName) {
   //     auto PassName = PIC.getPassNameForClassName(ClassName);
   //     return PassName.empty() ? ClassName : PassName;
   // });
-  MPM.run(*Mod, MAM);
+  // MPM.run(*Mod, MAM);
   CodeGenFileType ft;
   switch (codegen) {
     case LLVMAssemblyFile:

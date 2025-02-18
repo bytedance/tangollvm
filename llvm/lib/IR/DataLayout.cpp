@@ -240,7 +240,6 @@ void DataLayout::reset(StringRef Desc) {
 
 Expected<DataLayout> DataLayout::parse(StringRef LayoutDescription) {
   DataLayout Layout("");
-  dbgs() << "LayoutDescription " << LayoutDescription.str() << "\n";
   if (Error Err = Layout.parseSpecifier(LayoutDescription))
     return std::move(Err);
   return Layout;
