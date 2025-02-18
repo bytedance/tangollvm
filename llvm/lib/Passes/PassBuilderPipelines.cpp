@@ -91,6 +91,7 @@
 #include "llvm/Transforms/Scalar/DivRemPairs.h"
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
 #include "llvm/Transforms/Scalar/Float2Int.h"
+#include "llvm/Transforms/Scalar/GoNilCheckElim.h"
 #include "llvm/Transforms/Scalar/GVN.h"
 #include "llvm/Transforms/Scalar/IndVarSimplify.h"
 #include "llvm/Transforms/Scalar/InferAlignment.h"
@@ -1449,6 +1450,9 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
                  /*AllowSpeculation=*/true),
         /*USeMemorySSA=*/true, /*UseBlockFrequencyInfo=*/false));
   }
+
+  if (TM->getTargetTriple().isGoEnvironment())
+    OptimizePM.addPass(GoNilCheckElimPass());
 
   OptimizePM.addPass(Float2IntPass());
   OptimizePM.addPass(LowerConstantIntrinsicsPass());
