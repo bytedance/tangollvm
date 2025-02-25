@@ -1136,6 +1136,7 @@ PassBuilder::buildModuleSimplificationPipeline(OptimizationLevel Level,
   // years, it should be re-analyzed.
   MPM.addPass(IPSCCPPass(
               IPSCCPOptions(/*AllowFuncSpec=*/
+                            !TM->getTargetTriple().isGoEnvironment() &&
                             Level != OptimizationLevel::Os &&
                             Level != OptimizationLevel::Oz &&
                             !isLTOPreLink(Phase))));
@@ -1812,6 +1813,7 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
     // opens opportunities for globalopt (and inlining) by substituting function
     // pointers passed as arguments to direct uses of functions.
     MPM.addPass(IPSCCPPass(IPSCCPOptions(/*AllowFuncSpec=*/
+                                         !TM->getTargetTriple().isGoEnvironment() &&
                                          Level != OptimizationLevel::Os &&
                                          Level != OptimizationLevel::Oz)));
 

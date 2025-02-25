@@ -76,6 +76,8 @@ public:
   uint32_t Locals;
   uint8_t FuncID;
   uint8_t FuncFlag;
+  uint32_t StartLine;
+  bool WriteStartLine;
   std::vector<uint32_t> File;
   // every location has one or nil inlined at
   std::vector<MCGoInlTreeNode*> InlTree;
@@ -97,6 +99,9 @@ private:
     Locals = 0;
     FuncID = 0;
     FuncFlag = 0;
+
+    StartLine = 0;
+    WriteStartLine = false;
 
     File.clear();
     for (auto it : LocToInlNode) {

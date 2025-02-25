@@ -114,13 +114,26 @@ static void sortLocation(std::vector<DILocation*> &locations) {
 void MCGoAuxData::computeFuncInfo(const MachineFunction *MF) {
   auto *FIM = MF->getFunction().getMetadata("go.funcinfo");
   if (!FIM) {
-    outs() << "Error: missing function info for " << MF->getName() << "\n";
+    dbgs() << "Error: missing function info for " << MF->getName() << "\n";
     report_fatal_error("missing function info");
   }
 
   FuncInfo.Args = uint32_t(cast<ConstantAsMetadata>(FIM->getOperand(0))->getValue()->getUniqueInteger().getZExtValue());
   FuncInfo.FuncID = uint8_t(cast<ConstantAsMetadata>(FIM->getOperand(1))->getValue()->getUniqueInteger().getZExtValue());
   FuncInfo.FuncFlag = uint8_t(cast<ConstantAsMetadata>(FIM->getOperand(2))->getValue()->getUniqueInteger().getZExtValue());
+
+  // TODO:
+  const Module* TheModule = MF->getFunction().getParent();
+  FuncInfo.StartLine = 0;
+  FuncInfo.WriteStartLine = false;
+  if (NamedMDNode *CUNodes = TheModule->getNamedMetadata("go.version")) {
+    StringRef GoVersion = cast<MDString>(CUNodes->getOperand(0)->getOperand(0))->getString();
+    if (GoVersion.starts_with("go1.22")) {
+      FuncInfo.WriteStartLine = true;
+      FuncInfo.StartLine = uint32_t(cast<ConstantAsMetadata>(FIM->getOperand(3))->getValue()->getUniqueInteger().getZExtValue());
+    }
+  }
+
 
   const MachineFrameInfo &MFI = MF->getFrameInfo();
   FuncInfo.Locals = uint32_t(MFI.getStackSize());
@@ -167,7 +180,7 @@ void MCGoAuxData::computeFunctionSP(const MachineFunction *MF) {
   while (true) {
     iteration++;
     if (iteration > 100) {
-      outs() << "Error: Oops, cannot do analysis anymore after " << iteration << " iteration\n";
+      dbgs() << "Error: Oops, cannot do analysis anymore after " << iteration << " iteration\n";
       report_fatal_error("too many iterations");
       break;
     }
@@ -198,7 +211,7 @@ void MCGoAuxData::computeFunctionSP(const MachineFunction *MF) {
         }
       }
       if (!MBB->isEntryBlock() && PredFlow.first == -1) {
-        outs() << "Error: " << *MBB << " has no pred data";
+        dbgs() << "Error: " << *MBB << " has no pred data";
         report_fatal_error("missing predecessor SP");
         break;
       }
@@ -219,7 +232,7 @@ void MCGoAuxData::computeFunctionSP(const MachineFunction *MF) {
           if (Flow.second < PredFlow.second) {
             Flow = PredFlow;
           } else if (!MBB->isEntryBlock()) {
-            outs() << "Error: Oops:" << Flow.second << ", pred=" << PredFlow.second << "\n";
+            dbgs() << "Error: Oops:" << Flow.second << ", pred=" << PredFlow.second << "\n";
             report_fatal_error("missing fresh predecessor SP!");
             break;
           } // else { }
@@ -252,11 +265,11 @@ void MCGoAuxData::computeFunctionSP(const MachineFunction *MF) {
       report_fatal_error("cannot find MBB in PostSP");
     }
     if (PreBBSP[&MBB].first < 0) {
-      outs() << "Error: PreSP is negative for " << MBB << "\n";
+      dbgs() << "Error: PreSP is negative for " << MBB << "\n";
       report_fatal_error("negative PreSP");
     }
     if (PostBBSP[&MBB].first < 0) {
-      outs() << "Error: PostSP is negative for " << MBB << "\n";
+      dbgs() << "Error: PostSP is negative for " << MBB << "\n";
       report_fatal_error("negative PostSP");
     }
     // TODO: check upbounds
@@ -817,7 +830,7 @@ void MCGoAuxData::beginInstruction(const MachineInstr *MI) {
       LastSPAdjust = 0;
     }
     if (PostSPMap.find(MI) == PostSPMap.end()) {
-      outs() << "Error: Oops, no post SP data for instruction " << *MI;
+      dbgs() << "Error: Oops, no post SP data for instruction " << *MI;
       report_fatal_error("no post SP data for instruction");
     }
     int32_t PostSP = PostSPMap[MI];

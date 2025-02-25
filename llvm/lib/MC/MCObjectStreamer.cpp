@@ -874,6 +874,11 @@ void MCObjectStreamer::emitGoFuncInfo(MCGoFuncInfo &FuncInfo) {
 
   Offset += 4 + 4 + 1 + 1 + 1 + 1;
 
+  if (FuncInfo.WriteStartLine) {
+    support::endian::write(OSE, uint32_t(FuncInfo.StartLine), endianness::little);
+    Offset += 4;
+  }
+
   support::endian::write(OSE, uint32_t(FuncInfo.File.size()), endianness::little);
   Offset += 4;
   for (uint32_t F : FuncInfo.File) {

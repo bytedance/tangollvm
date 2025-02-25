@@ -23,8 +23,6 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/MapVector.h"
-// #include "llvm/ADT/None.h"
-// #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
@@ -192,23 +190,28 @@ static Value* unpackBitCast(Value *V) {
   return V;
 }
 
-static bool isStackBasePointer(Value *V) {
+static bool isStackConstantPointer(Value *V) {
   if (isa<AllocaInst>(V))
     return true;
   if (isGoPreAllocated(V))
     return true;
 
   if (BitCastInst *BC = dyn_cast<BitCastInst>(V))
-    return isStackBasePointer(BC->getOperand(0));
+    return isStackConstantPointer(BC->getOperand(0));
 
   if (IntToPtrInst *ITP = dyn_cast<IntToPtrInst>(V))
-    return isStackBasePointer(ITP->getOperand(0));
+    return isStackConstantPointer(ITP->getOperand(0));
 
   if (PtrToIntInst *PTI = dyn_cast<PtrToIntInst>(V))
-    return isStackBasePointer(PTI->getOperand(0));
+    return isStackConstantPointer(PTI->getOperand(0));
 
   if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(V))
-    return isStackBasePointer(GEP->getOperand(0));
+    if (isStackConstantPointer(GEP->getOperand(0))) {
+      if (GEP->hasAllConstantIndices())
+        return true;
+
+      return false;
+    }
 
   return false;
 }
@@ -1867,7 +1870,7 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
     Value *Base = PointerToBase.find(V)->second;
     if (V->stripPointerCasts() == Base->stripPointerCasts() && Result.LiveSet.count(Base))
       continue; // V is Base and Base has been recorded in Step 1.
-    if (isStackBasePointer(Base))
+    if (isStackConstantPointer(Base))
       continue; // reg alloc will not spill stack locations
     // dbgs() << "Record: " << *Base << ": " << *V << "\n";
     // Record V to support copy stack.
@@ -3336,6 +3339,14 @@ static void checkGoPointerLikeValues(Function &F) {
               || isa<BinaryOperator>(I)
               || isa<SelectInst>(I)
               || isa<PHINode>(I)
+              // TODO: vector of pointers are usually represented in vector of i64
+              || isa<InsertValueInst>(I)
+              || isa<ExtractValueInst>(I)
+              || isa<InsertElementInst>(I)
+              || isa<ExtractElementInst>(I)
+              || isa<ShuffleVectorInst>(I)
+              // Atomic
+              || isa<AtomicCmpXchgInst>(I)
               // trunc
               || isa<CastInst>(I))) {
           // auto Fn = cast<Instruction>(&I)->getParent()->getParent();
