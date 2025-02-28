@@ -16,6 +16,7 @@
 #define LLVM_LIB_TARGET_X86_X86REGISTERINFO_H
 
 #include "llvm/CodeGen/TargetRegisterInfo.h"
+#include "llvm/IR/TangoLLVM.h"
 
 #define GET_REGINFO_HEADER
 #include "X86GenRegisterInfo.inc"
@@ -115,7 +116,7 @@ public:
   const uint32_t *getDarwinTLSCallPreservedMask() const;
 
   // TANGOLLVM
-  const uint32_t *getGoWriteBarrierPreservedMask() const;
+  const uint32_t *getGoAdHocCallPreservedMask(const MachineFunction &MF, CallingConv::ID CallConv, GoAdHocABI goAdHocABI) const;
 
   /// getReservedRegs - Returns a bitset indexed by physical register number
   /// indicating if a register is a special register that has particular uses and

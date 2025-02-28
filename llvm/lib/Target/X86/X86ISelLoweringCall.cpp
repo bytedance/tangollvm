@@ -29,6 +29,7 @@
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/TangoLLVM.h"
 
 #define DEBUG_TYPE "x86-isel"
 
@@ -1454,7 +1455,7 @@ static ArrayRef<MCPhysReg> get64BitArgumentXMMs(MachineFunction &MF,
 }
 
 #ifndef NDEBUG
-static bool isSortedByValueNo(ArrayRef<CCValAssign> ArgLocs, int index) {
+static bool isSortedByValueNo(ArrayRef<CCValAssign> ArgLocs) {
   return llvm::is_sorted(
       ArgLocs, [](const CCValAssign &A, const CCValAssign &B) -> bool {
         return A.getValNo() < B.getValNo();
@@ -1707,7 +1708,7 @@ SDValue X86TargetLowering::LowerFormalArguments(
 
   // The next loop assumes that the locations are in the same order of the
   // input arguments.
-  assert(isSortedByValueNo(ArgLocs, 0) &&
+  assert(isSortedByValueNo(ArgLocs) &&
          "Argument Location list must be sorted before lowering");
 
   SDValue ArgValue;
@@ -2009,6 +2010,106 @@ static bool CC_X86_Go_Closure(unsigned ValNo, MVT ValVT, MVT LocVT, CCValAssign:
   }
 }
 
+static void passArgsForGoAdHocABI(MachineFunction &MF,
+    SmallVector<CCValAssign, 16> &ArgLocs,
+    SmallVectorImpl<SDValue> &OutVals,
+    SmallVector<std::pair<Register, SDValue>, 8> &RegsToPass,
+    GoAdHocABI goAdHocABI) {
+  switch (goAdHocABI) {
+  case GoAdHocABI::None:
+    llvm_unreachable("impossible");
+    break;
+  case GoAdHocABI::GoWriteBarrier: {
+    assert(ArgLocs.size() == 2 && "write barrier takes two inputs");
+
+    CCValAssign &DstVA = ArgLocs[0];
+    assert(DstVA.getLocInfo() == CCValAssign::Full);
+    // EVT DstRegVT = DstVA.getLocVT();
+    SDValue DstArg = OutVals[0];
+
+    CCValAssign &SrcVA = ArgLocs[1];
+    assert(SrcVA.getLocInfo() == CCValAssign::Full);
+    // EVT SrcRegVT = SrcVA.getLocVT();
+    SDValue SrcArg = OutVals[1];
+
+    // TODO: x86-64 only
+    RegsToPass.push_back(std::make_pair(X86::RDI, DstArg));
+
+    MachineRegisterInfo &MRI = MF.getRegInfo();
+    const TargetRegisterClass *AddrRegClass = &X86::GR64GoWriteBarrierSrcRegClass; // getRegClassFor(PVT);
+    Register Vreg = MRI.createVirtualRegister(AddrRegClass);
+
+    RegsToPass.push_back(std::make_pair(Vreg, SrcArg));
+    break;
+  }
+  case GoAdHocABI::GoWriteBarrierN: {
+    assert(ArgLocs.size() == 0 && "gcWriteBarrierN takes zero inputs");
+    break;
+  }
+  case GoAdHocABI::DuffCopy:{
+    assert(ArgLocs.size() == 2 && "duffcopy takes two inputs");
+
+    CCValAssign &FirstVA = ArgLocs[0];
+    assert(FirstVA.getLocInfo() == CCValAssign::Full);
+    SDValue FirstArg = OutVals[0];
+
+    CCValAssign &SecondVA = ArgLocs[1];
+    assert(SecondVA.getLocInfo() == CCValAssign::Full);
+    SDValue SecondArg = OutVals[1];
+
+    Register FirstReg = X86::RDI;
+    Register SecondReg = X86::RSI;
+
+    RegsToPass.push_back(std::make_pair(FirstReg, FirstArg));
+    RegsToPass.push_back(std::make_pair(SecondReg, SecondArg));
+    break;
+  }
+  case GoAdHocABI::DuffZero: {
+    assert(ArgLocs.size() == 1 && "duffzero takes one input");
+
+    CCValAssign &FirstVA = ArgLocs[0];
+    assert(FirstVA.getLocInfo() == CCValAssign::Full);
+    SDValue FirstArg = OutVals[0];
+
+    Register FirstReg = X86::RDI;
+
+    RegsToPass.push_back(std::make_pair(FirstReg, FirstArg));
+    break;
+  }
+  case GoAdHocABI::PanicBoundsA:
+  case GoAdHocABI::PanicBoundsB:
+  case GoAdHocABI::PanicBoundsC: {
+    assert(ArgLocs.size() == 2 && "panic bounds takes two inputs");
+
+    CCValAssign &FirstVA = ArgLocs[0];
+    assert(FirstVA.getLocInfo() == CCValAssign::Full);
+    SDValue FirstArg = OutVals[0];
+
+    CCValAssign &SecondVA = ArgLocs[1];
+    assert(SecondVA.getLocInfo() == CCValAssign::Full);
+    SDValue SecondArg = OutVals[1];
+
+    Register FirstReg, SecondReg;
+    if (goAdHocABI == GoAdHocABI::PanicBoundsA) {
+      FirstReg = X86::RDX;
+      SecondReg = X86::RBX;
+    } else if (goAdHocABI == GoAdHocABI::PanicBoundsB) {
+      FirstReg = X86::RCX;
+      SecondReg = X86::RDX;
+    } else {
+      assert(goAdHocABI == GoAdHocABI::PanicBoundsC && "must be C");
+      FirstReg = X86::RAX;
+      SecondReg = X86::RCX;
+    }
+
+    // TODO: x86-64 only
+    RegsToPass.push_back(std::make_pair(FirstReg, FirstArg));
+    RegsToPass.push_back(std::make_pair(SecondReg, SecondArg));
+    break;
+  }
+  }
+}
+
 SDValue
 X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
                              SmallVectorImpl<SDValue> &InVals) const {
@@ -2042,16 +2143,6 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   Metadata *IsCFProtectionSupported = M->getModuleFlag("cf-protection-branch");
 
   // TANGOLLVM
-  enum GoAdHocABI {
-    None,
-    GoWB,
-    DuffCopy,
-    DuffZero,
-    PanicBoundsA,
-    PanicBoundsB,
-    PanicBoundsC
-  };
-
   GoAdHocABI goAdHocABI = GoAdHocABI::None;
   if (GlobalAddressSDNode *GA = dyn_cast<GlobalAddressSDNode>(Callee)) {
     StringRef CalleeName = GA->getGlobal()->getName();
@@ -2059,7 +2150,10 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
       CalleeName = CalleeName.substr(8); // 8 = strlen("runtime.")
       if (CalleeName == "gcWriteBarrier") {
         // AdHoc Calling Convention and Preserve All General Purposes
-        goAdHocABI = GoAdHocABI::GoWB;
+        goAdHocABI = GoAdHocABI::GoWriteBarrier;
+      } else if (CalleeName.starts_with("gcWriteBarrier")) {
+        // starts_with but not gcWriteBarrier
+        goAdHocABI = GoAdHocABI::GoWriteBarrierN;
       } else if (CalleeName == "duffcopy") {
         // C Calling Convention and Preserve All
         goAdHocABI = GoAdHocABI::DuffCopy;
@@ -2217,62 +2311,16 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
 
   // The next loop assumes that the locations are in the same order of the
   // input arguments.
-  assert(isSortedByValueNo(ArgLocs, 1) &&
+  assert(isSortedByValueNo(ArgLocs) &&
          "Argument Location list must be sorted before lowering");
 
   // Walk the register/memloc assignments, inserting copies/loads.  In the case
   // of tail call optimization arguments are handle later.
   const X86RegisterInfo *RegInfo = Subtarget.getRegisterInfo();
-if (goAdHocABI == GoAdHocABI::GoWB) {
-    assert(ArgLocs.size() == 2 && "write barrier takes two inputs");
-
-    CCValAssign &DstVA = ArgLocs[0];
-    assert(DstVA.getLocInfo() == CCValAssign::Full);
-    // EVT DstRegVT = DstVA.getLocVT();
-    SDValue DstArg = OutVals[0];
-
-    CCValAssign &SrcVA = ArgLocs[1];
-    assert(SrcVA.getLocInfo() == CCValAssign::Full);
-    // EVT SrcRegVT = SrcVA.getLocVT();
-    SDValue SrcArg = OutVals[1];
-
-    // TODO: x86-64 only
-    RegsToPass.push_back(std::make_pair(X86::RDI, DstArg));
-
-    MachineRegisterInfo &MRI = MF.getRegInfo();
-    const TargetRegisterClass *AddrRegClass = &X86::GR64GoWBSrcRegClass; // getRegClassFor(PVT);
-    Register Vreg = MRI.createVirtualRegister(AddrRegClass);
-
-    RegsToPass.push_back(std::make_pair(Vreg, SrcArg));
-
-  } else if (goAdHocABI >= GoAdHocABI::PanicBoundsA && goAdHocABI <= GoAdHocABI::PanicBoundsC) {
-    assert(ArgLocs.size() == 2 && "panic bounds takes two inputs");
-
-    CCValAssign &FirstVA = ArgLocs[0];
-    assert(FirstVA.getLocInfo() == CCValAssign::Full);
-    SDValue FirstArg = OutVals[0];
-
-    CCValAssign &SecondVA = ArgLocs[1];
-    assert(SecondVA.getLocInfo() == CCValAssign::Full);
-    SDValue SecondArg = OutVals[1];
-
-    Register FirstReg, SecondReg;
-    if (goAdHocABI == GoAdHocABI::PanicBoundsA) {
-      FirstReg = X86::RDX;
-      SecondReg = X86::RBX;
-    } else if (goAdHocABI == GoAdHocABI::PanicBoundsB) {
-      FirstReg = X86::RCX;
-      SecondReg = X86::RDX;
-    } else {
-      assert(goAdHocABI == GoAdHocABI::PanicBoundsC && "must be C");
-      FirstReg = X86::RAX;
-      SecondReg = X86::RCX;
-    }
-
-    // TODO: x86-64 only
-    RegsToPass.push_back(std::make_pair(FirstReg, FirstArg));
-    RegsToPass.push_back(std::make_pair(SecondReg, SecondArg));
-  } else
+  // TANGOLLVM
+  if (goAdHocABI != GoAdHocABI::None)
+    passArgsForGoAdHocABI(MF, ArgLocs, OutVals, RegsToPass, goAdHocABI);
+  else // Leave this intent purposely for better diff
   for (unsigned I = 0, OutIndex = 0, E = ArgLocs.size(); I != E;
        ++I, ++OutIndex) {
     assert(OutIndex < Outs.size() && "Invalid Out index");
@@ -2559,6 +2607,9 @@ if (goAdHocABI == GoAdHocABI::GoWB) {
 
   // Add a register mask operand representing the call-preserved registers.
   const uint32_t *Mask = [&]() {
+    // TANGOLLVM
+    if (goAdHocABI != GoAdHocABI::None)
+      return RegInfo->getGoAdHocCallPreservedMask(MF, CallConv, goAdHocABI);
     auto AdaptedCC = CallConv;
     // If HasNCSR is asserted (attribute NoCallerSavedRegisters exists),
     // use X86_INTR calling convention because it has the same CSR mask
@@ -2569,10 +2620,6 @@ if (goAdHocABI == GoAdHocABI::GoWB) {
     // to use the CSR_NoRegs_RegMask.
     if (CB && CB->hasFnAttr("no_callee_saved_registers"))
       AdaptedCC = (CallingConv::ID)CallingConv::GHC;
-    // TANGOLLVM
-    if (goAdHocABI == GoAdHocABI::GoWB) return RegInfo->getGoWriteBarrierPreservedMask();
-    if (goAdHocABI == GoAdHocABI::DuffCopy || goAdHocABI == GoAdHocABI::DuffZero)
-      AdaptedCC = (CallingConv::ID)CallingConv::AnyReg;
     return RegInfo->getCallPreservedMask(MF, AdaptedCC);
   }();
   assert(Mask && "Missing call preserved mask for calling convention");
@@ -2599,7 +2646,7 @@ if (goAdHocABI == GoAdHocABI::GoWB) {
   // from the reg mask. Create a new RegMask for such calling conventions.
   // RegMask for calling conventions that disable only return registers (e.g.
   // preserve_most) will be modified later in LowerCallResult.
-  bool ShouldDisableArgRegs = shouldDisableArgRegFromCSR(CallConv) || HasNCSR || (goAdHocABI == GoAdHocABI::DuffCopy || goAdHocABI == GoAdHocABI::DuffZero);
+  bool ShouldDisableArgRegs = shouldDisableArgRegFromCSR(CallConv) || HasNCSR;
   if (ShouldDisableArgRegs || shouldDisableRetRegFromCSR(CallConv)) {
     const TargetRegisterInfo *TRI = Subtarget.getRegisterInfo();
 
@@ -2614,21 +2661,6 @@ if (goAdHocABI == GoAdHocABI::GoWB) {
       for (auto const &RegPair : RegsToPass)
         for (MCPhysReg SubReg : TRI->subregs_inclusive(RegPair.first))
           RegMask[SubReg / 32] &= ~(1u << (SubReg % 32));
-    }
-
-    if ((goAdHocABI == GoAdHocABI::DuffCopy || goAdHocABI == GoAdHocABI::DuffZero) && Subtarget.hasAVX()) {
-      // All YMM registers are clobbered in duffcopy and duffzero due to vzeroupper instruction
-      // when AVX is available in general.
-      for (unsigned n = 0; n < 16; ++n) {
-        for (MCRegAliasIterator AI(X86::YMM0 + n, TRI, true); AI.isValid(); ++AI) {
-          RegMask[*AI / 32] &= ~(1u << (*AI % 32));
-        }
-      }
-    } else if (goAdHocABI == GoAdHocABI::DuffCopy && !Subtarget.hasAVX()) {
-      // Only XMM0 is clobbered in duffcopy when AVX is not available in general.
-      for (MCRegAliasIterator AI(X86::XMM0, TRI, true); AI.isValid(); ++AI) {
-        RegMask[*AI / 32] &= ~(1u << (*AI % 32));
-      }
     }
 
     // Create the RegMask Operand according to our updated mask.
@@ -2718,6 +2750,13 @@ if (goAdHocABI == GoAdHocABI::GoWB) {
         break;
       }
     }
+
+  if (goAdHocABI == GoAdHocABI::GoWriteBarrierN) {
+    // Copy result from R11 to vreg
+    Chain = DAG.getCopyFromReg(Chain, dl, X86::R11, MVT::i64, InGlue).getValue(1);
+    InVals.push_back(Chain.getValue(0));
+    return Chain;
+  }
 
   // Handle result values, copying them out of physregs into vregs that we
   // return.

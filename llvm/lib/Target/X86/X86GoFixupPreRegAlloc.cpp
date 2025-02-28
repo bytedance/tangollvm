@@ -81,8 +81,6 @@ private:
 
   bool isGoStackPointerRegister(Register Reg) {
     StringRef RegName = TRI->getRegAsmName(Reg);
-    // TODO: move this pass to Target/X86 or passing RegName
-    // as a metadata of MF.
     return RegName == "RSP";
   }
 

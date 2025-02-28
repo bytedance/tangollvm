@@ -1895,12 +1895,13 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
 
   ArrayRef<Value *> GCArgs(PtrFields);
 #if 0
+  dbgs() << "Dump GCArgs for function " << Call->getParent()->getParent()->getName() << "\n";
   dbgs() << "Call: " << *Call << "\n";
   for (Value *V : BasePtrs)
     dbgs() << "BasePtr: " << *V << "\n";
 
   for (Value *V : GCArgs)
-    dbgs() << "Value: " << *V << "\n";
+    dbgs() << "Final GCArg: " << *V << "\n";
 #endif
   uint64_t StatepointID = ID;
   ID++;
@@ -2612,14 +2613,13 @@ static bool hasStackMap(const CallBase *Call) {
   }
   if (Function *Fn = Call->getCalledFunction()) {
     StringRef Name = Fn->getName();
-    if (Name == "runtime.gcWriteBarrier"
-        || Name == "runtime.typedmemclr"
-        || Name == "runtime.typedmemmove") {
+
+    if (Name.starts_with("runtime.gcWriteBarrier")) {
       return false;
     }
-    if (Name == "\"\".gcWriteBarrier"
-        || Name == "\"\".typedmemclr"
-        || Name == "\"\".typedmemmove") {
+
+    if (Name == "runtime.typedmemclr"
+        || Name == "runtime.typedmemmove") {
       return false;
     }
   }
@@ -2918,7 +2918,7 @@ static void computeLiveInValues(BasicBlock::reverse_iterator Begin,
         if (isAlloca(V, DVCache)) {
           Value *Base = isTrackedAlloca(V, DVCache);
           if (!Base) {
-            auto * T = getGoType(isAlloca(V, DVCache));
+            // auto * T = getGoType(isAlloca(V, DVCache));
             // assert(T->isPointerTy() && "alloca must be pointer");
             // if (!hasPointer(T))
             //   continue;
@@ -3292,7 +3292,7 @@ static void checkGoPointerLikeValues(Function &F) {
         if (isa<StoreInst>(I))
           continue;
 
-        if (isa<ICmpInst>(I)) {
+        if (isa<ICmpInst>(I) || isa<BranchInst>(I)) {
           // boolean is not a pointer value
           // we have no need to keep tracking it.
           continue;
@@ -3320,6 +3320,8 @@ static void checkGoPointerLikeValues(Function &F) {
         }
 
         // Not a pointer like value
+        // Note that LoadInst has a single pointer operand.
+        // So HasPointerLikeOp is always false for LoadInst.
         if (!HasPointerLikeOp)
           continue;
 
@@ -3330,7 +3332,16 @@ static void checkGoPointerLikeValues(Function &F) {
           continue;
         }
 
-        if (isa<InsertElementInst>(I) || isa<ExtractElementInst>(I)) {
+        if (isa<InsertValueInst>(I)
+              || isa<ExtractValueInst>(I)
+              || isa<InsertElementInst>(I)
+              || isa<ExtractElementInst>(I)
+              || isa<AtomicCmpXchgInst>(I)
+              || isa<AtomicRMWInst>(I)
+              ) {
+          // InsertXXX is like StoreInst
+          // ExtractXXX is like LoadInst
+          // Atomic is like combined Store and Load
           continue;
         }
 
@@ -3340,18 +3351,13 @@ static void checkGoPointerLikeValues(Function &F) {
               || isa<SelectInst>(I)
               || isa<PHINode>(I)
               // TODO: vector of pointers are usually represented in vector of i64
-              || isa<InsertValueInst>(I)
-              || isa<ExtractValueInst>(I)
-              || isa<InsertElementInst>(I)
-              || isa<ExtractElementInst>(I)
               || isa<ShuffleVectorInst>(I)
-              // Atomic
-              || isa<AtomicCmpXchgInst>(I)
               // trunc
               || isa<CastInst>(I))) {
-          // auto Fn = cast<Instruction>(&I)->getParent()->getParent();
+          auto Fn = cast<Instruction>(&I)->getParent()->getParent();
           // dbgs() << "Module: " << Fn->getParent()->getName() << "\n";
-          // dbgs() << "Function: " << Fn->getName() << "\n";
+          dbgs() << "Function: " << Fn->getName() << "\n";
+          Fn->dump();
           dbgs() << "unsupported instructions for pointer-like value: " << I << "\n";
           assert(false && "unsupported instructions");
         }

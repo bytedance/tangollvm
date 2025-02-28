@@ -542,8 +542,34 @@ const uint32_t *X86RegisterInfo::getDarwinTLSCallPreservedMask() const {
 }
 
 // TANGOLLVM
-const uint32_t *X86RegisterInfo::getGoWriteBarrierPreservedMask() const {
-  return CSR_64_AllRegs_NoSSE_RegMask;
+const uint32_t *X86RegisterInfo::getGoAdHocCallPreservedMask(
+    const MachineFunction &MF, CallingConv::ID CallConv,
+    GoAdHocABI goAdHocABI) const {
+  const X86Subtarget &Subtarget = MF.getSubtarget<X86Subtarget>();
+  switch (goAdHocABI) {
+  case GoAdHocABI::None:
+  case GoAdHocABI::PanicBoundsA:
+  case GoAdHocABI::PanicBoundsB:
+  case GoAdHocABI::PanicBoundsC:
+    return getCallPreservedMask(MF, CallConv);
+  case GoAdHocABI::GoWriteBarrier:
+    return CSR_64_AllRegs_NoSSE_RegMask;
+  case GoAdHocABI::GoWriteBarrierN:
+    return CSR_64_AllRegs_NoR11_NoSSE_RegMask;
+  case GoAdHocABI::DuffCopy:
+    if (Subtarget.hasAVX())
+      // AVX will zero XMM and YMM
+      return CSR_64_AllRegs_NoDISI_NoSSE_RegMask;
+    // XMM0 is zeroed only
+    return CSR_64_AllRegs_NoDISIXMM0_RegMask;
+  case GoAdHocABI::DuffZero:
+    if (Subtarget.hasAVX())
+      // AVX will zero XMM and YMM
+      return CSR_64_AllRegs_NoDI_NoSSE_RegMask;
+    return CSR_64_AllRegs_NoDI_RegMask;
+  }
+
+  llvm_unreachable("impossible");
 }
 
 BitVector X86RegisterInfo::getReservedRegs(const MachineFunction &MF) const {

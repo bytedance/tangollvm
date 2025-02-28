@@ -15,6 +15,16 @@
 
 namespace llvm {
 
+enum class GoAdHocABI {
+  None,
+  GoWriteBarrier, // gcWriteBarrier
+  GoWriteBarrierN, // gcWriteBarrier1 ~ gcWriteBarrier2
+  DuffCopy,
+  DuffZero,
+  PanicBoundsA,
+  PanicBoundsB,
+  PanicBoundsC
+};
 
 class TangoLLVM {
 
@@ -43,7 +53,7 @@ public:
   }
 
   static bool isGCWriteBarrier(StringRef FuncName) {
-    if (FuncName == "runtime.gcWriteBarrier") {
+    if (FuncName.starts_with("runtime.gcWriteBarrier")) {
       return true;
     }
     return false;

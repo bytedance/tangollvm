@@ -169,6 +169,11 @@ computeBitVector(Function * Fn, uint64_t StackSize, bool requireFP,
       // and that constant encodes the pointer bitmap.
       if (i+1 < n &&
           CSLocs[i+1].Type == StackMaps::Location::Constant) {
+        if (Loc.Type != StackMaps::Location::Direct) {
+          // See StackMaps.cpp for Undef Register
+          assert(CSLocs[i+1].Offset == 0xFEFEFEFE && "invariant");
+          continue;
+        }
         // Make sure it is a local/arg slot, not a spill of in-register value.
         assert(Loc.Type == StackMaps::Location::Direct);
         i++;

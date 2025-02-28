@@ -520,7 +520,7 @@ def RetCC_X86_64 : CallingConv<[
 // This is the return-value convention used for the entire X86 backend.
 let Entry = 1 in
 def RetCC_X86 : CallingConv<[
-  // TangoLLVM Handle go returns.
+  // TANGOLLVM: Handle go returns.
   CCIfCC<"CallingConv::Go_0", CCCustom<"CC_Go">>,
   CCIfCC<"CallingConv::Go_Internal", CCCustom<"CC_Go">>,
 
@@ -1132,10 +1132,10 @@ def CC_X86_64 : CallingConv<[
 // This is the argument convention used for the entire X86 backend.
 let Entry = 1 in
 def CC_X86 : CallingConv<[
-  // TangoLLVM: Handle go calls.
+  // TANGOLLVM: Handle go calls.
   CCIfCC<"CallingConv::Go_0", CCCustom<"CC_Go">>,
   CCIfCC<"CallingConv::Go_Internal", CCCustom<"CC_Go">>,
-  
+
   CCIfCC<"CallingConv::Intel_OCL_BI", CCDelegateTo<CC_Intel_OCL_BI>>,
   CCIfSubtarget<"is64Bit()", CCDelegateTo<CC_X86_64>>,
   CCDelegateTo<CC_X86_32>
@@ -1209,6 +1209,19 @@ def CSR_64_AllRegs_NoSSE : CalleeSavedRegs<(add RAX, RBX, RCX, RDX, RSI, RDI, R8
 def CSR_64_AllRegs_AVX : CalleeSavedRegs<(sub (add CSR_64_MostRegs, RAX,
                                                    (sequence "YMM%u", 0, 15)),
                                               (sequence "XMM%u", 0, 15))>;
+// TANGOLLVM: AdHoc ABI
+// for GCWriteBarrierN
+def CSR_64_AllRegs_NoR11_NoSSE : CalleeSavedRegs<(sub CSR_64_AllRegs_NoSSE, R11)>;
+// for DuffZero AVX
+def CSR_64_AllRegs_NoDI_NoSSE : CalleeSavedRegs<(sub CSR_64_AllRegs_NoSSE, RDI)>;
+// for DuffCopy AVX
+def CSR_64_AllRegs_NoDISI_NoSSE : CalleeSavedRegs<(sub CSR_64_AllRegs_NoDI_NoSSE, RSI)>;
+// for DuffZero noAVX
+def CSR_64_AllRegs_NoDI : CalleeSavedRegs<(sub CSR_64_AllRegs, RDI)>;
+// for DuffCopy noAVX
+def CSR_64_AllRegs_NoDISIXMM0 : CalleeSavedRegs<(sub CSR_64_AllRegs_NoDI, RSI, XMM0)>;
+
+
 def CSR_64_AllRegs_AVX512 : CalleeSavedRegs<(sub (add CSR_64_MostRegs, RAX,
                                                       (sequence "ZMM%u", 0, 31),
                                                       (sequence "K%u", 0, 7)),

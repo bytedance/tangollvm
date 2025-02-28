@@ -596,7 +596,7 @@ def GR64PLTSafe : RegisterClass<"X86", [i64], 64,
                                    RBX, R14, R15, R12, R13, RBP)>;
 
 // TANGOLLVM
-def GR64GoWBSrc : RegisterClass<"X86", [i64], 64,
+def GR64GoWriteBarrierSrc : RegisterClass<"X86", [i64], 64,
                               (add RAX, RCX, RDX, RSI, R8, R9, RBX, RBP)>;
 
 // It includes the GPR that are used as scratch register for Linux64 calling
