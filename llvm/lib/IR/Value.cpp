@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-03-26.
 //===----------------------------------------------------------------------===//
 //
 // This file implements the Value, ValueHandle, and User classes.
@@ -529,6 +531,11 @@ void Value::doRAUW(Value *New, ReplaceMetadataUses ReplaceMetaUses) {
 
   if (BasicBlock *BB = dyn_cast<BasicBlock>(this))
     BB->replaceSuccessorsPhiUsesWith(cast<BasicBlock>(New));
+
+  if (Instruction *Old = dyn_cast<Instruction>(this))
+    if (Instruction *NewI = dyn_cast<Instruction>(New))
+      if (Old->hasMetadata("go.pointerlike"))
+        NewI->setMetadata("go.pointerlike", MDNode::get(NewI->getContext(), {}));
 }
 
 void Value::replaceAllUsesWith(Value *New) {

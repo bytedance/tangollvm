@@ -2229,6 +2229,14 @@ llvm::InlineResult llvm::InlineFunction(CallBase &CB, InlineFunctionInfo &IFI,
       return InlineResult::failure("incompatible GC");
   }
 
+  // Go NoSplit
+  if (TangoLLVM::isGoABIInternal(*Caller)) {
+    if (Caller->hasFnAttribute("go-no-split")) {
+      // avoid too over-limit stack
+      return InlineResult::failure("no inline for go-no-split");
+    }
+  }
+
   // Get the personality function from the callee if it contains a landing pad.
   Constant *CalledPersonality =
       CalledFunc->hasPersonalityFn()

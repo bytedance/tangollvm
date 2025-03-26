@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-03-26.
 //===----------------------------------------------------------------------===//
 //
 // This file declares the X86 specific subclass of TargetSubtargetInfo.
@@ -311,6 +313,10 @@ public:
 
   bool isTargetWindowsGNU() const {
     return TargetTriple.isWindowsGNUEnvironment();
+  }
+
+  bool isTargetGoEnvironment() const {
+    return TargetTriple.isGoEnvironment();
   }
 
   bool isTargetWindowsItanium() const {

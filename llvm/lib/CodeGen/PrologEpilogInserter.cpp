@@ -1184,14 +1184,14 @@ void PEI::calculateFrameObjectOffsets(MachineFunction &MF) {
                                       ->getValue()
                                       ->getUniqueInteger()
                                       .getSExtValue();
+      int64_t OffsetBefore = Offset;
       Offset += CalleeArgAreaSize; // the is the Go version of MaxCallFrameSize
       Align StackAlign = TFI.getStackAlign();
       StackAlign = std::max(StackAlign, MaxAlign);
-      int64_t OffsetBeforeAlignment = Offset;
       Offset = alignTo(Offset, StackAlign, 0);
-      if (Offset != OffsetBeforeAlignment) {
+      if (Offset != OffsetBefore) {
         LLVM_DEBUG(llvm::dbgs() << "Adjusting offset " << Offset << " from "
-                                << OffsetBeforeAlignment
+                                << OffsetBefore
                                 << " for Go's MaxCallFrameSize ("
                                 << CalleeArgAreaSize << ")";);
       }

@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-03-26.
 //===----------------------------------------------------------------------===//
 //
 // This implements routines for translating functions from LLVM IR into
@@ -32,6 +34,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/TangoLLVM.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
@@ -142,6 +145,7 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
         // do this if there is an extra alignment requirement.
         if (AI->isStaticAlloca() &&
             (TFI->isStackRealignable() || (Alignment <= StackAlign))) {
+          assert(!(TFI->isStackRealignable() && TangoLLVM::isGoABIInternal(fn)) && "invariant");
           const ConstantInt *CUI = cast<ConstantInt>(AI->getArraySize());
           uint64_t TySize =
               MF->getDataLayout().getTypeAllocSize(Ty).getKnownMinValue();
@@ -173,6 +177,7 @@ void FunctionLoweringInfo::set(const Function &fn, MachineFunction &mf,
               *CatchObjPtr = FrameIndex;
           }
         } else {
+          assert(!TangoLLVM::isGoABIInternal(fn) && "Go ABI does not support variable sized stack frame");
           // FIXME: Overaligned static allocas should be grouped into
           // a single dynamic allocation instead of using a separate
           // stack allocation for each one.

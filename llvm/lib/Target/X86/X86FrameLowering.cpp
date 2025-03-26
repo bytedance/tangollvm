@@ -60,7 +60,8 @@ static cl::opt<bool>
 X86FrameLowering::X86FrameLowering(const X86Subtarget &STI,
                                    MaybeAlign StackAlignOverride)
     : TargetFrameLowering(StackGrowsDown, StackAlignOverride.valueOrOne(),
-                          STI.is64Bit() ? -8 : -4),
+                          STI.is64Bit() ? -8 : -4, Align(1) /* default value */,
+                          STI.isTargetGoEnvironment() ? false : true /*default value*/),
       STI(STI), TII(*STI.getInstrInfo()), TRI(STI.getRegisterInfo()) {
   // Cache a bunch of frame-related predicates for this subtarget.
   SlotSize = TRI->getSlotSize();
@@ -1779,7 +1780,8 @@ void X86FrameLowering::emitPrologue(MachineFunction &MF,
       !MFI.adjustsStack() &&                   // No calls.
       !EmitStackProbeCall &&                   // No stack probes.
       !MFI.hasCopyImplyingStackAdjustment() && // Don't push and pop.
-      !MF.shouldSplitStack()) {                // Regular stack
+      !MF.shouldSplitStack() &&                // Regular stack
+      !TangoLLVM::isGoABIInternal(MF.getFunction())) { // Not a Go function
     uint64_t MinSize =
         X86FI->getCalleeSavedFrameSize() - X86FI->getTCReturnAddrDelta();
     if (HasFP)

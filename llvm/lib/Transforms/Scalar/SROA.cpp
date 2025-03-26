@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-03-26.
 //===----------------------------------------------------------------------===//
 /// \file
 /// This transformation implements the well known scalar replacement of
@@ -67,6 +69,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/IR/TangoLLVM.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Use.h"
 #include "llvm/IR/User.h"
@@ -4842,6 +4845,16 @@ AllocaInst *SROA::rewritePartition(AllocaInst &AI, AllocaSlices &AS,
   if (VecTy)
     SliceTy = VecTy;
 
+  bool isTangoLLVM = TangoLLVM::isGoABIInternal(*AI.getParent()->getParent());
+  if (isTangoLLVM) {
+    VecTy = dyn_cast<VectorType>(SliceTy);
+    if (VecTy) {
+      assert(isa<FixedVectorType>(VecTy) && "no support scalable vector type");
+      SliceTy = ArrayType::get(VecTy->getElementType(), VecTy->getElementCount().getKnownMinValue());
+      VecTy = nullptr;
+    }
+  }
+
   // Check for the case where we're going to rewrite to a new alloca of the
   // exact same type as the original, and with the same access offsets. In that
   // case, re-use the existing alloca, but still run through the rewriter to
@@ -4865,6 +4878,8 @@ AllocaInst *SROA::rewritePartition(AllocaInst &AI, AllocaSlices &AS,
         IsUnconstrained ? DL.getPrefTypeAlign(SliceTy) : Alignment,
         AI.getName() + ".sroa." + Twine(P.begin() - AS.begin()),
         AI.getIterator());
+
+    assert(!(isTangoLLVM && NewAI->getAlign() > DL.getStackAlignment()) && "invariant");
     // Copy the old AI debug location over to the new one.
     NewAI->setDebugLoc(AI.getDebugLoc());
     ++NumNewAllocas;

@@ -2136,6 +2136,17 @@ struct UpdateUse {
   }
 };
 
+
+static bool legalizeAlloca(Function &F) {
+  const DataLayout &DL = F.getParent()->getDataLayout();
+  for (Instruction &I : instructions(F)) {
+    if (AllocaInst *AI = dyn_cast<AllocaInst>(&I)) {
+      assert(AI->getAlign() <= DL.getStackAlignment() && "invariant");
+    }
+  }
+  return false;
+}
+
 /**
  * we change the code
  * ////////////////////
@@ -2376,6 +2387,7 @@ bool GoStatepoints::runOnFunction(Function &F, DominatorTree &DT,
       }
   }
 
+  MadeChange != legalizeAlloca(F);
   MadeChange |= moveITPToDefAndPTIToUse(F);
   MadeChange |= insertParsePoints(F, DT, LI, TTI, ParsePointNeeded);
   MadeChange |= replaceUndefPointerWithNullPointer(F);
@@ -2619,9 +2631,12 @@ bool CheckIllFormedPointerForward(Instruction *Parent, Instruction *Child) {
     I->setMetadata("go.pointerlike", MDNode::get(I->getContext(), {}));
     return true;
   };
-  auto MarkIllFormed = [](Instruction *I) {
+  auto MarkIllFormed = [](Instruction *I, const char * Reason) {
     if (!I->hasMetadata("go.pointerlike")) {
       I->setMetadata("go.pointerlike", MDNode::get(I->getContext(), {}));
+    }
+    if (PrintObsoleted) {
+      dbgs() << "Mark a pointer like value illformed: " << *I << ", reason is " << Reason << "\n";
     }
     I->setMetadata("go.pointerlike.illformed", MDNode::get(I->getContext(), {}));
     return false;
@@ -2632,7 +2647,7 @@ bool CheckIllFormedPointerForward(Instruction *Parent, Instruction *Child) {
   }
 
   if (Child->hasMetadata("go.pointerlike.illformed"))
-    return MarkIllFormed(Parent);
+    return MarkIllFormed(Parent, "child is an ill-formed pointer like value");
 
   if (Parent->hasMetadata("go.pointerlike.illformed"))
     return false;
@@ -2651,24 +2666,24 @@ bool CheckIllFormedPointerForward(Instruction *Parent, Instruction *Child) {
       if (Op0 == Child) {
         // only one can be pointer like
         if (Op1 == Child || isGoGCPointerLikeValue(Op1)) {
-          return MarkIllFormed(Parent);
+          return MarkIllFormed(Parent, "op1 is pointer like value");
         }
 
       } else {
         assert(Op1 == Child && "invariant");
         // only one can be pointer like
         if (isGoGCPointerLikeValue(Op0)) {
-          return MarkIllFormed(Parent);
+          return MarkIllFormed(Parent, "op0 is pointer like value");
         }
       }
     } else if (BO->getOpcode() == Instruction::Sub) {
       if (Op1 == Child || isGoGCPointerLikeValue(Op1))
-        return MarkIllFormed(Parent);
+        return MarkIllFormed(Parent, "Sub has a pointer-like op1");
 
       assert(Op0 == Child && "invariant");
     } else {
       // all other are ill-format pointers
-      return MarkIllFormed(Parent);
+      return MarkIllFormed(Parent, "unsupported binary operator");
     }
     return Mark(Parent);
   } else if (isa<SelectInst>(Parent)
@@ -2683,7 +2698,7 @@ bool CheckIllFormedPointerForward(Instruction *Parent, Instruction *Child) {
   } else if (isa<UnaryOperator>(Parent)) {
     // I cannot figure out when a unary operator can make a valid pointer
     // from anther pointer.
-    return MarkIllFormed(Parent);
+    return MarkIllFormed(Parent, "unsupported unary operator");
   } else if (isa<InsertElementInst>(Parent)
       || isa<InsertValueInst>(Parent)
       || isa<ExtractElementInst>(Parent)
@@ -2696,10 +2711,10 @@ bool CheckIllFormedPointerForward(Instruction *Parent, Instruction *Child) {
     return Mark(Parent);
   }
 
-  dbgs() << "find a unsupported pointer like value: " << *Parent << "\n";
+  dbgs() << "find an unsupported pointer like value: " << *Parent << "\n";
   Parent->getParent()->getParent()->dump();
   report_fatal_error("unsupported pointer like value");
-  return  MarkIllFormed(Parent);
+  return MarkIllFormed(Parent, "unsupported parent");
 }
 
 struct StackVisitGuard {
@@ -2737,6 +2752,12 @@ static void checkBackward(Function &F, Instruction* Start, const Type *PtrIntTy)
   }
 
   if (Start->hasMetadata("go.pointerlike.illformed")) {
+    return;
+  }
+
+  // We only mark a value as pointer-like if all operands have
+  // been checked.
+  if (Start->hasMetadata("go.pointerlike")) {
     return;
   }
 
@@ -2909,8 +2930,8 @@ static void checkNegativeOffset(Function &F) {
             Off = Op0;
           }
         } else {
-          if (PrintObsoleted)    
-            dbgs() << "Not a pointer like value: " << *BO << "\n";
+          // dbgs() << "Not a pointer like value: " << *BO << " in " << F.getName() << "\n";
+          // may be marked by the front-end
         }
       } else if (BO->getOpcode() == Instruction::Sub) {
         if (isPositiveOffset(Op1)) {
@@ -2918,7 +2939,7 @@ static void checkNegativeOffset(Function &F) {
           Off = Op1;
         }
       } else {
-        // llvm_unreachable("unsupported pointer like value");
+        // may be marked by the front-end
       }
       if (Base && Off && isNegativeOffset(Off) && isBadBasePointerForNegativeOffset(Base)) {
         if (PrintObsoleted) {
