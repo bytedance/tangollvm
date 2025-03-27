@@ -164,13 +164,19 @@ static bool isGoConstantPointer(Value *V) {
   return isGoReadRegister(V) && isGoStackAddr(V);
 }
 
+static bool isConstant(Value *V) {
+  if (CastInst *CI = dyn_cast<CastInst>(V)) {
+    return isConstant(CI->getOperand(0));
+  }
+  return isa<Constant>(V);
+}
+
 // Those value are not part of data flow analysis since
 // they are constants.
 static bool isGoConstantLikeValue(Value *V) {
-  return isa<Constant>(V) || isa<InlineAsm>(V)
+  return isConstant(V) || isa<InlineAsm>(V)
           || isGoConstantPointer(V);
 }
-
 
 static bool isGoGCPointerOrPointerLikeValue(Value *V);
 

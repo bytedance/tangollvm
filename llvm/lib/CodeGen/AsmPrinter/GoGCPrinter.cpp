@@ -171,7 +171,7 @@ computeBitVector(Function * Fn, uint64_t StackSize, bool requireFP,
           CSLocs[i+1].Type == StackMaps::Location::Constant) {
         if (Loc.Type != StackMaps::Location::Direct) {
           // See StackMaps.cpp for Undef Register
-          assert(CSLocs[i+1].Offset == 0xFEFEFEFE && "invariant");
+          assert(uint32_t(CSLocs[i+1].Offset) == 0xFEFEFEFE && "invariant");
           continue;
         }
         // Make sure it is a local/arg slot, not a spill of in-register value.
