@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-04-08.
 //===----------------------------------------------------------------------===//
 //
 // This file implements the SelectionDAG::LegalizeTypes method.  It transforms
@@ -235,6 +237,122 @@ bool DAGTypeLegalizer::run() {
            "Node should be ready if on worklist!");
 
     LLVM_DEBUG(dbgs() << "\nLegalizing node: "; N->dump(&DAG));
+
+    const Function &F = DAG.getMachineFunction().getFunction();
+    bool IsStatepoint = N->isMachineOpcode() &&
+                        N->getMachineOpcode() == TargetOpcode::STATEPOINT &&
+                        F.hasGC() && F.getGC() == "go";
+    if (IsStatepoint) {
+      for (unsigned i = 0, NumResults = N->getNumValues(); i < NumResults; ++i) {
+        EVT ResultVT = N->getValueType(i);
+        LLVM_DEBUG(dbgs() << "Analyzing result type: " << ResultVT << "\n");
+        switch (getTypeAction(ResultVT)) {
+          case TargetLowering::TypeLegal:
+            LLVM_DEBUG(dbgs() << "Legal result type\n");
+            break;
+          default:
+            report_fatal_error("only DeoptOps needs legalization");
+        }
+      }
+
+      {
+        SmallVector<SDValue, 40> Ops;
+
+        /// MI-level Statepoint operands
+        ///
+        /// Statepoint operands take the form:
+        ///   <id>, <num patch bytes >, <num call arguments>, <call target>,
+        ///   [call arguments...],
+        ///   <StackMaps::ConstantOp>, <calling convention>,
+        ///   <StackMaps::ConstantOp>, <statepoint flags>,
+        ///   <StackMaps::ConstantOp>, <num deopt args>, [deopt args...],
+        ///   <StackMaps::ConstantOp>, <num gc pointer args>, [gc pointer args...],
+        ///   <StackMaps::ConstantOp>, <num gc allocas>, [gc allocas args...],
+        ///   <StackMaps::ConstantOp>, <num  entries in gc map>, [base/derived pairs]
+        ///   base/derived pairs in gc map are logical indices into <gc pointer args>
+        ///   section.
+        ///   All gc pointers assigned to VRegs produce new value (in form of MI Def
+        ///   operand) and are tied to it.
+
+        unsigned NumOperands = N->getNumOperands();
+        unsigned NCallArgsPos = 2;
+        assert(NCallArgsPos < NumOperands && "invariant");
+        assert(isa<ConstantSDNode>(N->getOperand(NCallArgsPos)) && "invariant");
+        unsigned NCallArgs = (unsigned)N->getConstantOperandVal(NCallArgsPos);
+        unsigned NDeoptArgsPos = 3 + NCallArgs + 6;
+        assert(NDeoptArgsPos < NumOperands && "invariant");
+        assert(isa<ConstantSDNode>(N->getOperand(NDeoptArgsPos)) && "invariant");
+        unsigned NDeoptArgs = (unsigned)N->getConstantOperandVal(NDeoptArgsPos);
+        unsigned FirstDeoptArgPos = NDeoptArgsPos + 1;
+        unsigned FirstGCPointerArgPos = NDeoptArgsPos + 1 + NDeoptArgs;
+#if !defined(NDEBUG)
+        assert(FirstDeoptArgPos < NumOperands && "invariant");
+        assert(FirstGCPointerArgPos < NumOperands && "invariant");
+
+        unsigned NNewDeoptArgs = 0;
+        unsigned i;
+        for (i = 0; i != NumOperands; ++i) {
+          const auto &Op = N->getOperand(i);
+
+          if (IgnoreNodeResults(Op.getNode())) {
+            Ops.push_back(Op);
+            continue;
+          }
+
+          LLVM_DEBUG(dbgs() << "Analyzing operand: "; Op.dump(&DAG));
+          EVT OpVT = Op.getValueType();
+          switch (getTypeAction(OpVT)) {
+            case TargetLowering::TypeLegal:
+              LLVM_DEBUG(dbgs() << "Legal operand\n");
+              Ops.push_back(Op);
+              continue;
+            case TargetLowering::TypeSplitVector:
+              if (i < FirstDeoptArgPos || i >= FirstGCPointerArgPos)
+                report_fatal_error(
+                    "STATEPOINT operand split outside the deopt section");
+              {
+                SDValue Lo, Hi;
+                GetSplitVector(Op, Lo, Hi);
+                Ops.push_back(Lo);
+                Ops.push_back(Hi);
+              }
+              NNewDeoptArgs ++;
+              break;
+            default:
+              report_fatal_error("legalization action is not supported.");
+          }
+        }
+
+        if (i == NumOperands) {
+          LLVM_DEBUG(dbgs() << "Legally typed node: "; N->dump(&DAG));
+        }
+
+        if (NNewDeoptArgs > 0) {
+          Changed = true;
+          SmallVector<EVT, 8> NodeTys;
+          for (unsigned i = 0, NumResults = N->getNumValues(); i < NumResults; ++i) {
+            EVT ResultVT = N->getValueType(i);
+            NodeTys.push_back(ResultVT);
+          }
+
+          SDLoc L(N);
+          Ops[NDeoptArgsPos] = DAG.getTargetConstant(NDeoptArgs + NNewDeoptArgs, L, MVT::i64);
+          MachineSDNode *NewN = DAG.getMachineNode(TargetOpcode::STATEPOINT, L, NodeTys, Ops);
+          assert(isa<MachineSDNode>(N) && "invariant");
+          MachineSDNode *OldN = cast<MachineSDNode>(N);
+          DAG.setNodeMemRefs(NewN, OldN->memoperands());
+
+          // Replace all usage of N
+          for (unsigned i = 0, NumResults = N->getNumValues(); i < NumResults; ++i) {
+            ReplaceValueWith(SDValue(N, i), SDValue(NewN, i));
+          }
+        }
+      }
+
+      // complete handle statepoint
+      goto NodeDone;
+    }
+
     if (IgnoreNodeResults(N)) {
       LLVM_DEBUG(dbgs() << "Ignoring node results\n");
       goto ScanOperands;
