@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-04-08.
 //===----------------------------------------------------------------------===//
 //
 // This file implements dead code elimination and basic block merging, along
@@ -35,6 +37,7 @@
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/TangoLLVM.h"
 #include "llvm/IR/ValueHandle.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
@@ -160,6 +163,11 @@ performBlockTailMerging(Function &F, ArrayRef<BasicBlock *> BBs,
 
 static bool tailMergeBlocksWithSimilarFunctionTerminators(Function &F,
                                                           DomTreeUpdater *DTU) {
+  // We do not merge return block because of Go's special calling convention.
+  if (TangoLLVM::isGoABIInternal(F)) {
+    return false;
+  }
+
   SmallMapVector<unsigned /*TerminatorOpcode*/, SmallVector<BasicBlock *, 2>, 4>
       Structure;
 
