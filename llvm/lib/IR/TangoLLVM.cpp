@@ -222,6 +222,37 @@ void LLVMAddCallSiteFnAttribute(LLVMValueRef C, LLVMAttributeRef A) {
   unwrap<CallBase>(C)->addFnAttr(unwrap(A));
 }
 
+void LLVMRemoveFunctionBody(LLVMValueRef C) {
+  Function * Fn = unwrap<Function>(C);
+  if (Fn->empty()) {
+    return;
+  }
+  std::vector<BasicBlock*> BBS;
+  BBS.reserve(Fn->size());
+  BasicBlock *Entry = &Fn->getEntryBlock();
+  // 1. unlink all instructions
+  for (BasicBlock &BB : *Fn) {
+    BBS.push_back(&BB);
+    for (Instruction &I : BB) {
+        if (I.use_empty()) {
+            continue;
+        }
+        I.replaceAllUsesWith(UndefValue::get(I.getType()));
+    }
+  }
+  // unlink all basic blocks except Entry
+  for (BasicBlock *BB : BBS) {
+    if (BB == Entry) {
+      continue;
+    }
+    BB->replaceAllUsesWith(Entry);
+    BB->eraseFromParent();
+  }
+  // Remove entry
+  Entry->eraseFromParent();
+  Fn->setSubprogram(nullptr);
+}
+
 
 TangoLLVMEnv* TangoLLVMCreateTangoLLVMEnvironment() {
 
@@ -1073,5 +1104,7 @@ TangoLLVMEnv* TangoLLVMCreateTangoLLVMEnvironment() {
   ENV->TangoLLVMNormalizeTargetTriple = &LLVMNormalizeTargetTriple;
   ENV->TangoLLVMGetHostCPUName = &LLVMGetHostCPUName;
   ENV->TangoLLVMGetHostCPUFeatures = &LLVMGetHostCPUFeatures;
-  ENV->TangoLLVMAddAnalysisPasses = &LLVMAddAnalysisPasses;  return ENV;
+  ENV->TangoLLVMRemoveFunctionBody = &LLVMRemoveFunctionBody;
+  ENV->TangoLLVMAddAnalysisPasses = &LLVMAddAnalysisPasses;
+  return ENV;
 }

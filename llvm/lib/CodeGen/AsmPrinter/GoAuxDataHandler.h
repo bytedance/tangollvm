@@ -31,23 +31,15 @@ namespace llvm {
 class AsmPrinter;
 class MCSymbol;
 class DILocation;
+class MCGoFileEntry;
 
 class MCGoAuxData : public DebugHandlerBase {
-
 public:
   struct PCData {
     int32_t Value;
     MCSymbol *PC;
 
     PCData(int32_t value, MCSymbol *pc) : Value(value), PC(pc) {}
-  };
-
-
-  struct FileEntry {
-    StringRef Dir;
-    StringRef File;
-    int32_t Index;
-    FileEntry(StringRef D, StringRef F, int32_t I) : Dir(D), File(F), Index(I) {}
   };
 
 private:
@@ -65,7 +57,7 @@ private:
   std::vector<PCData> PCUnsafePoint;
   std::vector<PCData> PCStackMapIndex;
 
-  std::vector<FileEntry> FileTable;
+  std::vector<MCGoFileEntry> FileTable;
   bool FuncInfoHasStartLine;
 
   int32_t LastSPAdjust;
@@ -162,6 +154,7 @@ private:
 
   void emitPCData(std::vector<PCData> &list, std::string &sym);
   void appendPCData(std::vector<PCData> &list, int32_t value, MCSymbol* PC);
+  void MDNodeToFileTab(std::vector<MCGoFileEntry> &Dst, NamedMDNode *Meta);
 };
 
 

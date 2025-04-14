@@ -17,6 +17,7 @@
 #include "llvm/MC/MCFragment.h"
 #include "llvm/MC/MCSection.h"
 #include "llvm/MC/MCStreamer.h"
+#include "llvm/MC/MCGoAuxData.h"
 
 namespace llvm {
 class MCContext;
@@ -29,6 +30,7 @@ class MCCodeEmitter;
 class MCSubtargetInfo;
 class MCExpr;
 class MCAsmBackend;
+class MCGoAuxData;
 class raw_ostream;
 class raw_pwrite_stream;
 
@@ -153,6 +155,7 @@ public:
   void emitGoStackObjects(ArrayRef<MCGoStackObjectRecord> StackObjects) override;
   void emitGoFuncInfo(MCGoFuncInfo &FuncInfo) override;
   void emitGoPCDataEntry(int64_t ValueDelta, const MCExpr* PCDelta) override;
+  void emitGoFileTab(ArrayRef<MCGoFileEntry> FileEntries) override;
   void emitGoBytes(StringRef Data) override;
   void emitDwarfAdvanceFrameAddr(const MCSymbol *LastLabel,
                                  const MCSymbol *Label, SMLoc Loc);

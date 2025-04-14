@@ -534,7 +534,7 @@ void (*TangoLLVMAddCallSiteFnAttribute)(LLVMValueRef C, LLVMAttributeRef A);
 
   int (*TangoLLVMGetNumOperands)(LLVMValueRef Val);
 
-  LLVMValueRef (*TangoLLVMConstNull)(LLVMTypeRef Ty); 
+  LLVMValueRef (*TangoLLVMConstNull)(LLVMTypeRef Ty);
 
   LLVMValueRef (*TangoLLVMConstAllOnes)(LLVMTypeRef Ty);
 
@@ -1383,7 +1383,7 @@ void (*TangoLLVMAddCallSiteFnAttribute)(LLVMValueRef C, LLVMAttributeRef A);
   LLVMValueRef (*TangoLLVMBuildFPCast)(LLVMBuilderRef, LLVMValueRef Val,
       LLVMTypeRef DestTy, const char *Name);
 
-  LLVMValueRef (*TangoLLVMBuildIntCast)(LLVMBuilderRef, LLVMValueRef Val, 
+  LLVMValueRef (*TangoLLVMBuildIntCast)(LLVMBuilderRef, LLVMValueRef Val,
       LLVMTypeRef DestTy, const char *Name);
 
   LLVMOpcode (*TangoLLVMGetCastOpcode)(LLVMValueRef Src, LLVMBool SrcIsSigned,
@@ -1912,7 +1912,7 @@ void (*TangoLLVMAddCallSiteFnAttribute)(LLVMValueRef C, LLVMAttributeRef A);
 
   void *(*TangoLLVMSearchForAddressOfSymbol)(const char *symbolName);
 
-  void (*TangoLLVMAddSymbol)(const char *symbolName, void *symbolValue); 
+  void (*TangoLLVMAddSymbol)(const char *symbolName, void *symbolValue);
 
   // from llvm-c/Targets.h
   LLVMTargetDataRef (*TangoLLVMGetModuleDataLayout)(LLVMModuleRef M);
@@ -2053,8 +2053,9 @@ void (*TangoLLVMAddCallSiteFnAttribute)(LLVMValueRef C, LLVMAttributeRef A);
 
   char* (*TangoLLVMGetHostCPUFeatures)(void);
 
-  void (*TangoLLVMAddAnalysisPasses)(LLVMTargetMachineRef T, LLVMPassManagerRef PM); 
+  void (*TangoLLVMAddAnalysisPasses)(LLVMTargetMachineRef T, LLVMPassManagerRef PM);
 
+  void (*TangoLLVMRemoveFunctionBody)(LLVMValueRef C);
 } TangoLLVMEnv;
 
 TangoLLVMEnv* TangoLLVMCreateTangoLLVMEnvironment(void);

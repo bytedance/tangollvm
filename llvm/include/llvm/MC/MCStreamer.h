@@ -1127,6 +1127,7 @@ public:
   virtual void emitGoStackObjects(ArrayRef<MCGoStackObjectRecord> StackObjects) {}
   virtual void emitGoFuncInfo(MCGoFuncInfo &FuncInfo) {}
   virtual void emitGoPCDataEntry(int64_t ValueDelta, const MCExpr* PCDelta) {}
+  virtual void emitGoFileTab(ArrayRef<MCGoFileEntry> FileEntries) {};
   virtual void emitGoBytes(StringRef Data) {}
 
   /// If targets does not support representing debug line section by .loc/.file

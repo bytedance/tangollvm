@@ -22,6 +22,7 @@
 #include "llvm/MC/MCSection.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/MCValue.h"
+#include "llvm/MC/MCGoAuxData.h"
 #include "llvm/Support/EndianStream.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/SourceMgr.h"
@@ -915,4 +916,39 @@ void MCObjectStreamer::emitGoFuncInfo(MCGoFuncInfo &FuncInfo) {
 void MCObjectStreamer::emitGoPCDataEntry(int64_t ValueDelta, const MCExpr *AddrDelta) {
   // caller should do the right section switch
   insert(new MCGoPCDataFragment(ValueDelta, *AddrDelta));
+}
+
+void MCObjectStreamer::emitGoFileTab(ArrayRef<MCGoFileEntry> FileEntries) {
+  MCDataFragment *DF = getOrCreateDataFragment();
+  SmallVectorImpl<char> &Data = DF->getContents();
+  size_t Offset = Data.size();
+  raw_svector_ostream OSE(Data);
+
+  // list size
+  support::endian::write(OSE, uint32_t(FileEntries.size()), endianness::little);
+  Offset += 4;
+
+  for (auto &Entry : FileEntries) {
+    // index
+    support::endian::write(OSE, uint32_t(Entry.Index), endianness::little);
+    Offset += 4;
+
+    // dir
+    uint32_t DirLen = Entry.Dir.size();
+    support::endian::write(OSE, DirLen, endianness::little);
+    Offset += 4;
+
+    OSE.write(Entry.Dir.data(), DirLen);
+    Offset += DirLen;
+
+    // filename
+    uint32_t FileLen = Entry.File.size();
+    support::endian::write(OSE, FileLen, endianness::little);
+    Offset += 4;
+
+    OSE.write(Entry.File.data(), FileLen);
+    Offset += FileLen;
+  }
+
+  assert(Offset == Data.size() && "File tab data size mismatch");
 }

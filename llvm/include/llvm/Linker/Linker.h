@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-04-15.
 //===----------------------------------------------------------------------===//
 
 #ifndef LLVM_LINKER_LINKER_H
@@ -27,6 +29,7 @@ public:
     None = 0,
     OverrideFromSrc = (1 << 0),
     LinkOnlyNeeded = (1 << 1),
+    SkipWhenLink = (1 << 2),
   };
 
   Linker(Module &M);

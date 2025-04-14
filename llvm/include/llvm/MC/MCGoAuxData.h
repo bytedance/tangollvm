@@ -31,7 +31,12 @@ class MCExpr;
 class MachineInstr;
 class DILocation;
 
-
+struct MCGoFileEntry {
+  std::string Dir;
+  std::string File;
+  int32_t Index;
+  MCGoFileEntry(StringRef D, StringRef F, int32_t I) : Dir(D.str()), File(F.str()), Index(I) {}
+};
 struct MCGoStackObjectRecord {
   int32_t FrameOffset;
   int32_t ObjectSize;

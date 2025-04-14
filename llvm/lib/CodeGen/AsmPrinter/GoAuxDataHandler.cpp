@@ -30,6 +30,9 @@
 
 using namespace llvm;
 
+static cl::opt<bool> TangoLLVMLTO("tangollvm-lto", cl::Hidden, cl::init(false));
+static cl::opt<std::string> LTOFileTable("tangollvm-lto-index", cl::init(""), cl::desc("file index"));
+
 // copied from MCObjectStreamer.cpp
 static const MCExpr *buildSymbolDiff(MCContext &Context, const MCSymbol *A,
                                      const MCSymbol *B) {
@@ -41,16 +44,56 @@ static const MCExpr *buildSymbolDiff(MCContext &Context, const MCSymbol *A,
   return AddrDelta;
 }
 
-static void MDNodeToFileTab(std::vector<MCGoAuxData::FileEntry> &Dst, NamedMDNode *Meta) {
+void MCGoAuxData::MDNodeToFileTab(std::vector<MCGoFileEntry> &Dst,
+                                  NamedMDNode *Meta) {
   if (Meta == nullptr) {
     return;
   }
-  for (MDNode *D : Meta->operands()) {
-    for (unsigned i = 0; i < D->getNumOperands(); i += 3) {
-      StringRef Dir = cast<MDString>(D->getOperand(i + 0))->getString();
-      StringRef File = cast<MDString>(D->getOperand(i + 1))->getString();
-      int32_t FileIndex = int32_t(cast<ConstantAsMetadata>(D->getOperand(i + 2))->getValue()->getUniqueInteger().getSExtValue());
-      Dst.push_back(MCGoAuxData::FileEntry(Dir, File, FileIndex));
+
+  if (TangoLLVMLTO) {
+    std::map<std::string, int32_t> UniqueFileMap;
+    std::map<int32_t, int32_t> OldToNewIndexMap;
+    std::vector<MCGoFileEntry> TempEntries;
+
+    for (MDNode *D : Meta->operands()) {
+      for (unsigned i = 0; i < D->getNumOperands(); i += 3) {
+        StringRef Dir = cast<MDString>(D->getOperand(i + 0))->getString();
+        StringRef File = cast<MDString>(D->getOperand(i + 1))->getString();
+        int32_t OldFileIndex =
+            int32_t(cast<ConstantAsMetadata>(D->getOperand(i + 2))
+                        ->getValue()
+                        ->getUniqueInteger()
+                        .getSExtValue());
+        std::string UniqueKey = (Dir + "/" + File).str();
+
+        if (UniqueFileMap.find(UniqueKey) == UniqueFileMap.end()) {
+          int32_t NewFileIndex = TempEntries.size();
+          UniqueFileMap[UniqueKey] = NewFileIndex;
+          OldToNewIndexMap[OldFileIndex] = NewFileIndex;
+          TempEntries.push_back(MCGoFileEntry(Dir, File, NewFileIndex));
+        } else {
+          int32_t ExistingIndex = UniqueFileMap[UniqueKey];
+          OldToNewIndexMap[OldFileIndex] = ExistingIndex;
+        }
+      }
+    }
+    Dst.insert(Dst.end(), TempEntries.begin(), TempEntries.end());
+    std::string symbol = "tangollvmlto..filetable";
+    MCSymbol *AddrSymbol = Asm->OutContext.getOrCreateSymbol(StringRef(symbol));
+    Asm->OutStreamer->emitLabel(AddrSymbol);
+    Asm->OutStreamer->emitGoFileTab(Dst);
+  } else {
+    for (MDNode *D : Meta->operands()) {
+      for (unsigned i = 0; i < D->getNumOperands(); i += 3) {
+        StringRef Dir = cast<MDString>(D->getOperand(i + 0))->getString();
+        StringRef File = cast<MDString>(D->getOperand(i + 1))->getString();
+        int32_t FileIndex =
+            int32_t(cast<ConstantAsMetadata>(D->getOperand(i + 2))
+                        ->getValue()
+                        ->getUniqueInteger()
+                        .getSExtValue());
+        Dst.push_back(MCGoFileEntry(Dir, File, FileIndex));
+      }
     }
   }
 }

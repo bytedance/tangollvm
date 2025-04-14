@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-04-15.
 //===----------------------------------------------------------------------===//
 //
 // This utility may be invoked in the following manner:
@@ -84,9 +86,18 @@ static cl::opt<bool>
                      cl::desc("Don't use a uniquing type map for debug info"),
                      cl::cat(LinkCategory));
 
+static cl::opt<std::string>
+    ModuleName("module-name", cl::desc("Module Name"), cl::init("-"),
+                    cl::value_desc("module name"), cl::cat(LinkCategory));
+
+
 static cl::opt<bool> OnlyNeeded("only-needed",
                                 cl::desc("Link only needed symbols"),
                                 cl::cat(LinkCategory));
+
+static cl::opt<bool> SkipWhenLink("skip-when-link",
+                                  cl::desc("skip when link."),
+                                  cl::cat(LinkCategory));
 
 static cl::opt<bool> Force("f", cl::desc("Enable binary output on terminals"),
                            cl::cat(LinkCategory));
@@ -505,13 +516,14 @@ int main(int argc, char **argv) {
   if (!DisableDITypeMap)
     Context.enableDebugTypeODRUniquing();
 
-  auto Composite = std::make_unique<Module>("llvm-link", Context);
+  auto Composite = std::make_unique<Module>(ModuleName.getValue() != "-" ? ModuleName.getValue() : "llvm-link", Context);
   Linker L(*Composite);
 
   unsigned Flags = Linker::Flags::None;
   if (OnlyNeeded)
     Flags |= Linker::Flags::LinkOnlyNeeded;
-
+  if (SkipWhenLink)
+    Flags |= Linker::Flags::SkipWhenLink;
   // First add all the regular input files
   if (!linkFiles(argv[0], Context, L, InputFilenames, Flags))
     return 1;
