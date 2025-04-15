@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-04-15.
 //===----------------------------------------------------------------------===//
 //
 // This file implements the mechanics required to implement inlining without
@@ -34,6 +36,7 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/IR/TangoLLVM.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
@@ -222,6 +225,7 @@ PreservedAnalyses ModuleInlinerPass::run(Module &M,
 
     Changed = true;
     ++NumInlined;
+    TangoLLVM::updateGoCalleeArgsArea(&Callee, CB->getCaller());
 
     LLVM_DEBUG(dbgs() << "    Size after inlining: " << F.getInstructionCount()
                       << "\n");

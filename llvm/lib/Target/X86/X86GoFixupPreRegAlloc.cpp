@@ -248,20 +248,29 @@ bool X86GoFixupPreRegAllocPass::optimizeOpSP() {
           if (isTwoAddrUse(MI, Op.Dst, DstReg)) {
             switch (MI.getOpcode()) {
               case X86::ADD64ri8:
-              case X86::ADD64ri32:
+              case X86::ADD64ri32: {
+                // TODO: duffzero may produce -0x20, rsp
+                // cannot access out-of-bounds value with OpSP
+                // MachineOperand &Imm = MI.getOperand(2);
+                // assert(Imm.isImm() && Imm.getImm() >= 0 && "invariant: must be positive imm");
+                break;
+              }
+              case X86::SUB64ri8:
+              case X86::SUB64ri32: {
+                // MachineOperand &Imm = MI.getOperand(2);
+                // // cannot access out-of-bounds value with OpSP
+                // assert(Imm.isImm() && Imm.getImm() <= 0 && "invariant: must be negative imm");
+                break;
+              }
+              case X86::INC64r:
                 break;
               default:
+                dbgs() << "cannot handle MI: " << MI << "\n";
+                MF->dump();
                 report_fatal_error("TODO: do not know how to handle two address");
             }
 
-            // we cannot define RSP here
-            MachineOperand &Dst = MI.getOperand(0);
-            MachineOperand &Src = MI.getOperand(1);
-            MachineOperand &Imm = MI.getOperand(2);
-            assert(MI.getNumOperands() >= 3 && "cannot handle more");
-            assert(Dst.isReg() && Register::isVirtualRegister(Dst.getReg()) && "invariant: must be vreg");
-            assert(Src.isReg() && Register::isVirtualRegister(Src.getReg()) && "invariant: must be vreg");
-            assert(Imm.isImm() && "invariant: must be imm");
+            // we cannot define RSP here so we cannot simply replace rsp
             ToBeReplaced.push_back(&MI);
             continue;
           }
@@ -269,6 +278,9 @@ bool X86GoFixupPreRegAllocPass::optimizeOpSP() {
           Op.replace(MI);
         }
         for (MachineInstr *MI : ToBeReplaced) {
+          // TODO: it is very dangerous here because ADD/SUB may redefine eflags
+          // but LEAQ does not. Fortunately, OpSP should only be used compute address.
+          // Nevertheless, we still need add some check here.
           MachineInstr *NewMI = TII->convertToThreeAddress(*MI, nullptr, nullptr);
           if (!NewMI)
             report_fatal_error("cannot convert to three address");
@@ -354,11 +366,7 @@ bool X86GoFixupPreRegAllocPass::cloneStackPointers() {
       if (auto Reg = TII->isLoadStackSlotAddress(MI, FrameIndex)) {
         unsigned RegIdx = Register::virtReg2Index(Reg);
         Live.insert(std::make_pair(RegIdx, RegIdx));
-      } else if (MI.getOpcode() == TargetOpcode::STATEPOINT) {
-        // A statepoint resets all defined stack address.
-        for (auto &It : Live) {
-          It.second = 0;
-        }
+        continue;
       }
 
       // Add uses
@@ -383,6 +391,14 @@ bool X86GoFixupPreRegAllocPass::cloneStackPointers() {
               Live[RegIdx] = NewRegIdx;
             }
           }
+        }
+      }
+
+      // add kill
+      if (MI.getOpcode() == TargetOpcode::STATEPOINT) {
+        // A statepoint resets all defined stack address.
+        for (auto &It : Live) {
+          It.second = 0;
         }
       }
     }
@@ -444,12 +460,6 @@ bool X86GoFixupPreRegAllocPass::cloneStackPointers() {
             Live[It.first] = It.second;
           }
         }
-        if (MI.getOpcode() == TargetOpcode::STATEPOINT) {
-          // A statepoint kills all defined stack address.
-          for (auto &It : Live) {
-            It.second = 0;
-          }
-        }
       }
 
       // Check use
@@ -471,14 +481,30 @@ bool X86GoFixupPreRegAllocPass::cloneStackPointers() {
                 assert(NewMI.getOperand(0).getReg() == MO.getReg() && "invariant");
 
                 // update the cloned Reg to new reg
-                NewMI.getOperand(0).ChangeToRegister(NewReg, true);
+                NewMI.getOperand(0).setReg(NewReg);
                 Cloned[NewRegIdx] = &NewMI;
               }
               // Now update MO
-              MO.ChangeToRegister(NewReg, false);
+              unsigned SubIdx = MO.getSubReg();
+              MO.setReg(NewReg);
+              // MO.ChangeToRegister(NewReg, false);
+              if (SubIdx) {
+                MO.setSubReg(SubIdx);
+                // dbgs() << "SubIdx: " << SubIdx << "\n";
+                // MF->dump();
+                // llvm_unreachable("cannot use subreg");
+              }
               Changed = true;
             }
           }
+        }
+      }
+
+      // update KILL
+      if (MI.getOpcode() == TargetOpcode::STATEPOINT) {
+        // A statepoint kills all defined stack address.
+        for (auto &It : Live) {
+          It.second = 0;
         }
       }
     }
@@ -737,8 +763,10 @@ bool X86GoFixupPreRegAllocPass::checkDerivedPointers() {
     // point to the same Object(array or something else) with Base.
     // The offset of ADD must be greater than zero.
     if (Opcode == X86::LEA64r ||
-        ((Opcode == X86::ADD64ri32 || Opcode == X86::ADD64ri8) &&
-         MI.getOperand(2).isImm() && MI.getOperand(2).getImm() >= 0)) {
+        (((Opcode == X86::ADD64ri32 || Opcode == X86::ADD64ri8) &&
+         MI.getOperand(2).isImm() && MI.getOperand(2).getImm() >= 0)
+        || ((Opcode == X86::SUB64ri32 || Opcode == X86::SUB64ri8) &&
+         MI.getOperand(2).isImm() && MI.getOperand(2).getImm() <= 0))) {
       if (MI.getOperand(1 + X86::AddrBaseReg).isReg()) {
         // FI is already handled by cloneStackPointers, and we don't care about
         // AddrIndexReg since we only add Reg to StatePoint and do nothing else

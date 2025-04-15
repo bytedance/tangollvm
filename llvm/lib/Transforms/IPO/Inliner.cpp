@@ -49,6 +49,7 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/IR/TangoLLVM.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Pass.h"
@@ -205,35 +206,6 @@ void makeFunctionBodyUnreachable(Function &F) {
     BB.eraseFromParent();
   BasicBlock *BB = BasicBlock::Create(F.getContext(), "", &F);
   new UnreachableInst(F.getContext(), BB);
-}
-
-// TANGOLLVM
-static int64_t getArgAreaSize(Function *F) {
-  if (auto n = F->getMetadata("go.callee.args.area")) {
-    assert(n->getNumOperands() == 2 && "must have at least two operands");
-    int64_t argAreaSize = dyn_cast<ConstantAsMetadata>(n->getOperand(0))
-                              ->getValue()
-                              ->getUniqueInteger()
-                              .getSExtValue();
-    return argAreaSize;
-  }
-  return 0;
-}
-// update go.callee.args.area metadata when inlining
-static void updateGoCalleeArgsArea(Function *Callee, Function *Caller) {
-  int64_t CalleeArgAreaSize = getArgAreaSize(Callee);
-  int64_t CallerArgAreaSize = getArgAreaSize(Caller);
-  // no need to update if the caller has enough arg area
-  if (CallerArgAreaSize >= CalleeArgAreaSize)
-    return;
-  // Caller's go.callee.args.area is too small, update
-  auto newSize = ConstantAsMetadata::get(ConstantInt::get(
-      Type::getInt64Ty(Caller->getContext()), CalleeArgAreaSize));
-  auto newType =
-      ConstantAsMetadata::get(ConstantAggregateZero::get(ArrayType::get(
-          Type::getInt8Ty(Caller->getContext()), CalleeArgAreaSize)));
-  Caller->setMetadata("go.callee.args.area",
-                      MDNode::get(Caller->getContext(), {newSize, newType}));
 }
 
 PreservedAnalyses InlinerPass::run(LazyCallGraph::SCC &InitialC,
@@ -428,7 +400,7 @@ PreservedAnalyses InlinerPass::run(LazyCallGraph::SCC &InitialC,
       InlinedCallees.insert(&Callee);
       ++NumInlined;
       // TANGOLLVM
-      updateGoCalleeArgsArea(&Callee, Caller);
+      TangoLLVM::updateGoCalleeArgsArea(&Callee, Caller);
 
       LLVM_DEBUG(dbgs() << "    Size after inlining: "
                         << F.getInstructionCount() << "\n");

@@ -733,11 +733,13 @@ unsigned X86InstrInfo::isLoadStackSlotAddress(const MachineInstr &MI,
                                        int &FrameIndex) const {
   auto IsFrameAddress = [](const MachineInstr &MI, unsigned int Op,
       int &FrameIndex) {
-    if (MI.getOperand(Op + X86::AddrBaseReg).isFI() &&
+    if ((MI.getOperand(Op + X86::AddrBaseReg).isFI() ||
+         (MI.getOperand(Op + X86::AddrBaseReg).isReg() &&
+             MI.getOperand(Op + X86::AddrBaseReg).getReg() == X86::RSP)) &&
         MI.getOperand(Op + X86::AddrScaleAmt).isImm() &&
         MI.getOperand(Op + X86::AddrIndexReg).isReg() &&
         MI.getOperand(Op + X86::AddrDisp).isImm()) {
-      FrameIndex = MI.getOperand(Op + X86::AddrBaseReg).getIndex();
+//      FrameIndex = MI.getOperand(Op + X86::AddrBaseReg).getIndex();
       return true;
     }
     return false;

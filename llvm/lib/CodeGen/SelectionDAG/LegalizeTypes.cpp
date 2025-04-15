@@ -319,6 +319,9 @@ bool DAGTypeLegalizer::run() {
               NNewDeoptArgs ++;
               break;
             default:
+              dbgs() << "Lowering Action: " << (int)getTypeAction(OpVT) << "\n";
+              DAG.getMachineFunction().dump();
+              N->dumpr();
               report_fatal_error("legalization action is not supported.");
           }
         }

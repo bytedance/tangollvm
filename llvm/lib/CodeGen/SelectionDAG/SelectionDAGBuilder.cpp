@@ -6662,6 +6662,12 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
     auto getOrCreateFixedObject = [&](const CallInst &I) {
       int64_t Offset = cast<ConstantInt>(I.getArgOperand(0))->getSExtValue();
       int64_t  Size = cast<ConstantInt>(I.getArgOperand(1))->getSExtValue();
+      if (Size == 0) {
+        // In Go, stack object size can be 0. However, in LLVM, stack
+        // object size cannot be 0. Note that preallocated area is aligned
+        // to RegSize. It is safe to use 1 instead of 0 here.
+        Size = 1;
+      }
       bool Aliased = I.hasMetadata("go.stackobject.gcdata");
       MachineFunction &MF = DAG.getMachineFunction();
       MachineFrameInfo &MFI = MF.getFrameInfo();
@@ -6669,8 +6675,14 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
       for (; MFI.isFixedObjectIndex(FI); ++FI) {
         if (MFI.getObjectOffset(FI) == Offset) {
           if (MFI.getObjectSize(FI) != Size) {
-            dbgs() << "require: " << Size << ", got: " << MFI.getObjectSize(FI) << "\n";
-            report_fatal_error("mismatched size preallocated objects");
+            // Only zero-sized object can overlap with other objects.
+            // Note that we have increment size from 0 to 1
+            if (MFI.getObjectSize(FI) != 1 && Size != 1) {
+              // One of them must be zero (actually 1)
+              dbgs() << "require: " << Size << ", got: " << MFI.getObjectSize(FI) << "\n";
+              report_fatal_error("mismatched size preallocated objects");
+            }
+            continue;
           }
           break;
         }

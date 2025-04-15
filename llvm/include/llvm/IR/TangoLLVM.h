@@ -30,6 +30,11 @@ class TangoLLVM {
 
 public:
 
+  static void updateGoCalleeArgsArea(Function *Callee, Function *Caller);
+
+  static bool isObsoleted(Function *Fn);
+  static void markObsoleted(Function *Fn);
+
   // Note that all these symbols must be builtin symbols, which means they always
   // have prefix "runtime.", even we are building the runtime package.
   static bool isZeroArgRuntimeCall(StringRef FuncName) {

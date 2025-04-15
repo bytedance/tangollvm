@@ -31,6 +31,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/Analysis/DomTreeUpdater.h"
+#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/CodeGen/IntrinsicLowering.h"
@@ -57,6 +58,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/Statepoint.h"
+#include "llvm/IR/TangoLLVM.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Value.h"
@@ -102,12 +104,26 @@ ModulePass *createGoStatepointsLegacyPass();
 struct GoStatepoints : public PassInfoMixin<GoStatepoints> {
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
 
-  bool runOnFunction(Function &F, DominatorTree &, TargetTransformInfo &,
+  bool runOnFunction(Function &F, DominatorTree &, LoopInfo &, TargetTransformInfo &,
                      const TargetLibraryInfo &);
 };
 
 } // namespace llvm
 
+// STATISTIC(NumGCToZero, "Number of ToZero stores");
+static int NumGCToZero = 0;
+
+// Print the ToZero found at the insert location
+static cl::opt<bool> PrintToZero("gogc-print-tozero", cl::Hidden,
+                                  cl::init(false));
+
+// Find a better place for inserting zeroing
+static cl::opt<bool> OptToZeroPosition("gogc-optimize-tozero-position", cl::Hidden,
+                                  cl::init(false));
+
+// Only zeroing necessary bits
+static cl::opt<bool> OptToZeroPattern("gogc-optimize-tozero-pattern", cl::Hidden,
+                                  cl::init(false));
 
 // Print the liveset found at the insert location
 static cl::opt<bool> PrintLiveSet("gogc-print-liveset", cl::Hidden,
@@ -129,6 +145,15 @@ static cl::opt<bool> VerifyAllocaCast("gogc-verify-alloca-cast", cl::Hidden,
 // Move GEP after some statepoints
 static cl::opt<bool> MoveGEPBackward("gogc-move-gep-backward", cl::Hidden,
                                   cl::init(true));
+
+// Print the liveset found at the insert location
+static cl::opt<bool> PrintObsoleted("gogc-print-obsoleted", cl::Hidden,
+                                  cl::init(false));
+
+// Check store of ill-formed pointers
+static cl::opt<bool> CheckIllFormedPointerStore("gogc-check-ifp-store", cl::Hidden,
+                                  cl::init(false));
+
 
 // Statepoint ID. TODO: this is not thread safe.
 static uint64_t ID = 0;
@@ -152,6 +177,7 @@ static void stripNonValidData(Module &M);
 
 static bool shouldRewriteStatepointsIn(Function &F);
 
+static bool needsRewriteForGo(CallBase *Call);
 
 static bool isGoStackAddr(Value * V);
 static bool isGoPreAllocatedParamOut(Value * V);
@@ -184,16 +210,6 @@ static bool isGoPreAllocatedParamOut(Value * V) {
   if (CallInst* Call = dyn_cast<CallInst>(V))
     return Call->hasMetadata("go.stack.paramout");
   return false;
-}
-
-static Value* unpackBitCast(Value *V) {
-  if (BitCastInst *BC = dyn_cast<BitCastInst>(V))
-    return unpackBitCast(BC->getOperand(0));
-
-  if (IntToPtrInst *ITP = dyn_cast<IntToPtrInst>(V))
-    return unpackBitCast(ITP->getOperand(0));
-
-  return V;
 }
 
 static bool isStackConstantPointer(Value *V) {
@@ -233,65 +249,25 @@ static bool isStackConstantPointer(Value *V) {
 static Type* getValueElementType(Value *V) {
   // Handle different instruction types
   if (auto I = dyn_cast<Instruction>(V)) {
-    // For alloca, return the allocated type
-    if (auto AI = dyn_cast<AllocaInst>(I)) {
-      return AI->getAllocatedType();
-    }
-
-    // For load, return the loaded value type
-    if (auto LI = dyn_cast<LoadInst>(I)) {
-      return LI->getType();
-    }
-
-    // For store, return the type of value being stored
-    if (auto SI = dyn_cast<StoreInst>(I)) {
-      return SI->getValueOperand()->getType();
-    }
-
-    // For GEP, return the source element type
-    if (auto GEP = dyn_cast<GetElementPtrInst>(I)) {
-      return GEP->getSourceElementType();
-    }
-  }
-
-  // If it's a pointer type and we couldn't determine the element type,
-  // return the pointer type itself
-  Type *Ty = V->getType();
-  if (Ty->isPointerTy()) {
-    return Ty;
-  }
-
-  return Ty;
-}
-
-static bool hasOpacusType(Value *V) {
-  return isa<Instruction>(V) && (
-    isa<AllocaInst>(V) ||
-    isa<LoadInst>(V) ||
-    isa<StoreInst>(V) ||
-    isa<GetElementPtrInst> (V)
-  );
-}
-
-static bool hasPointerInOpacusType(Value *V) {
-  return isa<Instruction>(V) && (
-    isa<AllocaInst>(V) ||
-    (isa<LoadInst>(V) && dyn_cast<LoadInst>(V)->getType()->isPointerTy()) ||
-    isa<StoreInst>(V) ||
-    isa<GetElementPtrInst>(V)
-  );
-}
-
-static Type* getGoType(Value *V) {
-  if (auto I = dyn_cast<Instruction>(V)) {
     if (auto M = I->getMetadata("go.type")) {
       assert(isGoPreAllocated(V) && "only go.preallocated has go.type");
       assert(M->getNumOperands() == 1 && "must have exactly one member");
       assert(isa<ConstantAsMetadata>(M->getOperand(0)) && "must be a constant");
       return dyn_cast<ConstantAsMetadata>(M->getOperand(0))->getType();
     }
+
+    // For alloca, return the allocated type
+    if (auto AI = dyn_cast<AllocaInst>(I)) {
+      return AI->getAllocatedType();
+    }
+
+    // For GEP, return the result element type
+    if (auto GEP = dyn_cast<GetElementPtrInst>(I)) {
+      return GEP->getResultElementType();
+    }
   }
-  return getValueElementType(V);
+
+  llvm_unreachable("cannot determine element type");
 }
 
 // Intrinsics don't work with statepoints. Convert them to calls to make sure that
@@ -300,10 +276,15 @@ static Type* getGoType(Value *V) {
 static bool convertIntrinsicsToCalls(Function &F) {
   bool Changed = false;
   SmallVector<IntrinsicInst*, 4> Intrinsics;
+  SmallVector<IntrinsicInst*, 4> LifetimeIntrinsics;
   SmallVector<MemCpyInst*, 8> MemCpy;
   for (Instruction &I : instructions(F)) {
     if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(&I)) {
       switch (II->getIntrinsicID()) {
+        case Intrinsic::lifetime_start:
+        case Intrinsic::lifetime_end:
+          LifetimeIntrinsics.push_back(II);
+          break;
         case Intrinsic::memmove:
           Intrinsics.push_back(II);
           break;
@@ -339,6 +320,13 @@ static bool convertIntrinsicsToCalls(Function &F) {
           // Do nothing.
           break;
       }
+    }
+  }
+
+  if (!LifetimeIntrinsics.empty()) {
+    Changed = true;
+    for (auto *II : LifetimeIntrinsics) {
+      II->eraseFromParent();
     }
   }
 
@@ -382,9 +370,10 @@ PreservedAnalyses GoStatepoints::run(Module &M,
       continue;
 
     auto &DT = FAM.getResult<DominatorTreeAnalysis>(F);
+    auto &LI = FAM.getResult<LoopAnalysis>(F);
     auto &TTI = FAM.getResult<TargetIRAnalysis>(F);
     auto &TLI = FAM.getResult<TargetLibraryAnalysis>(F);
-    Changed |= runOnFunction(F, DT, TTI, TLI);
+    Changed |= runOnFunction(F, DT, LI, TTI, TLI);
   }
   if (!Changed)
     return PreservedAnalyses::all();
@@ -536,12 +525,15 @@ public:
       TargetTransformInfo &TTI =
           getAnalysis<TargetTransformInfoWrapperPass>().getTTI(F);
       auto &DT = getAnalysis<DominatorTreeWrapperPass>(F).getDomTree();
-
-      Changed |= Impl.runOnFunction(F, DT, TTI, TLI);
+      auto &LI = getAnalysis<LoopInfoWrapperPass>(F).getLoopInfo();
+      Changed |= Impl.runOnFunction(F, DT, LI, TTI, TLI);
     }
 
     if (!Changed)
       return false;
+
+    if (PrintToZero)
+      dbgs() << "NumGCToZero: " << M.getName() << " " << NumGCToZero << "\n";
 
     // stripNonValidData asserts that shouldRewriteStatepointsIn
     // returns true for at least one function in the module.  Since at least
@@ -554,6 +546,7 @@ public:
     // We add and rewrite a bunch of instructions, but don't really do much
     // else.  We could in theory preserve a lot more analyses here.
     AU.addRequired<DominatorTreeWrapperPass>();
+    AU.addRequired<LoopInfoWrapperPass>();
     AU.addRequired<TargetTransformInfoWrapperPass>();
     AU.addRequired<TargetLibraryInfoWrapperPass>();
   }
@@ -571,12 +564,18 @@ INITIALIZE_PASS_BEGIN(GoStatepointsLegacyPass,
                       "go-statepoints",
                       "Insert statepoints for Go GC", false, false)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
 INITIALIZE_PASS_DEPENDENCY(TargetTransformInfoWrapperPass)
 INITIALIZE_PASS_END(GoStatepointsLegacyPass,
                     "go-statepoints",
                     "Insert statepoints for Go GC", false, false)
 
 namespace {
+
+struct ToZeroInfo {
+  BitVector    State;
+  BasicBlock  *Pos;
+};
 
 // Liveness tracking has three parts: in-register values, non-address-taken
 // allocas (stack slots), and address-taken allocas.
@@ -620,12 +619,9 @@ struct GCPtrLivenessData {
 
   // Alloca liveness.
 
-  MapVector<BasicBlock *, SetVector<Value *>> AllocaDefSet;  // initialized in BB
-  MapVector<BasicBlock *, SetVector<Value *>> AllocaKillSet; // killed (lifetime.end) in BB
-
-  // Unlike above, these are propagated forwards, instead of backwards.
-  MapVector<BasicBlock *, SetVector<Value *>> AllocaDefAny; // initialized at any path reaching the end of BB
-  MapVector<BasicBlock *, SetVector<Value *>> AllocaDefAll; // initialized at all paths reaching the end of BB
+  DenseMap<Type*, BitVector> TypeToPtrMap;
+  DenseMap<BasicBlock *, DenseMap<Value *, BitVector>> InAllocaDefStates; // the must initialized bits at the begin of BB
+  DenseMap<BasicBlock *, DenseMap<Value *, BitVector>> OutAllocaDefStates; // the must initialized bits at the end of BB
 
   // Used by findLiveSetAtInst
   MapVector<Instruction*, SetVector<Value *>> GenAtInst;  // recorded used pointers
@@ -671,10 +667,9 @@ struct PartiallyConstructedSafepointRecord {
 } // end anonymous namespace
 
 /// Compute the live-in set for every basic block in the function
-static void computeLiveInValues(DominatorTree &DT, Function &F,
+static void computeLiveInValues(DominatorTree &DT, LoopInfo &LI, Function &F,
                                 GCPtrLivenessData &Data,
-                                SetVector<Value *> &ToZero,
-                                SetVector<Value *> &BadLoads,
+                                DenseMap<Value *, ToZeroInfo> &ToZero,
                                 DefiningValueMapTy &DVCache);
 
 /// Given results from the dataflow liveness computation, find the set of live
@@ -710,12 +705,23 @@ static bool isHandledGCPointerType(Type *T) {
   return false;
 }
 
+static bool isGoGCPointerLikeValue(Value *V) {
+  if (isa<PtrToIntInst>(V))
+    return true;
+
+  if (isa<Instruction>(V) &&
+      cast<Instruction>(V)->hasMetadata("go.pointerlike"))
+    return true;
+
+  return false;
+}
+
 // We need to track all Go GC pointer like value
 static bool isGoGCPointerOrPointerLikeValue(Value *V) {
   if (isGoConstantLikeValue(V))
     return false; // no track of constant value
 
-  if (isHandledGCPointerType(getGoType(V)) || isGoPreAllocated(V) || hasPointerInOpacusType(V))
+  if (isHandledGCPointerType(V->getType()))
     return true; // it is a value of GC type
 
   if (isa<PtrToIntInst>(V))
@@ -751,13 +757,6 @@ static bool isUnhandledGCPointerType(Type *Ty) {
 }
 #endif
 
-// Return the name of the value suffixed with the provided value, or if the
-// value didn't have a name, the default value specified.
-static std::string suffixed_name_or(Value *V, StringRef Suffix,
-                                    StringRef DefaultName) {
-  return V->hasName() ? (V->getName() + Suffix).str() : DefaultName.str();
-}
-
 // Helper function to print a live set, for debugging.
 static void
 printLiveSet(SetVector<Value *> &LiveSet) {
@@ -786,40 +785,8 @@ analyzeParsePointLiveness(DominatorTree &DT,
   Result.LiveSet = LiveSet;
 }
 
-static bool isKnownBaseResult(Value *V);
 
-namespace {
-
-/// A single base defining value - An immediate base defining value for an
-/// instruction 'Def' is an input to 'Def' whose base is also a base of 'Def'.
-/// For instructions which have multiple pointer [vector] inputs or that
-/// transition between vector and scalar types, there is no immediate base
-/// defining value.  The 'base defining value' for 'Def' is the transitive
-/// closure of this relation stopping at the first instruction which has no
-/// immediate base defining value.  The b.d.v. might itself be a base pointer,
-/// but it can also be an arbitrary derived pointer.
-struct BaseDefiningValueResult {
-  /// Contains the value which is the base defining value.
-  Value * const BDV;
-
-  /// True if the base defining value is also known to be an actual base
-  /// pointer.
-  const bool IsKnownBase;
-
-  BaseDefiningValueResult(Value *BDV, bool IsKnownBase)
-    : BDV(BDV), IsKnownBase(IsKnownBase) {
-#ifndef NDEBUG
-    // Check consistency between new and old means of checking whether a BDV is
-    // a base.
-    bool MustBeBase = isKnownBaseResult(BDV);
-    assert(!MustBeBase || MustBeBase == IsKnownBase);
-#endif
-  }
-};
-
-} // end anonymous namespace
-
-static BaseDefiningValueResult findBaseDefiningValue(Value *I);
+static Value* findBaseDefiningValue(Value *I);
 
 /// Return a base defining value for the 'Index' element of the given vector
 /// instruction 'I'.  If Index is null, returns a BDV for the entire vector
@@ -830,37 +797,34 @@ static BaseDefiningValueResult findBaseDefiningValue(Value *I);
 /// vector returned is a BDV (and possibly a base) of the entire vector 'I'.
 /// If the later, the return pointer is a BDV (or possibly a base) for the
 /// particular element in 'I'.
-static BaseDefiningValueResult
+static Value*
 findBaseDefiningValueOfVector(Value *I) {
   // Each case parallels findBaseDefiningValue below, see that code for
   // detailed motivation.
 
   if (isa<Argument>(I))
     // An incoming argument to the function is a base pointer
-    return BaseDefiningValueResult(I, true);
+    return I;
 
   if (isa<Constant>(I))
     // Base of constant vector consists only of constant null pointers.
     // For reasoning see similar case inside 'findBaseDefiningValue' function.
-    return BaseDefiningValueResult(ConstantAggregateZero::get(I->getType()),
-                                   true);
+    return ConstantAggregateZero::get(I->getType());
 
   if (isa<LoadInst>(I))
-    return BaseDefiningValueResult(I, true);
+    return I;
 
   if (isa<InsertElementInst>(I))
     // We don't know whether this vector contains entirely base pointers or
     // not.  To be conservatively correct, we treat it as a BDV and will
     // duplicate code as needed to construct a parallel vector of bases.
-    return BaseDefiningValueResult(I, false);
+    return I;
+
+  if (auto *FI = dyn_cast<FreezeInst>(I))
+    return findBaseDefiningValueOfVector(FI->getOperand(0));
 
   if (isa<ShuffleVectorInst>(I))
-    // We don't know whether this vector contains entirely base pointers or
-    // not.  To be conservatively correct, we treat it as a BDV and will
-    // duplicate code as needed to construct a parallel vector of bases.
-    // TODO: There a number of local optimizations which could be applied here
-    // for particular sufflevector patterns.
-    return BaseDefiningValueResult(I, false);
+    return I;
 
   // The behavior of getelementptr instructions is the same for vector and
   // non-vector data types.
@@ -876,20 +840,20 @@ findBaseDefiningValueOfVector(Value *I) {
   // pointers.  This should probably be generalized via attributes to support
   // both source language and internal functions.
   if (isa<CallInst>(I) || isa<InvokeInst>(I) || isa<IntToPtrInst>(I))
-    return BaseDefiningValueResult(I, true);
+    return I;
 
   // A PHI or Select is a base defining value.  The outer findBasePointer
   // algorithm is responsible for constructing a base value for this BDV.
   assert((isa<SelectInst>(I) || isa<PHINode>(I)) &&
          "unknown vector instruction - no base found for vector element");
-  return BaseDefiningValueResult(I, false);
+  return I;
 }
 
 /// Helper function for findBasePointer - Will return a value which either a)
 /// defines the base pointer for the input, b) blocks the simple search
 /// (i.e. a PHI or Select of two derived pointers), or c) involves a change
 /// from pointer to vector type or back.
-static BaseDefiningValueResult findBaseDefiningValue(Value *I) {
+static Value* findBaseDefiningValue(Value *I) {
   if (I->getType()->isStructTy())
     // Assuming FCA is always base.
     // FCAs appear mostly in the call sequnce where we pass/return multiple
@@ -899,11 +863,7 @@ static BaseDefiningValueResult findBaseDefiningValue(Value *I) {
     // It is also unlikely to contain past-the-end pointer (we cannot do
     // pointer arithmetic directly with FCA). So it is safe to treat FCA as
     // base.
-    return BaseDefiningValueResult(I, true);
-
-
-  // assert(I->getType()->isPtrOrPtrVectorTy() &&
-  //        "Illegal to ask for the base pointer of a non-pointer type");
+    return I;
 
   if (I->getType()->isVectorTy())
     return findBaseDefiningValueOfVector(I);
@@ -911,7 +871,7 @@ static BaseDefiningValueResult findBaseDefiningValue(Value *I) {
   if (isa<Argument>(I))
     // An incoming argument to the function is a base pointer
     // We should have never reached here if this argument isn't an gc value
-    return BaseDefiningValueResult(I, true);
+    return I;
 
   if (isa<Constant>(I)) {
     // We assume that objects with a constant base (e.g. a global) can't move
@@ -923,16 +883,14 @@ static BaseDefiningValueResult findBaseDefiningValue(Value *I) {
     // trying to avoid problems reporting various conflicts in a form of
     // "phi (const1, const2)" or "phi (const, regular gc ptr)".
     // See constant.ll file for relevant test cases.
-
-    return BaseDefiningValueResult(
-        ConstantPointerNull::get(cast<PointerType>(I->getType())), true);
+    return ConstantPointerNull::get(cast<PointerType>(I->getType()));
   }
 
   if (CastInst *CI = dyn_cast<CastInst>(I)) {
     Value *Def = CI->stripPointerCasts();
     if (isa<IntToPtrInst>(Def))
       // Pointer converted from integer is a base.
-      return BaseDefiningValueResult(Def, true);
+      return Def;
 
     // Pointer-to-pointer and int-to-pointer casts are handled above.
     // We don't know how to handle other type of casts.
@@ -942,11 +900,11 @@ static BaseDefiningValueResult findBaseDefiningValue(Value *I) {
 
   if (isa<AllocaInst>(I))
     // alloca is a gc base
-    return BaseDefiningValueResult(I, true);
+    return I;
 
   if (isa<LoadInst>(I))
     // The value loaded is a gc base itself
-    return BaseDefiningValueResult(I, true);
+    return I;
 
   if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(I)) {
     // If the base is Alloca, we can always return the Alloca as the base.
@@ -958,9 +916,9 @@ static BaseDefiningValueResult findBaseDefiningValue(Value *I) {
       return findBaseDefiningValue(PtrBase);
 
     if (isa<GetElementPtrInst>(PtrBase)) {
-      BaseDefiningValueResult R = findBaseDefiningValue(PtrBase);
-      if (R.IsKnownBase && (isa<AllocaInst>(R.BDV) || isGoPreAllocated(R.BDV)))
-        return R;
+      Value *Base = findBaseDefiningValue(PtrBase);
+      if (isa<AllocaInst>(Base) || isGoPreAllocated(Base))
+        return Base;
     }
 
     // The base of this GEP is the base if all indices are zero. Otherwise
@@ -969,7 +927,7 @@ static BaseDefiningValueResult findBaseDefiningValue(Value *I) {
     if (GEP->hasAllZeroIndices())
       return findBaseDefiningValue(GEP->getPointerOperand());
     else
-      return BaseDefiningValueResult(I, true);
+      return I;
   }
 
   if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(I)) {
@@ -996,7 +954,7 @@ static BaseDefiningValueResult findBaseDefiningValue(Value *I) {
   // pointers.  This should probably be generalized via attributes to support
   // both source language and internal functions.
   if (isa<CallInst>(I) || isa<InvokeInst>(I))
-    return BaseDefiningValueResult(I, true);
+    return I;
 
   // TODO: I have absolutely no idea how to implement this part yet.  It's not
   // necessarily hard, I just haven't really looked at it yet.
@@ -1006,7 +964,7 @@ static BaseDefiningValueResult findBaseDefiningValue(Value *I) {
     // A CAS is effectively a atomic store and load combined under a
     // predicate.  From the perspective of base pointers, we just treat it
     // like a load.
-    return BaseDefiningValueResult(I, true);
+    return I;
 
   assert(!isa<AtomicRMWInst>(I) && "Xchg handled above, all others are "
                                    "binary ops which don't apply to pointers");
@@ -1015,7 +973,7 @@ static BaseDefiningValueResult findBaseDefiningValue(Value *I) {
   // stack, but in either case, this is simply a field load.  As a result,
   // this is a defining definition of the base just like a load is.
   if (isa<ExtractValueInst>(I))
-    return BaseDefiningValueResult(I, true);
+    return I;
 
   // We should never see an insert vector since that would require we be
   // tracing back a struct value not a pointer value.
@@ -1030,7 +988,7 @@ static BaseDefiningValueResult findBaseDefiningValue(Value *I) {
     // Note: There a lot of obvious peephole cases here.  This are deliberately
     // handled after the main base pointer inference algorithm to make writing
     // test cases to exercise that code easier.
-    return BaseDefiningValueResult(I, false);
+    return I;
 
   if (auto *FI = dyn_cast<FreezeInst>(I)) {
     auto *V = FI->getOperand(0);
@@ -1042,15 +1000,15 @@ static BaseDefiningValueResult findBaseDefiningValue(Value *I) {
   // derived pointers (each with it's own base potentially).  It's the job of
   // the caller to resolve these.
   assert((isa<SelectInst>(I) || isa<PHINode>(I)) &&
-         "missing instruction case in findBaseDefiningValing");
-  return BaseDefiningValueResult(I, false);
+         "missing instruction case in findBaseDefiningValue");
+  return I;
 }
 
 /// Returns the base defining value for this value.
 static Value *findBaseDefiningValueCached(Value *I, DefiningValueMapTy &Cache) {
   Value *&Cached = Cache[I];
   if (!Cached) {
-    Cached = findBaseDefiningValue(I).BDV;
+    Cached = findBaseDefiningValue(I);
     LLVM_DEBUG(dbgs() << "fBDV-cached: " << I->getName() << " -> "
                       << Cached->getName() << "\n");
   }
@@ -1071,127 +1029,6 @@ static Value *findBaseOrBDV(Value *I, DefiningValueMapTy &Cache) {
   return Def;
 }
 
-/// Given the result of a call to findBaseDefiningValue, or findBaseOrBDV,
-/// is it known to be a base pointer?  Or do we need to continue searching.
-static bool isKnownBaseResult(Value *V) {
-  if (!isa<PHINode>(V) && !isa<SelectInst>(V) &&
-      !isa<ExtractElementInst>(V) && !isa<InsertElementInst>(V) &&
-      !isa<ShuffleVectorInst>(V)) {
-    // no recursion possible
-    return true;
-  }
-  if (isa<Instruction>(V) &&
-      cast<Instruction>(V)->getMetadata("is_base_value")) {
-    // This is a previously inserted base phi or select.  We know
-    // that this is a base value.
-    return true;
-  }
-
-  // We need to keep searching
-  return false;
-}
-
-namespace {
-
-/// Models the state of a single base defining value in the findBasePointer
-/// algorithm for determining where a new instruction is needed to propagate
-/// the base of this BDV.
-class BDVState {
-public:
-  enum Status { Unknown, Base, Conflict };
-
-  BDVState() : BaseValue(nullptr) {}
-
-  explicit BDVState(Status Status, Value *BaseValue = nullptr)
-      : Status(Status), BaseValue(BaseValue) {
-    assert(Status != Base || BaseValue);
-  }
-
-  explicit BDVState(Value *BaseValue) : Status(Base), BaseValue(BaseValue) {}
-
-  Status getStatus() const { return Status; }
-  Value *getBaseValue() const { return BaseValue; }
-
-  bool isBase() const { return getStatus() == Base; }
-  bool isUnknown() const { return getStatus() == Unknown; }
-  bool isConflict() const { return getStatus() == Conflict; }
-
-  bool operator==(const BDVState &Other) const {
-    return BaseValue == Other.BaseValue && Status == Other.Status;
-  }
-
-  bool operator!=(const BDVState &other) const { return !(*this == other); }
-
-  LLVM_DUMP_METHOD
-  void dump() const {
-    print(dbgs());
-    dbgs() << '\n';
-  }
-
-  void print(raw_ostream &OS) const {
-    switch (getStatus()) {
-    case Unknown:
-      OS << "U";
-      break;
-    case Base:
-      OS << "B";
-      break;
-    case Conflict:
-      OS << "C";
-      break;
-    }
-    OS << " (" << getBaseValue() << " - "
-       << (getBaseValue() ? getBaseValue()->getName() : "nullptr") << "): ";
-  }
-
-private:
-  Status Status = Unknown;
-  AssertingVH<Value> BaseValue; // Non-null only if Status == Base.
-};
-
-} // end anonymous namespace
-
-#ifndef NDEBUG
-static raw_ostream &operator<<(raw_ostream &OS, const BDVState &State) {
-  State.print(OS);
-  return OS;
-}
-#endif
-
-static BDVState meetBDVStateImpl(const BDVState &LHS, const BDVState &RHS) {
-  switch (LHS.getStatus()) {
-  case BDVState::Unknown:
-    return RHS;
-
-  case BDVState::Base:
-    assert(LHS.getBaseValue() && "can't be null");
-    if (RHS.isUnknown())
-      return LHS;
-
-    if (RHS.isBase()) {
-      if (LHS.getBaseValue() == RHS.getBaseValue()) {
-        assert(LHS == RHS && "equality broken!");
-        return LHS;
-      }
-      return BDVState(BDVState::Conflict);
-    }
-    assert(RHS.isConflict() && "only three states!");
-    return BDVState(BDVState::Conflict);
-
-  case BDVState::Conflict:
-    return LHS;
-  }
-  llvm_unreachable("only three states!");
-}
-
-// Values of type BDVState form a lattice, and this function implements the meet
-// operation.
-static BDVState meetBDVState(const BDVState &LHS, const BDVState &RHS) {
-  BDVState Result = meetBDVStateImpl(LHS, RHS);
-  assert(Result == meetBDVStateImpl(RHS, LHS) &&
-         "Math is wrong: meet does not commute!");
-  return Result;
-}
 
 /// For a given value or instruction, figure out what base ptr its derived from.
 /// For gc objects, this is simply itself.  On success, returns a value which is
@@ -1201,397 +1038,39 @@ static Value *findBasePointer(Value *I, DefiningValueMapTy &Cache) {
   // We now track pointer-like values.
   // Those values do not have a base.
   // We only care about the source of the root PtrToInt.
-  if (!(isHandledGCPointerType(I->getType()) || hasPointerInOpacusType(I))) {
+  if (!isHandledGCPointerType(I->getType())) {
     assert(isa<Instruction>(I) && "only instruction allowed");
-    if (auto PTI = dyn_cast<PtrToIntInst>(I))
+    if (auto *PTI = dyn_cast<PtrToIntInst>(I))
       return findBasePointer(PTI->getOperand(0), Cache);
 
+    if (isa<PHINode>(I) || isa<SelectInst>(I) || isa<ShuffleVectorInst>(I)) {
+      return I;
+    }
+
+    if (FreezeInst *FI = dyn_cast<FreezeInst>(I))
+      return findBasePointer(FI->getOperand(0), Cache);
+
+    if (auto *BI = dyn_cast<BinaryOperator>(I)) {
+      if (isGoGCPointerLikeValue(BI->getOperand(0))) {
+        return BI->getOperand(0);
+      }
+      if (isGoGCPointerLikeValue(BI->getOperand(1))) {
+        return BI->getOperand(1);
+      }
+      return BI;
+    }
+
     MDNode *MD = cast<Instruction>(I)->getMetadata("go.pointerlike");
-    dbgs() << "try to find the base pointer for "
-      << (MD ? "pointer-like values" : "non-pointer values") << *I << "\n";
-    report_fatal_error("must be a pointer-like non-pointer value");
-    return nullptr;
+    if (!MD) {
+      dbgs() << "try to find the base pointer for "
+        << (MD ? "pointer-like values" : "non-pointer values") << *I << "\n";
+      report_fatal_error("must be a pointer-like non-pointer value");
+    }
+    return I;
   }
 
   Value *Def = findBaseOrBDV(I, Cache);
-
-  if (isKnownBaseResult(Def))
-    return Def;
-
-  // Here's the rough algorithm:
-  // - For every SSA value, construct a mapping to either an actual base
-  //   pointer or a PHI which obscures the base pointer.
-  // - Construct a mapping from PHI to unknown TOP state.  Use an
-  //   optimistic algorithm to propagate base pointer information.  Lattice
-  //   looks like:
-  //   UNKNOWN
-  //   b1 b2 b3 b4
-  //   CONFLICT
-  //   When algorithm terminates, all PHIs will either have a single concrete
-  //   base or be in a conflict state.
-  // - For every conflict, insert a dummy PHI node without arguments.  Add
-  //   these to the base[Instruction] = BasePtr mapping.  For every
-  //   non-conflict, add the actual base.
-  //  - For every conflict, add arguments for the base[a] of each input
-  //   arguments.
-  //
-  // Note: A simpler form of this would be to add the conflict form of all
-  // PHIs without running the optimistic algorithm.  This would be
-  // analogous to pessimistic data flow and would likely lead to an
-  // overall worse solution.
-
-#ifndef NDEBUG
-  auto isExpectedBDVType = [](Value *BDV) {
-    return isa<PHINode>(BDV) || isa<SelectInst>(BDV) ||
-           isa<ExtractElementInst>(BDV) || isa<InsertElementInst>(BDV) ||
-           isa<ShuffleVectorInst>(BDV);
-  };
-#endif
-
-  // Once populated, will contain a mapping from each potentially non-base BDV
-  // to a lattice value (described above) which corresponds to that BDV.
-  // We use the order of insertion (DFS over the def/use graph) to provide a
-  // stable deterministic ordering for visiting DenseMaps (which are unordered)
-  // below.  This is important for deterministic compilation.
-  MapVector<Value *, BDVState> States;
-
-  // Recursively fill in all base defining values reachable from the initial
-  // one for which we don't already know a definite base value for
-  /* scope */ {
-    SmallVector<Value*, 16> Worklist;
-    Worklist.push_back(Def);
-    States.insert({Def, BDVState()});
-    while (!Worklist.empty()) {
-      Value *Current = Worklist.pop_back_val();
-      assert(!isKnownBaseResult(Current) && "why did it get added?");
-
-      auto visitIncomingValue = [&](Value *InVal) {
-        Value *Base = findBaseOrBDV(InVal, Cache);
-        if (isKnownBaseResult(Base))
-          // Known bases won't need new instructions introduced and can be
-          // ignored safely
-          return;
-        assert(isExpectedBDVType(Base) && "the only non-base values "
-               "we see should be base defining values");
-        if (States.insert(std::make_pair(Base, BDVState())).second)
-          Worklist.push_back(Base);
-      };
-      if (PHINode *PN = dyn_cast<PHINode>(Current)) {
-        for (Value *InVal : PN->incoming_values())
-          visitIncomingValue(InVal);
-      } else if (SelectInst *SI = dyn_cast<SelectInst>(Current)) {
-        visitIncomingValue(SI->getTrueValue());
-        visitIncomingValue(SI->getFalseValue());
-      } else if (auto *EE = dyn_cast<ExtractElementInst>(Current)) {
-        visitIncomingValue(EE->getVectorOperand());
-      } else if (auto *IE = dyn_cast<InsertElementInst>(Current)) {
-        visitIncomingValue(IE->getOperand(0)); // vector operand
-        visitIncomingValue(IE->getOperand(1)); // scalar operand
-      } else if (auto *SV = dyn_cast<ShuffleVectorInst>(Current)) {
-        visitIncomingValue(SV->getOperand(0));
-        visitIncomingValue(SV->getOperand(1));
-      }
-      else {
-        llvm_unreachable("Unimplemented instruction case");
-      }
-    }
-  }
-
-#ifndef NDEBUG
-  LLVM_DEBUG(dbgs() << "States after initialization:\n");
-  for (auto Pair : States) {
-    LLVM_DEBUG(dbgs() << " " << Pair.second << " for " << *Pair.first << "\n");
-  }
-#endif
-
-  // Return a phi state for a base defining value.  We'll generate a new
-  // base state for known bases and expect to find a cached state otherwise.
-  auto getStateForBDV = [&](Value *baseValue) {
-    if (isKnownBaseResult(baseValue))
-      return BDVState(baseValue);
-    auto I = States.find(baseValue);
-    assert(I != States.end() && "lookup failed!");
-    return I->second;
-  };
-
-  bool Progress = true;
-  while (Progress) {
-#ifndef NDEBUG
-    const size_t OldSize = States.size();
-#endif
-    Progress = false;
-    // We're only changing values in this loop, thus safe to keep iterators.
-    // Since this is computing a fixed point, the order of visit does not
-    // effect the result.  TODO: We could use a worklist here and make this run
-    // much faster.
-    for (auto Pair : States) {
-      Value *BDV = Pair.first;
-      assert(!isKnownBaseResult(BDV) && "why did it get added?");
-
-      // Given an input value for the current instruction, return a BDVState
-      // instance which represents the BDV of that value.
-      auto getStateForInput = [&](Value *V) mutable {
-        Value *BDV = findBaseOrBDV(V, Cache);
-        return getStateForBDV(BDV);
-      };
-
-      BDVState NewState;
-      if (SelectInst *SI = dyn_cast<SelectInst>(BDV)) {
-        NewState = meetBDVState(NewState, getStateForInput(SI->getTrueValue()));
-        NewState =
-            meetBDVState(NewState, getStateForInput(SI->getFalseValue()));
-      } else if (PHINode *PN = dyn_cast<PHINode>(BDV)) {
-        for (Value *Val : PN->incoming_values())
-          NewState = meetBDVState(NewState, getStateForInput(Val));
-      } else if (auto *EE = dyn_cast<ExtractElementInst>(BDV)) {
-        // The 'meet' for an extractelement is slightly trivial, but it's still
-        // useful in that it drives us to conflict if our input is.
-        NewState =
-            meetBDVState(NewState, getStateForInput(EE->getVectorOperand()));
-      } else if (auto *IE = dyn_cast<InsertElementInst>(BDV)){
-        // Given there's a inherent type mismatch between the operands, will
-        // *always* produce Conflict.
-        NewState = meetBDVState(NewState, getStateForInput(IE->getOperand(0)));
-        NewState = meetBDVState(NewState, getStateForInput(IE->getOperand(1)));
-      } else {
-        // The only instance this does not return a Conflict is when both the
-        // vector operands are the same vector.
-        auto *SV = cast<ShuffleVectorInst>(BDV);
-        NewState = meetBDVState(NewState, getStateForInput(SV->getOperand(0)));
-        NewState = meetBDVState(NewState, getStateForInput(SV->getOperand(1)));
-      }
-
-      BDVState OldState = States[BDV];
-      if (OldState != NewState) {
-        Progress = true;
-        States[BDV] = NewState;
-      }
-    }
-
-    assert(OldSize == States.size() &&
-           "fixed point shouldn't be adding any new nodes to state");
-  }
-
-#ifndef NDEBUG
-  LLVM_DEBUG(dbgs() << "States after meet iteration:\n");
-  for (auto Pair : States) {
-    LLVM_DEBUG(dbgs() << " " << Pair.second << " for " << *Pair.first << "\n");
-  }
-#endif
-
-  // Insert Phis for all conflicts
-  // TODO: adjust naming patterns to avoid this order of iteration dependency
-  for (auto Pair : States) {
-    Instruction *I = cast<Instruction>(Pair.first);
-    BDVState State = Pair.second;
-    assert(!isKnownBaseResult(I) && "why did it get added?");
-    assert(!State.isUnknown() && "Optimistic algorithm didn't complete!");
-
-    // extractelement instructions are a bit special in that we may need to
-    // insert an extract even when we know an exact base for the instruction.
-    // The problem is that we need to convert from a vector base to a scalar
-    // base for the particular indice we're interested in.
-    if (State.isBase() && isa<ExtractElementInst>(I) &&
-        isa<VectorType>(State.getBaseValue()->getType())) {
-      auto *EE = cast<ExtractElementInst>(I);
-      // TODO: In many cases, the new instruction is just EE itself.  We should
-      // exploit this, but can't do it here since it would break the invariant
-      // about the BDV not being known to be a base.
-      auto *BaseInst = ExtractElementInst::Create(
-          State.getBaseValue(), EE->getIndexOperand(), "base_ee", EE);
-      BaseInst->setMetadata("is_base_value", MDNode::get(I->getContext(), {}));
-      States[I] = BDVState(BDVState::Base, BaseInst);
-    }
-
-    // Since we're joining a vector and scalar base, they can never be the
-    // same.  As a result, we should always see insert element having reached
-    // the conflict state.
-    assert(!isa<InsertElementInst>(I) || State.isConflict());
-
-    if (!State.isConflict())
-      continue;
-
-    /// Create and insert a new instruction which will represent the base of
-    /// the given instruction 'I'.
-    auto MakeBaseInstPlaceholder = [](Instruction *I) -> Instruction* {
-      if (isa<PHINode>(I)) {
-        BasicBlock *BB = I->getParent();
-        int NumPreds = pred_size(BB);
-        assert(NumPreds > 0 && "how did we reach here");
-        std::string Name = suffixed_name_or(I, ".base", "base_phi");
-        return PHINode::Create(I->getType(), NumPreds, Name, I);
-      } else if (SelectInst *SI = dyn_cast<SelectInst>(I)) {
-        // The undef will be replaced later
-        UndefValue *Undef = UndefValue::get(SI->getType());
-        std::string Name = suffixed_name_or(I, ".base", "base_select");
-        return SelectInst::Create(SI->getCondition(), Undef, Undef, Name, SI);
-      } else if (auto *EE = dyn_cast<ExtractElementInst>(I)) {
-        UndefValue *Undef = UndefValue::get(EE->getVectorOperand()->getType());
-        std::string Name = suffixed_name_or(I, ".base", "base_ee");
-        return ExtractElementInst::Create(Undef, EE->getIndexOperand(), Name,
-                                          EE);
-      } else if (auto *IE = dyn_cast<InsertElementInst>(I)) {
-        UndefValue *VecUndef = UndefValue::get(IE->getOperand(0)->getType());
-        UndefValue *ScalarUndef = UndefValue::get(IE->getOperand(1)->getType());
-        std::string Name = suffixed_name_or(I, ".base", "base_ie");
-        return InsertElementInst::Create(VecUndef, ScalarUndef,
-                                         IE->getOperand(2), Name, IE);
-      } else {
-        auto *SV = cast<ShuffleVectorInst>(I);
-        UndefValue *VecUndef = UndefValue::get(SV->getOperand(0)->getType());
-        std::string Name = suffixed_name_or(I, ".base", "base_sv");
-        return new ShuffleVectorInst(VecUndef, VecUndef, SV->getOperand(2),
-                                     Name, SV);
-      }
-    };
-    Instruction *BaseInst = MakeBaseInstPlaceholder(I);
-    // Add metadata marking this as a base value
-    BaseInst->setMetadata("is_base_value", MDNode::get(I->getContext(), {}));
-    States[I] = BDVState(BDVState::Conflict, BaseInst);
-  }
-
-  // Returns a instruction which produces the base pointer for a given
-  // instruction.  The instruction is assumed to be an input to one of the BDVs
-  // seen in the inference algorithm above.  As such, we must either already
-  // know it's base defining value is a base, or have inserted a new
-  // instruction to propagate the base of it's BDV and have entered that newly
-  // introduced instruction into the state table.  In either case, we are
-  // assured to be able to determine an instruction which produces it's base
-  // pointer.
-  auto getBaseForInput = [&](Value *Input, Instruction *InsertPt) {
-    Value *BDV = findBaseOrBDV(Input, Cache);
-    Value *Base = nullptr;
-    if (isKnownBaseResult(BDV)) {
-      Base = BDV;
-    } else {
-      // Either conflict or base.
-      assert(States.count(BDV));
-      Base = States[BDV].getBaseValue();
-    }
-    assert(Base && "Can't be null");
-    // The cast is needed since base traversal may strip away bitcasts
-    if (Base->getType() != Input->getType() && InsertPt)
-      Base = CastInst::CreatePointerBitCastOrAddrSpaceCast(Base, Input->getType(), "cast", InsertPt);
-    return Base;
-  };
-
-  // Fixup all the inputs of the new PHIs.  Visit order needs to be
-  // deterministic and predictable because we're naming newly created
-  // instructions.
-  for (auto Pair : States) {
-    Instruction *BDV = cast<Instruction>(Pair.first);
-    BDVState State = Pair.second;
-
-    assert(!isKnownBaseResult(BDV) && "why did it get added?");
-    assert(!State.isUnknown() && "Optimistic algorithm didn't complete!");
-    if (!State.isConflict())
-      continue;
-
-    if (PHINode *BasePHI = dyn_cast<PHINode>(State.getBaseValue())) {
-      PHINode *PN = cast<PHINode>(BDV);
-      unsigned NumPHIValues = PN->getNumIncomingValues();
-      for (unsigned i = 0; i < NumPHIValues; i++) {
-        Value *InVal = PN->getIncomingValue(i);
-        BasicBlock *InBB = PN->getIncomingBlock(i);
-
-        // If we've already seen InBB, add the same incoming value
-        // we added for it earlier.  The IR verifier requires phi
-        // nodes with multiple entries from the same basic block
-        // to have the same incoming value for each of those
-        // entries.  If we don't do this check here and basephi
-        // has a different type than base, we'll end up adding two
-        // bitcasts (and hence two distinct values) as incoming
-        // values for the same basic block.
-
-        int BlockIndex = BasePHI->getBasicBlockIndex(InBB);
-        if (BlockIndex != -1) {
-          Value *OldBase = BasePHI->getIncomingValue(BlockIndex);
-          BasePHI->addIncoming(OldBase, InBB);
-
-#ifndef NDEBUG
-          Value *Base = getBaseForInput(InVal, nullptr);
-          // In essence this assert states: the only way two values
-          // incoming from the same basic block may be different is by
-          // being different bitcasts of the same value.  A cleanup
-          // that remains TODO is changing findBaseOrBDV to return an
-          // llvm::Value of the correct type (and still remain pure).
-          // This will remove the need to add bitcasts.
-          assert(Base->stripPointerCasts() == OldBase->stripPointerCasts() &&
-                 "Sanity -- findBaseOrBDV should be pure!");
-#endif
-          continue;
-        }
-
-        // Find the instruction which produces the base for each input.  We may
-        // need to insert a bitcast in the incoming block.
-        // TODO: Need to split critical edges if insertion is needed
-        Value *Base = getBaseForInput(InVal, InBB->getTerminator());
-        BasePHI->addIncoming(Base, InBB);
-      }
-      assert(BasePHI->getNumIncomingValues() == NumPHIValues);
-    } else if (SelectInst *BaseSI =
-                   dyn_cast<SelectInst>(State.getBaseValue())) {
-      SelectInst *SI = cast<SelectInst>(BDV);
-
-      // Find the instruction which produces the base for each input.
-      // We may need to insert a bitcast.
-      BaseSI->setTrueValue(getBaseForInput(SI->getTrueValue(), BaseSI));
-      BaseSI->setFalseValue(getBaseForInput(SI->getFalseValue(), BaseSI));
-    } else if (auto *BaseEE =
-                   dyn_cast<ExtractElementInst>(State.getBaseValue())) {
-      Value *InVal = cast<ExtractElementInst>(BDV)->getVectorOperand();
-      // Find the instruction which produces the base for each input.  We may
-      // need to insert a bitcast.
-      BaseEE->setOperand(0, getBaseForInput(InVal, BaseEE));
-    } else if (auto *BaseIE = dyn_cast<InsertElementInst>(State.getBaseValue())){
-      auto *BdvIE = cast<InsertElementInst>(BDV);
-      auto UpdateOperand = [&](int OperandIdx) {
-        Value *InVal = BdvIE->getOperand(OperandIdx);
-        Value *Base = getBaseForInput(InVal, BaseIE);
-        BaseIE->setOperand(OperandIdx, Base);
-      };
-      UpdateOperand(0); // vector operand
-      UpdateOperand(1); // scalar operand
-    } else {
-      auto *BaseSV = cast<ShuffleVectorInst>(State.getBaseValue());
-      auto *BdvSV = cast<ShuffleVectorInst>(BDV);
-      auto UpdateOperand = [&](int OperandIdx) {
-        Value *InVal = BdvSV->getOperand(OperandIdx);
-        Value *Base = getBaseForInput(InVal, BaseSV);
-        BaseSV->setOperand(OperandIdx, Base);
-      };
-      UpdateOperand(0); // vector operand
-      UpdateOperand(1); // vector operand
-    }
-  }
-
-  // Cache all of our results so we can cheaply reuse them
-  // NOTE: This is actually two caches: one of the base defining value
-  // relation and one of the base pointer relation!  FIXME
-  for (auto Pair : States) {
-    auto *BDV = Pair.first;
-    Value *Base = Pair.second.getBaseValue();
-    assert(BDV && Base);
-    assert(!isKnownBaseResult(BDV) && "why did it get added?");
-
-    LLVM_DEBUG(
-        dbgs() << "Updating base value cache"
-               << " for: " << BDV->getName() << " from: "
-               << (Cache.count(BDV) ? Cache[BDV]->getName().str() : "none")
-               << " to: " << Base->getName() << "\n");
-
-    if (Cache.count(BDV)) {
-      assert(isKnownBaseResult(Base) &&
-             "must be something we 'know' is a base pointer");
-      // Once we transition from the BDV relation being store in the Cache to
-      // the base relation being stored, it must be stable
-      assert((!isKnownBaseResult(Cache[BDV]) || Cache[BDV] == Base) &&
-             "base relation should be stable");
-    }
-    Cache[BDV] = Base;
-  }
-  assert(Cache.count(Def));
-  return Cache[Def];
+  return Def;
 }
 
 // For a set of live pointers (base and/or derived), identify the base
@@ -1778,20 +1257,44 @@ template <typename T> static void unique_unsorted(SmallVectorImpl<T> &Vec) {
             Vec.end());
 }
 
+static bool needsToExtractPointer(Type *T) {
+  return T->isStructTy() || T->isArrayTy(); // || T->isVectorTy();
+}
 
 // Extract pointer fields from an FCA.
+// Note that VectorTy is not a FCA
 static void
 extractPointerFromFCA(Value *V, IRBuilder<> &Builder,
                       SmallVectorImpl<Value *> &PtrFields) {
   Type *T = V->getType();
-  assert(T->isStructTy());
-  for (unsigned i = 0, e = T->getStructNumElements(); i < e; ++i) {
-    Type *ElemT = T->getStructElementType(i);
-    if (ElemT->isPointerTy()) {
-      Value *Field = Builder.CreateExtractValue(V, {i});
-      PtrFields.push_back(Field);
-    } else
-     assert(!hasPointer(ElemT) && "nested FCA is not supported");
+
+  if (T->isStructTy()) {
+    for (unsigned i = 0, e = T->getStructNumElements(); i < e; ++i) {
+      Type *ElemT = T->getStructElementType(i);
+      if (ElemT->isPointerTy()) {
+        Value *Field = Builder.CreateExtractValue(V, {i});
+        PtrFields.push_back(Field);
+      } else
+        assert(!hasPointer(ElemT) && "nested FCA is not supported");
+    }
+  } else if (T->isArrayTy()) {
+    Type *ElemT = T->getArrayElementType();
+    assert(ElemT->isPointerTy() && "nested FCA is not supported");
+    for (unsigned i = 0, e = T->getArrayNumElements(); i < e; ++i) {
+      Value *Elem = Builder.CreateExtractValue(V, {i});
+      PtrFields.push_back(Elem);
+    }
+  } else {
+    assert(T->isVectorTy() && "invariant");
+    assert(isa<FixedVectorType>(T) && "todo: scalable vector type is not supported");
+    assert(isGoGCPointerOrPointerLikeValue(V) && "invariant");
+    FixedVectorType *VT = dyn_cast<FixedVectorType>(T);
+    if (VT) {
+      for (unsigned i = 0, e = VT->getNumElements(); i < e; ++i) {
+        Value *Elem = Builder.CreateExtractElement(V, uint64_t(i));
+        PtrFields.push_back(Elem);
+      }
+    }
   }
 }
 
@@ -1810,6 +1313,9 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
   // arguments will be available here.  We can't insert afterwards since we may
   // be replacing a terminator.
   const DataLayout &DL = Call->getModule()->getDataLayout();
+  Type *PtrIntTy = Type::getInt64Ty(Call->getContext());
+  const unsigned PtrSize = DL.getPointerSize();
+  assert(PtrSize == 8 && "invariant");
   IRBuilder<> Builder(Call);
 
   unique_unsorted(BasePtrs);
@@ -1824,6 +1330,20 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
   // 2. The Go GC does not copy objects in heap. However, it does copy objects on stack,
   // which means we should also track all pointers, include base and derived pointers.
   SmallVector<Value *, 64> PtrFields;
+
+  std::function<bool(Value*)> IsIllFormed;
+  IsIllFormed = [&](Value *V) {
+    if (Instruction *I = dyn_cast<Instruction>(V)) {
+      if (I->hasMetadata("go.pointerlike.illformed"))
+        return true;
+      if (ExtractValueInst *EVI = dyn_cast<ExtractValueInst>(V))
+        if (IsIllFormed(EVI->getAggregateOperand()))
+          return true;
+    }
+    return false;
+  };
+
+  SmallVector<Value *, 8> IllFormedPtr;
 
   // Step 1: Add all base pointers
   for (Value *V : BasePtrs) {
@@ -1840,7 +1360,7 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
     } else if (isGoPreAllocated(V)) {
       // TODO: the type of a preallocated is always i8* now.
       // Use the real type in the future.
-      Type* T = getGoType(V);
+      Type* T = getValueElementType(V);
       assert(T != nullptr && "must have a Go type");
       // assert(isa<PointerType>(T) && "only go.preallocated has goType");
       assert((!hasPointer(T) || DL.getTypeSizeInBits(T) > 0) && "pointer types must be non-zero");
@@ -1850,11 +1370,13 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
         PtrFields.push_back(V);
         getPtrBitmapForType(T, DL, PtrFields);
       }
-    } else if (V->getType()->isStructTy() || V->getType()->isArrayTy()) {
+    } else if (needsToExtractPointer(V->getType())) {
       // Statepoint lowering doesn't handle FCA. So we do it ourselves by
       // extracting all the pointer fields and letting the statepoint lowering
       // spill them.
       extractPointerFromFCA(V, Builder, PtrFields);
+      if (IsIllFormed(V))
+        IllFormedPtr.push_back(V);
     } else {
       // V is not a known pointer on stack.
       // If V is not live, we record the derived pointers instead.
@@ -1889,74 +1411,77 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
 
   unique_unsorted(NonStackLiveVars);
   for (Value *V : NonStackLiveVars) {
-    if (V->getType()->isStructTy() || V->getType()->isArrayTy()) {
+    if (needsToExtractPointer(V->getType())) {
       // Statepoint lowering doesn't handle FCA. So we do it ourselves by
       // extracting all the pointer fields and letting the statepoint lowering
       // spill them.
       extractPointerFromFCA(V, Builder, PtrFields);
+      if (IsIllFormed(V))
+        IllFormedPtr.push_back(V);
     } else {
       PtrFields.push_back(V);
     }
   }
 
-  ArrayRef<Value *> GCArgs(PtrFields);
 #if 0
   dbgs() << "Dump GCArgs for function " << Call->getParent()->getParent()->getName() << "\n";
   dbgs() << "Call: " << *Call << "\n";
   for (Value *V : BasePtrs)
     dbgs() << "BasePtr: " << *V << "\n";
 
-  for (Value *V : GCArgs)
+  for (Value *V : PtrFields)
     dbgs() << "Final GCArg: " << *V << "\n";
 #endif
+
+  // Check Ill-formed pointer-like value
+  for (Value *V : PtrFields) {
+    Instruction *I = dyn_cast<Instruction>(V);
+    if (!I)
+      continue;
+
+    Type * T = I->getType()->getScalarType();
+    if (!T->isPointerTy() && T != PtrIntTy) {
+      assert(I->hasMetadata("go.pointerlike.illformed") && "invariant");
+      IllFormedPtr.push_back(V);
+    } else {
+      if (I->hasMetadata("go.pointerlike.illformed")) {
+        IllFormedPtr.push_back(V);
+      }
+    }
+  }
+
+  // TODO: We need to remove any ill-formed pointer like value with unsupported type
+
+  if (!IllFormedPtr.empty()) {
+    Function *F = Call->getParent()->getParent();
+    if (!TangoLLVM::isObsoleted(F)) {
+      if (PrintObsoleted) {
+        dbgs() << F->getName() << ": mark function obsolete due to ill-formed pointer\n";
+        for(Value *V : IllFormedPtr)
+          dbgs() << "    " << *V << "\n";
+        F->dump();
+      }
+      TangoLLVM::markObsoleted(F);
+    }
+    // Now, we need to remove all ill-formed pointers
+    for (auto I = PtrFields.begin(); I != PtrFields.end();) {
+      if (IsIllFormed(*I))
+        I = PtrFields.erase(I);
+      else
+        ++I;
+    }
+  }
+
+  ArrayRef<Value *> GCArgs(PtrFields);
+
   uint64_t StatepointID = ID;
   ID++;
   uint32_t NumPatchBytes = 0;
-  uint32_t Flags = uint32_t(StatepointFlags::None);
 
   ArrayRef<Use> CallArgs(Call->arg_begin(), Call->arg_end());
-  ArrayRef<Use> TransitionArgs;
-  if (auto TransitionBundle =
-      Call->getOperandBundle(LLVMContext::OB_gc_transition)) {
-    Flags |= uint32_t(StatepointFlags::GCTransition);
-    TransitionArgs = TransitionBundle->Inputs;
-  }
-
-  // Instead of lowering calls to @llvm.experimental.deoptimize as normal calls
-  // with a return value, we lower then as never returning calls to
-  // __llvm_deoptimize that are followed by unreachable to get better codegen.
-  bool IsDeoptimize = false;
-
-  StatepointDirectives SD =
-      parseStatepointDirectivesFromAttrs(Call->getAttributes());
-  if (SD.NumPatchBytes)
-    NumPatchBytes = *SD.NumPatchBytes;
-  if (SD.StatepointID)
-    StatepointID = *SD.StatepointID;
 
   Value *CallTarget = Call->getCalledOperand();
-  if (Function *F = dyn_cast<Function>(CallTarget)) {
-    if (F->getIntrinsicID() == Intrinsic::experimental_deoptimize) {
-      // Calls to llvm.experimental.deoptimize are lowered to calls to the
-      // __llvm_deoptimize symbol.  We want to resolve this now, since the
-      // verifier does not allow taking the address of an intrinsic function.
 
-      SmallVector<Type *, 8> DomainTy;
-      for (Value *Arg : CallArgs)
-        DomainTy.push_back(Arg->getType());
-      auto *FTy = FunctionType::get(Type::getVoidTy(F->getContext()), DomainTy,
-                                    /* isVarArg = */ false);
-
-      // Note: CallTarget can be a bitcast instruction of a symbol if there are
-      // calls to @llvm.experimental.deoptimize with different argument types in
-      // the same module.  This is fine -- we assume the frontend knew what it
-      // was doing when generating this kind of IR.
-      CallTarget = F->getParent()
-          ->getOrInsertFunction("__llvm_deoptimize", FTy).getCallee();
-
-      IsDeoptimize = true;
-    }
-  }
   // Create the statepoint given all the arguments
   GCStatepointInst *Token = nullptr;
   if (isa<CallInst>(Call)) {
@@ -1984,17 +1509,11 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
 
     Token = cast<GCStatepointInst>(Call);
   } else {
-    assert(false && "statepoint is an invoke");
+    llvm_unreachable("statepoint is an invoke");
   }
   assert(Token && "Should be set in one of the above branches!");
 
-  if (IsDeoptimize) {
-    // If we're wrapping an @llvm.experimental.deoptimize in a statepoint, we
-    // transform the tail-call like structure to a call to a void function
-    // followed by unreachable to get better codegen.
-    Replacements.push_back(
-        DeferredReplacement::createDeoptimizeReplacement(Call));
-  } else {
+  {
     Token->setName("statepoint_token");
     if (!Call->getType()->isVoidTy() && !Call->use_empty()) {
       StringRef Name =
@@ -2050,10 +1569,9 @@ makeStatepointExplicit(DominatorTree &DT, CallBase *Call,
 }
 
 static void findLiveReferences(
-    Function &F, DominatorTree &DT, ArrayRef<CallBase *> toUpdate,
+    Function &F, DominatorTree &DT, LoopInfo &LI, ArrayRef<CallBase *> toUpdate,
     MutableArrayRef<struct PartiallyConstructedSafepointRecord> records,
-    SetVector<Value *> &ToZero,
-    SetVector<Value *> &BadLoads,
+    DenseMap<Value *, ToZeroInfo> &ToZero,
     DefiningValueMapTy &DVCache) {
   GCPtrLivenessData OriginalLivenessData;
 
@@ -2061,11 +1579,11 @@ static void findLiveReferences(
   SetVector<Value *> AllAllocas;
   if (ClobberNonLive)
     for (Instruction &I : F.getEntryBlock())
-      if (isa<AllocaInst>(I) && hasPointer(I.getType()))
+      if (isa<AllocaInst>(I) && hasPointer(getValueElementType(&I)))
         AllAllocas.insert(&I);
 
-  computeLiveInValues(DT, F, OriginalLivenessData,
-                      ToZero, BadLoads, DVCache);
+  computeLiveInValues(DT, LI, F, OriginalLivenessData,
+                      ToZero, DVCache);
   for (size_t i = 0; i < records.size(); i++) {
     struct PartiallyConstructedSafepointRecord &info = records[i];
     analyzeParsePointLiveness(DT, OriginalLivenessData,
@@ -2073,34 +1591,6 @@ static void findLiveReferences(
   }
 }
 
-// A helper function that reports whether V is a Phi that contains an
-// ambiguously live alloca as input.
-static bool
-phiContainsAlloca(Value *V, SetVector<Value *> &ToZero) {
-  PHINode *Phi0 = dyn_cast<PHINode>(V);
-  if (!Phi0)
-    return false;
-
-  // Visit all the Phi inputs. Discover new Phis on the go, and visit them.
-  SmallSet<PHINode *, 4> Phis, Visited;
-  Phis.insert(Phi0);
-  while (!Phis.empty()) {
-    PHINode *Phi = *Phis.begin();
-    Visited.insert(Phi);
-    for (Value *Operand : Phi->incoming_values()) {
-      if (PHINode *P = dyn_cast<PHINode>(Operand)) {
-        if (!Visited.count(P))
-          Phis.insert(P);
-        continue;
-      }
-      Value *Base = Operand->stripPointerCasts();
-      if (ToZero.count(Base) != 0)
-        return true;
-    }
-    Phis.erase(Phi);
-  }
-  return false;
-}
 
 // Zero ambigously lived stack slots. We insert zeroing at lifetime
 // start (or the entry block), so the GC won't see uninitialized
@@ -2109,76 +1599,88 @@ phiContainsAlloca(Value *V, SetVector<Value *> &ToZero) {
 // We also conservatively extend the lifetime of address-taken slots,
 // to prevent the slot being reused while it is still recorded live.
 static void
-zeroAmbiguouslyLiveSlots(Function &F, SetVector<Value *> &ToZero) {
-  SmallVector<Instruction *, 16> InstToDelete;
-  SetVector<Value *> Done;
-  IntegerType *Int8Ty = Type::getInt8Ty(F.getParent()->getContext());
-
-  // If a slot has lifetime.start, place the zeroing right after it.
-  for (Instruction &I : instructions(F)) {
-    if (CallInst *CI = dyn_cast<CallInst>(&I))
-      if (Function *Fn = CI->getCalledFunction()) {
-        if (Fn->getIntrinsicID() == Intrinsic::lifetime_start) {
-          Value *V = I.getOperand(1)->stripPointerCasts();
-          if ((ToZero.count(V) != 0) ||
-              phiContainsAlloca(V, ToZero)) {
-            // For addrtaken alloca, the lifetime start may not dominate all
-            // safepoints where the slot can be live.
-            // For now, zero it in the entry block and remove the lifetime
-            // marker.
-            // Also remove lifetime markers on Phis that contain interesting
-            // allocas (which must be address-taken).
-            InstToDelete.push_back(&I);
-          } else if (ToZero.count(V) != 0) {
-            // Non-addrtaken alloca. Just insert zeroing, keep the lifetime marker.
-            IRBuilder<> Builder(I.getNextNode());
-            Value *Zero = Constant::getNullValue(cast<AllocaInst>(V)->getAllocatedType());
-            Builder.CreateStore(Zero, V);
-            // Don't remove V from ToZero for now, as there may be multiple
-            // lifetime start markers, where we need to insert zeroing.
-            Done.insert(V);
-          }
-        } else if (Fn->getIntrinsicID() == Intrinsic::lifetime_end) {
-          Value *V = I.getOperand(1)->stripPointerCasts();
-          if ((ToZero.count(V) != 0) ||
-              phiContainsAlloca(V, ToZero)) {
-            if (!succ_empty(I.getParent())) { // no need to zero at exit block
-              // What to zero in the Phi case?
-              // We just zero whatever the Phi points to, using the size on the
-              // lifetime marker. This also works in the alloca case.
-              IRBuilder<> Builder(&I);
-              Value *Zero = Constant::getNullValue(Int8Ty);
-              Value *Siz = I.getOperand(0);
-              Builder.CreateMemSet(V, Zero, Siz, MaybeAlign(0));
-            }
-            InstToDelete.push_back(&I);
-          }
-        }
-      }
-  }
-
-  for (Instruction *I : InstToDelete)
-    I->eraseFromParent();
-  ToZero.set_subtract(Done);
+zeroAmbiguouslyLiveSlots(Function &F, DenseMap<Value *, ToZeroInfo> &ToZero) {
   if (ToZero.empty())
     return;
 
-  // Otherwise, place the zeroing in the entry block after the alloca.
-  for (Instruction &I : F.getEntryBlock())
-    if (ToZero.count(&I) != 0) {
-      IRBuilder<> Builder(I.getNextNode());
-      Value *Dst = &I;
-      Type *GoType = getGoType(&I);
-      // Type *ElemTyp = GoType->getElementType();
-      // assert(GoType != nullptr && "GoType cannot be null");
-      // assert(ElemTyp != nullptr && "ElemType cannot be null");
-      // if (Dst->getType() != GoType)
-      //   Dst = Builder.CreateBitCast(Dst, GoType);
-      Value *Zero = Constant::getNullValue(GoType);
-      Builder.CreateStore(Zero, Dst);
-      ToZero.remove(&I);
+  if (PrintToZero)
+    dbgs() << "Print zeroing:\n";
+
+  const DataLayout &DL = F.getParent()->getDataLayout();
+  const unsigned PtrSize = DL.getPointerSize();
+
+  if (PtrSize != 8) {
+    report_fatal_error("non-64bit is not supported");
+  }
+  // Use 64bit integer
+  Type *PtrIntTy = Type::getInt64Ty(F.getContext());
+  Type *PtrPtrIntTy = PtrIntTy->getPointerTo();
+  Type *IdxTy = PtrIntTy;
+
+  for (auto &It : ToZero) {
+    Instruction *SO = cast<Instruction>(It.first);
+    Instruction *Pos;
+    if (OptToZeroPosition == false || It.second.Pos == nullptr) {
+      Pos = SO->getNextNode();
+    } else {
+      Pos = It.second.Pos->getFirstNonPHI();
+    }
+    BitVector &State = It.second.State;
+    BasicBlock *BB = SO->getParent();
+    assert(BB == &F.getEntryBlock() && "all stack objects are allocated in entry block in Go");
+
+
+
+    IRBuilder<> Builder(Pos);
+    Value *Dst = SO;
+    Type *ElemTyp = getValueElementType(SO);
+    assert(ElemTyp != nullptr && "ElemType cannot be null");
+
+    //
+    size_t BitsSet = State.count();
+    size_t BitsAll = State.size();
+
+    if (PrintToZero) {
+      dbgs() << "Zeroing " << BitsSet << " pointers " << " in " << BitsAll << " slots\n";
     }
 
+    // TODO: tuning conditions that can trigger optimizations
+    if (OptToZeroPattern && BitsSet <= 4 && BitsAll - BitsSet >= 4) {
+      if (Dst->getType() != PtrPtrIntTy) {
+        Dst = Builder.CreateBitCast(Dst, PtrPtrIntTy);
+      }
+      // Use three null value for the type
+      // We could combine two adjacent pointers to 16
+      int I = State.find_first();
+      while (I != -1) {
+        Value *GEP;
+        if (I == 0) {
+          GEP = Dst;
+        } else {
+          GEP = Builder.CreateGEP(PtrIntTy, Dst, ConstantInt::get(IdxTy, I));
+        }
+        Value *Zero = Constant::getNullValue(PtrIntTy);
+        // volatile
+        auto * Zeroing = Builder.CreateStore(Zero, GEP, true);
+        if (PrintToZero)
+          dbgs() << "Zeroing: " << *Zeroing << " (offset=" << I * PtrSize << ") for " << I << "\n";
+
+        I = State.find_next(I);
+      }
+    } else {
+      Value *Zero = Constant::getNullValue(ElemTyp);
+      // volatile
+      auto * Zeroing = Builder.CreateStore(Zero, Dst, true);
+      if (PrintToZero)
+        dbgs() << "Zeroing: " << *Zeroing << "\n";
+    }
+
+    ++NumGCToZero;
+    ToZero.erase(SO);
+  }
+
+  if (PrintToZero)
+    F.dump();
   assert(ToZero.empty());
 }
 
@@ -2221,44 +1723,9 @@ phiHasConstantValue(PHINode *Phi0) {
   return V;
 }
 
-static void
-fixBadPhiOperands(Function &F, SetVector<Value *> &BadLoads) {
-
-#if 0
-  for (auto *I : BadLoads)
-    dbgs() << "BadLoad: " << *I << "\n";
-#endif
-
-  assert(BadLoads.empty() && "must not have bad loads");
-  if (!BadLoads.empty())
-    report_fatal_error("should not have bad loads");
 
 
-  // Don't delete instructions yet -- they may be referenced in the liveness
-  // map. We'll delete them at the end.
-
-  for (auto *I : BadLoads)
-    I->replaceAllUsesWith(Constant::getNullValue(I->getType()));
-
-  // The replacement above may lead to degenerate Phis, which, if live,
-  // will be encoded as constants in the stack map, which is bad
-  // (confusing with pointer bitmaps). Clean them up.
-  bool Changed = true;
-  while (Changed) {
-    Changed = false;
-    for (Instruction &I : instructions(F))
-      if (auto *Phi = dyn_cast<PHINode>(&I))
-        if (!BadLoads.count(Phi))
-          if (Value *V = phiHasConstantValue(Phi)) {
-            Phi->replaceAllUsesWith(V);
-            BadLoads.insert(Phi);
-            Changed = true;
-          }
-  }
-}
-
-
-static bool insertParsePoints(Function &F, DominatorTree &DT,
+static bool insertParsePoints(Function &F, DominatorTree &DT, LoopInfo &LI,
                               TargetTransformInfo &TTI,
                               SmallVectorImpl<CallBase *> &ToUpdate) {
 #ifndef NDEBUG
@@ -2273,18 +1740,7 @@ static bool insertParsePoints(Function &F, DominatorTree &DT,
 
   SmallVector<PartiallyConstructedSafepointRecord, 64> Records(ToUpdate.size());
 
-  SetVector<Value *> ToZero;
-
-  // In some rare cases, the optimizer may generate a load
-  // from an uninitialized slot. I saw this happens with LICM's
-  // load promotion. A load is moved out of the loop, and its
-  // only used in Phis. In the actual execution when the value
-  // is used, the Phi is always holding other incoming values,
-  // which are valid. The problem is that the load or the Phi
-  // may be recorded live, and the stack scan may heppen before
-  // it holding valid data, which is bad. We'll record those bad
-  // loads and remove them from the live sets.
-  SetVector<Value *> BadLoads;
+  DenseMap<Value *, ToZeroInfo> ToZero;
 
   // Cache the 'defining value' relation used in the computation and
   // insertion of base phis and selects.  This ensures that we don't insert
@@ -2294,16 +1750,13 @@ static bool insertParsePoints(Function &F, DominatorTree &DT,
 
   // A) Identify all gc pointers which are statically live at the given call
   // site.
-  findLiveReferences(F, DT, ToUpdate, Records, ToZero,
-                     BadLoads, DVCache);
+  findLiveReferences(F, DT, LI, ToUpdate, Records, ToZero, DVCache);
 
   // B) Find the base pointers for each live pointer
   for (size_t i = 0; i < Records.size(); i++) {
     PartiallyConstructedSafepointRecord &info = Records[i];
     findBasePointers(DT, DVCache, ToUpdate[i], info);
   }
-
-  fixBadPhiOperands(F, BadLoads);
 
   // It is possible that non-constant live variables have a constant base.  For
   // example, a GEP with a variable offset from a global.  In this case we can
@@ -2316,7 +1769,7 @@ static bool insertParsePoints(Function &F, DominatorTree &DT,
   // Also make sure bad loads are not included in the liveset.
   for (auto &Info : Records)
     for (auto &BasePair : Info.PointerToBase)
-      if (isa<Constant>(BasePair.second) || BadLoads.count(BasePair.second)
+      if (isa<Constant>(BasePair.second)
           || isGoConstantPointer(BasePair.second))
         Info.LiveSet.remove(BasePair.first);
 
@@ -2340,12 +1793,6 @@ static bool insertParsePoints(Function &F, DominatorTree &DT,
     PR.doReplacement();
 
   Replacements.clear();
-
-  // At this point we should be able to delete all the bad loads and Phis.
-  // There should be no reference to them. If there are, it will assert,
-  // since the liveness args are already linked into the IR.
-  for (Value *V : BadLoads)
-    cast<Instruction>(V)->eraseFromParent();
 
   for (auto &Info : Records) {
     // These live sets may contain state Value pointers, since we replaced calls
@@ -2703,21 +2150,30 @@ static bool moveITPToDef(Function &F) {
   return !UseToDef.empty();
 }
 
+static bool needsRewriteForGo(CallBase *Call) {
+  return !isa<GCStatepointInst>(Call) && !callsInlineAsm(Call) && hasStackMap(Call);
+}
+
 bool GoStatepoints::runOnFunction(Function &F, DominatorTree &DT,
+                                            LoopInfo &LI,
                                             TargetTransformInfo &TTI,
                                             const TargetLibraryInfo &TLI) {
   assert(!F.isDeclaration() && !F.empty() &&
          "need function body to rewrite statepoints in");
   assert(shouldRewriteStatepointsIn(F) && "mismatch in rewrite decision");
-
+  LLVM_DEBUG(dbgs() << "compute statepoints for function " << F.getName() << "\n";);
   if (!PrintFunc.empty())
     PrintLiveSet = F.getName() == PrintFunc;
   if (PrintLiveSet)
     dbgs() << "\n********** Liveness of function " << F.getName() << " **********\n";
 
   auto NeedsRewrite = [&TLI](Instruction &I) {
-    if (const auto *Call = dyn_cast<CallBase>(&I))
-      return !callsGCLeafFunction(Call, TLI) && !isa<GCStatepointInst>(Call) && !callsInlineAsm(Call) && hasStackMap(Call);
+    if (auto *Call = dyn_cast<CallBase>(&I)) {
+      if (callsGCLeafFunction(Call, TLI) && needsRewriteForGo(Call)) {
+        report_fatal_error("needsRewriteForGo should reject all GCLeafFunctions");
+      }
+      return !callsGCLeafFunction(Call, TLI) && needsRewriteForGo(Call);
+    }
     return false;
   };
 
@@ -2787,7 +2243,7 @@ bool GoStatepoints::runOnFunction(Function &F, DominatorTree &DT,
       if (Next != Cur->getTerminator()) {
         Modified = true;
         MadeChange = true;
-        BasicBlock * NewBB = SplitBlock(Cur, Next, &DTU, nullptr, nullptr, "gc.split");
+        BasicBlock * NewBB = SplitBlock(Cur, Next, &DTU, &LI, nullptr, "gc.split");
         SplittedBlocks.push_back(NewBB);
       }
     }
@@ -2830,7 +2286,7 @@ bool GoStatepoints::runOnFunction(Function &F, DominatorTree &DT,
   }
 
   MadeChange |= moveITPToDef(F);
-  MadeChange |= insertParsePoints(F, DT, TTI, ParsePointNeeded);
+  MadeChange |= insertParsePoints(F, DT, LI, TTI, ParsePointNeeded);
   MadeChange |= replaceUndefPointerWithNullPointer(F);
 
   if (!SplittedBlocks.empty()) {
@@ -2842,7 +2298,7 @@ bool GoStatepoints::runOnFunction(Function &F, DominatorTree &DT,
       // BB is splitted from Pred;
       assert(Pred->getUniqueSuccessor() == BB && "invariant");
 #endif
-      if (!MergeBlockIntoPredecessor(BB, &DTU)) {
+      if (!MergeBlockIntoPredecessor(BB, &DTU, &LI)) {
         report_fatal_error("fail to merge splitted bb back into predecessor");
       }
     }
@@ -2859,7 +2315,7 @@ bool GoStatepoints::runOnFunction(Function &F, DominatorTree &DT,
 
 static Value*
 isAlloca(Value *V, DefiningValueMapTy &DVCache) {
-  if (!(isHandledGCPointerType(getGoType(V)) || hasPointerInOpacusType(V)))
+  if (!isHandledGCPointerType(V->getType()))
     return nullptr;
   Value *Base = findBaseOrBDV(V, DVCache);
   return isa<AllocaInst>(Base) ? Base : nullptr;
@@ -2867,7 +2323,7 @@ isAlloca(Value *V, DefiningValueMapTy &DVCache) {
 
 static Value*
 isGoPreAllocated(Value *V, DefiningValueMapTy &DVCache) {
-  if (!(isHandledGCPointerType(getGoType(V)) || hasPointerInOpacusType(V)))
+  if (!isHandledGCPointerType(V->getType()))
     return nullptr;
   Value *Base = findBaseOrBDV(V, DVCache);
   return isGoPreAllocated(Base) ? Base : nullptr;
@@ -2880,7 +2336,7 @@ isTrackedAlloca(Value *V, DefiningValueMapTy &DVCache) {
       hasPointer(getValueElementType(Base)))
     return Base;
   Base = isGoPreAllocated(V, DVCache);
-  if (Base && isGoPreAllocatedParamOut(Base) && hasPointer(getGoType(Base)))
+  if (Base && isGoPreAllocatedParamOut(Base) && hasPointer(getValueElementType(Base)))
     return Base;
   return nullptr;
 }
@@ -2924,12 +2380,6 @@ static void computeLiveInValues(BasicBlock::reverse_iterator Begin,
         if (isAlloca(V, DVCache)) {
           Value *Base = isTrackedAlloca(V, DVCache);
           if (!Base) {
-            // auto * T = getGoType(isAlloca(V, DVCache));
-            // assert(T->isPointerTy() && "alloca must be pointer");
-            // if (!hasPointer(T))
-            //   continue;
-            // assert(hasPointer(T) && "must have pointer");
-            // assert(false && "must be tracked alloca");
             continue;
           }
 
@@ -2955,7 +2405,7 @@ static void computeLiveInValues(BasicBlock::reverse_iterator Begin,
             // TODO: SelectInst is not a real use because it does not access memory.
             // However, the use of SelectInst assumes that the two operands must be fully
             // initialized.
-            // TODO: We need to treat SelelctInst as Load/Store. Once we detect a SelectInst,
+            // TODO: We need to treat SelectInst as Load/Store. Once we detect a SelectInst,
             // we need to force the initialization of the base Alloca.
             Gen.insert(Base);
             LiveTmp.insert(Base);
@@ -2994,95 +2444,19 @@ static void computeLiveInValues(BasicBlock::reverse_iterator Begin,
         }
 
         if (auto * PTI = dyn_cast<PtrToIntInst>(V)) {
-          Gen.insert(PTI->getOperand(0));
-          LiveTmp.insert(PTI->getOperand(0));
+          Value * Src = PTI->getOperand(0);
+          if (Value *Base = isTrackedAlloca(Src, DVCache)) {
+            Gen.insert(Base);
+            LiveTmp.insert(Base);
+          } else {
+            Gen.insert(Src);
+            LiveTmp.insert(Src);
+          }
         }
 
         Gen.insert(V);
         LiveTmp.insert(V);
       }
-    }
-  }
-}
-
-// Compute the def and kill of allocas.
-// Alloca Defs are critical to the correctness of stack map.
-// For example, if we fail to identify the proper initialization
-// point of an Alloca (or PreAllocated), the garbage collector may
-// witness an unparsable object at runtime. A bad pointer error thus
-// would be triggered.
-static void
-computeAllocaDefs(BasicBlock::iterator Begin,
-                  BasicBlock::iterator End,
-                  SetVector<Value *> &AllocaDefs,
-                  SetVector<Value *> &AllocaKills,
-                  DefiningValueMapTy &DVCache) {
-  // Iterate forwards over the instructions, record the defs and kills
-  // of allocas.
-  // Notes on the special cases about def and kill appearing in the same
-  // block:
-  // - kill after def:
-  //   Record the kill but don't remove it from def set, since we will
-  //   subtract the kill set anyway. And when a slot is initialized and
-  //   then killed in the same block, we don't lose information.
-  // - def after kill:
-  //   The def overrides the kill, i.e. remove it from the kill set
-  //   (unless we see a kill again later). So we have the information
-  //   that the slot is initialized at the end of the block, even after
-  //   we subtract the kill set.
-  for (auto &I : make_range(Begin, End)) {
-    // skip Phi ?
-    if (isa<PHINode>(I))
-      continue;
-
-    if (StoreInst *SI = dyn_cast<StoreInst>(&I)){
-      Value *V = SI->getPointerOperand();
-      if (Value *Base = isTrackedAlloca(V, DVCache)) {
-        AllocaDefs.insert(Base);
-        AllocaKills.remove(Base);
-      }
-      continue;
-    }
-
-    if (CallInst *CI = dyn_cast<CallInst>(&I)){
-      if (Function *Fn = CI->getCalledFunction())
-        switch (Fn->getIntrinsicID()) {
-        case Intrinsic::memmove:
-        case Intrinsic::memcpy:
-        case Intrinsic::memcpy_inline:
-        case Intrinsic::memset: {
-          // We're writing to the first arg.
-          Value *V = CI->getOperand(0);
-          if (Value *Base = isTrackedAlloca(V, DVCache)) {
-            AllocaDefs.insert(Base);
-            AllocaKills.remove(Base);
-          }
-          break;
-        }
-        case Intrinsic::lifetime_end: {
-          Value *V = CI->getOperand(1);
-          if (Value *Base = isTrackedAlloca(V, DVCache)) {
-            AllocaKills.insert(Base);
-          }
-          break;
-        }
-        default:
-          if (Fn->getName() == "runtime.typedmemmove" || Fn->getName() == "runtime.typedmemclr") {
-            Value *V = CI->getArgOperand(1);
-            if (Value *Base = isTrackedAlloca(V, DVCache)) {
-              AllocaDefs.insert(Base);
-              AllocaKills.remove(Base);
-            }
-          } else if (Fn->getName() == "runtime.memmove") {
-            Value *V = CI->getArgOperand(0);
-            if (Value *Base = isTrackedAlloca(V, DVCache)) {
-              AllocaDefs.insert(Base);
-              AllocaKills.remove(Base);
-            }
-          }
-          break;
-        }
-      continue;
     }
   }
 }
@@ -3143,316 +2517,451 @@ static void checkBasicSSA(DominatorTree &DT, GCPtrLivenessData &Data,
 }
 #endif
 
-// For initialization of an aggregate-typed slot, check whether the
-// whole storage is initialized before we reach a statepoint, and
-// insert zeroing if not.
-// Normally the FE has lifted calls out of the initialization sequence.
-// But they may occur due to optimizations, for example,
-//   type A struct { ...; b B; ... }
-//   type B struct { ... }
-//   a := A{ ..., b: SomeB(), ... }
-// The FE generates something like
-//   %a = alloca A
-//   %tmp = alloca B
-//   call SomeB(%tmp) // as outgoing arg
-//   initialize part of a
-//   call memmove(gep %a, %tmp)
-//   initialize the rest of a
-// The memmove may be optimized out, with direct store to A, as
-//   %a = alloca A
-//   initialize part of a
-//   call SomeB(gep %a)
-//   initialize the rest of a
-// a is live at the call site, but not fully initialized.
-// We need to make sure a doesn't contain bad pointers.
-// TODO: this function is a little too conservative (see below).
-// TODO: instead of zeroing, maybe we can record only the part
-// of A that is live?
-static void
-checkStoreSize(Value *V, BasicBlock &BB, const DataLayout &DL,
-               SetVector<Value *> &ToZero,
-               DefiningValueMapTy &DVCache) {
-  unsigned PtrSize = DL.getPointerSize();
-  unsigned Size = DL.getTypeStoreSize(getGoType(V));
-  if (Size <= PtrSize)
-    return;
 
-  // We simply add the sizes of all stores in the block, assuming
-  // no overlapping stores (which are silly).
-  unsigned StoreSize = 0;
-  for (Instruction &I : BB) {
-    if (StoreInst *SI = dyn_cast<StoreInst>(&I)) {
-      Value *Ptr = SI->getPointerOperand();
-      if (isTrackedAlloca(Ptr, DVCache) == V) {
-        StoreSize += DL.getTypeStoreSize(SI->getValueOperand()->getType());
-      }
-    } else if (CallInst *CI = dyn_cast<CallInst>(&I)) {
-      if (Function *Fn = CI->getCalledFunction())
-        switch (Fn->getIntrinsicID()) {
-        case Intrinsic::memmove:
-        case Intrinsic::memcpy:
-        case Intrinsic::memcpy_inline:
-        case Intrinsic::memset: {
-          // We're writing to the first arg. The third arg is size.
-          Value *Ptr = CI->getOperand(0);
-          if (isTrackedAlloca(Ptr, DVCache) == V) {
-            ConstantInt *Len =
-                dyn_cast<ConstantInt>(cast<MemIntrinsic>(CI)->getLength());
-            if (Len)
-              StoreSize += Len->getZExtValue();
-          }
-          break;
-        }
-        default:
-          if (Fn->getName() == "runtime.typedmemmove" || Fn->getName() == "runtime.typedmemclr") {
-            // Dst is the second argument. The first argument is type descriptor.
-            Value *Ptr = CI->getArgOperand(1);
-            if (isTrackedAlloca(Ptr, DVCache) == V) {
-              // mark fully initialized
-              // StoreSize = Size;
-              // break; we actually can break the loop now.
-              return;
-            }
-          } else if (Fn->getName() == "runtime.memmove") {
-            // Dst is the first argument
-            Value *Ptr = CI->getArgOperand(0);
-            if (isTrackedAlloca(Ptr, DVCache) == V) {
-              ConstantInt *Len =
-                dyn_cast<ConstantInt>(CI->getArgOperand(2));
-              if (Len)
-                StoreSize += Len->getZExtValue();
-              break;
-            }
-          }
-          break;
-        }
+// return false if we must mark parent as ill-formed pointer-like
+// return false if Child is not a pointer like value.
+// We need additional backward checking to confirm results.
+bool CheckIllFormedPointerForward(Instruction *Parent, Instruction *Child) {
+  auto Mark = [](Instruction *I) {
+    I->setMetadata("go.pointerlike", MDNode::get(I->getContext(), {}));
+    return true;
+  };
+  auto MarkIllFormed = [](Instruction *I) {
+    if (!I->hasMetadata("go.pointerlike")) {
+      I->setMetadata("go.pointerlike", MDNode::get(I->getContext(), {}));
     }
+    I->setMetadata("go.pointerlike.illformed", MDNode::get(I->getContext(), {}));
+    return false;
+  };
 
-    // We only care about pointers, so it's safe to round up to a pointer size.
-    // TODO: things with more than a simple padding may still be false positive.
-    // TODO: if the missing fields are all scalars, no need to zero.
-    if (StoreSize + PtrSize - 1 >= Size)
-      return; // early return if we have stored enough.
+  if (!isGoGCPointerLikeValue(Child)) {
+    return false;
   }
 
-  // Incomplete initialization, needs zeroing.
-  if (StoreSize + PtrSize - 1 < Size)
-    ToZero.insert(V);
+  if (Child->hasMetadata("go.pointerlike.illformed"))
+    return MarkIllFormed(Parent);
+
+  if (Parent->hasMetadata("go.pointerlike.illformed"))
+    return false;
+
+  if (Parent->hasMetadata("go.pointerlike"))
+    return true;
+
+  if (BinaryOperator *BO = dyn_cast<BinaryOperator>(Parent)) {
+    Value *Op0 = Parent->getOperand(0);
+    Value *Op1 = Parent->getOperand(1);
+
+    if (BO->getOpcode() == Instruction::Add
+        // || BO->getOpcode() == Instruction::And
+        // || BO->getOpcode() == Instruction::Or
+       ) {
+      if (Op0 == Child) {
+        // only one can be pointer like
+        if (Op1 == Child || isGoGCPointerLikeValue(Op1)) {
+          return MarkIllFormed(Parent);
+        }
+
+      } else {
+        assert(Op1 == Child && "invariant");
+        // only one can be pointer like
+        if (isGoGCPointerLikeValue(Op0)) {
+          return MarkIllFormed(Parent);
+        }
+      }
+    } else if (BO->getOpcode() == Instruction::Sub) {
+      if (Op1 == Child || isGoGCPointerLikeValue(Op1))
+        return MarkIllFormed(Parent);
+
+      assert(Op0 == Child && "invariant");
+    } else {
+      // all other are ill-format pointers
+      return MarkIllFormed(Parent);
+    }
+    return Mark(Parent);
+  } else if (isa<SelectInst>(Parent)
+            || isa<PHINode>(Parent)
+            || isa<ShuffleVectorInst>(Parent)
+            || isa<BinaryOperator>(Parent)
+            || isa<FreezeInst>(Parent)
+            ) {
+    // fallthrough
+    // We can assume Parent is a pointer-like value
+    return Mark(Parent);
+  } else if (isa<UnaryOperator>(Parent)) {
+    // I cannot figure out when a unary operator can make a valid pointer
+    // from anther pointer.
+    return MarkIllFormed(Parent);
+  } else if (isa<InsertElementInst>(Parent)
+      || isa<InsertValueInst>(Parent)
+      || isa<ExtractElementInst>(Parent)
+      || isa<ExtractValueInst>(Parent)
+      ) {
+    // Similar to ShuffleVector
+    // A value will taint the whole FCA or Vector as ill-formed.
+    // Similarly, all values extracted from an ill-formed FCA or Vector
+    // is also conservatively marked as ill-formed.
+    return Mark(Parent);
+  }
+
+  dbgs() << "find a unsupported pointer like value: " << *Parent << "\n";
+  Parent->getParent()->getParent()->dump();
+  report_fatal_error("unsupported pointer like value");
+  return  MarkIllFormed(Parent);
+}
+
+struct StackVisitGuard {
+
+  std::vector<Instruction*> *Stack;
+
+  StackVisitGuard(std::vector<Instruction*> *Stack, Instruction *I) {
+    this->Stack = Stack;
+    Stack->push_back(I);
+  }
+
+  ~StackVisitGuard() {
+    Instruction *Child = Stack->back();
+    Stack->pop_back();
+    if (!Stack->empty()) {
+      Instruction *Parent = Stack->back();
+      // If Parent has a non-instruction Child, the Child will
+      // not be put into the Stack and will not trigger a Check.
+      // A non-instruction value cannot be a pointer-like value.
+      // Thus it has no impact to the well-form or ill-form value.
+      CheckIllFormedPointerForward(Parent, Child);
+    }
+  }
+};
+
+
+// Return true if Start cannot be a well-formed pointer like value.
+// We use backward because we must check all operands of Start to
+// make decision for it.
+// Invariant: Start must have data dependency on PtrToInt
+static void checkBackward(Function &F, Instruction* Start, const Type *PtrIntTy) {
+  // Not a pointer-like value
+  if (Start->getType()->getScalarType() != PtrIntTy) {
+    return;
+  }
+
+  if (Start->hasMetadata("go.pointerlike.illformed")) {
+    return;
+  }
+
+  SmallSetVector<Value*, 32> Visited;
+  std::vector<Instruction*> Stack;
+
+  // auto DumpStack = [&]() {
+  //   dbgs() << "Dump visiting stack:\n";
+  //   for (Instruction *I : Stack) {
+  //     dbgs() << "    " << *I << "\n";
+  //   }
+  // };
+
+  std::function<void(Value*)> DepthFirstCheck;
+
+  // Return true if V depends on an Ill-Formed pointer.
+  DepthFirstCheck = [&](Value *V) {
+    Instruction *I = dyn_cast<Instruction>(V);
+    if (!I)
+      return;
+
+    // Sink: stop propagation
+    if (isa<LoadInst>(V)
+        || isa<CallInst>(V)) {
+      return;
+    }
+
+    // For better logging, check type here.
+    // Must be i64 or <i64 x n> in 64bit system
+    Type *T = V->getType()->getScalarType();
+    if (T->isVoidTy() || T->isPointerTy()) {
+      return;
+    }
+
+    if (Visited.count(V))
+      return;
+
+    StackVisitGuard Guard(&Stack, I);
+    Visited.insert(V);
+
+
+    // Freeze, PHI, Select, ShuffleVector and Binary
+    // are valid instructions for producing well-formed pointer-like values.
+    if (FreezeInst *FI = dyn_cast<FreezeInst>(V)) {
+      DepthFirstCheck(FI->getOperand(0));
+    } else if (PHINode *PHI = dyn_cast<PHINode>(V)) {
+      for (Value *InVal : PHI->incoming_values()) {
+        DepthFirstCheck(InVal);
+      }
+    } else if (SelectInst *SI = dyn_cast<SelectInst>(V)) {
+      DepthFirstCheck(SI->getOperand(1));
+      DepthFirstCheck(SI->getOperand(2));
+    } else if (ShuffleVectorInst *SVI = dyn_cast<ShuffleVectorInst>(V)) {
+      DepthFirstCheck(SVI->getOperand(0));
+      DepthFirstCheck(SVI->getOperand(1));
+    } else if (BinaryOperator *BO = dyn_cast<BinaryOperator>(V)) {
+      DepthFirstCheck(BO->getOperand(0));
+      DepthFirstCheck(BO->getOperand(1));
+    } else {
+      // For better logging
+      for (Value *Op : I->operands())
+        DepthFirstCheck(Op);
+    }
+  };
+
+  DepthFirstCheck(Start);
+}
+
+static void checkNegativeOffset(Function &F) {
+  const DataLayout &DL = F.getParent()->getDataLayout();
+
+  auto isNegativeOffset = [](Value *V) {
+    if (ConstantInt *Off = dyn_cast<ConstantInt>(V)) {
+      return Off->isNegative();
+    }
+    return false;
+  };
+
+  auto isPositiveOffset = [](Value *V) {
+    if (ConstantInt *Off = dyn_cast<ConstantInt>(V)) {
+      return !(Off->isNegative() || Off->isZero());
+    }
+    return false;
+  };
+
+  std::function<bool(Value*)> isBadBasePointerForNegativeOffset = nullptr;
+  isBadBasePointerForNegativeOffset = [&](Value *Ptr) {
+    if (isa<GetElementPtrInst>(Ptr)
+        || isa<IntToPtrInst>(Ptr)) {
+      return false;
+    }
+    if (PHINode *PHI = dyn_cast<PHINode>(Ptr)) {
+      for (Value *InVal : PHI->incoming_values())
+        if (isBadBasePointerForNegativeOffset(InVal))
+          return true;
+      // assume PHI are safe and always related to loop
+      return false;
+    }
+    if (isa<Constant>(Ptr)
+        || isa<Argument>(Ptr)
+        || isa<LoadInst>(Ptr)
+        || isa<CallInst>(Ptr)
+        || isa<ExtractValueInst>(Ptr)
+        || isa<ExtractElementInst>(Ptr)
+       ) {
+      return true;
+    }
+    return false;
+  };
+
+  // Another check: separated in another loop for simplicity
+  for (Instruction &I : instructions(F)) {
+    if (!isGoGCPointerOrPointerLikeValue(&I)) {
+      continue;
+    }
+
+    if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(&I)) {
+      if (!GEP->hasAllConstantIndices()) {
+        continue;
+      }
+      APInt Off(DL.getPointerSizeInBits(0), 0);
+      if (!GEP->accumulateConstantOffset(DL, Off)) {
+        report_fatal_error("cannot accumulate offset for constant GEP");
+      }
+
+      // TODO: we need to check out of bounds pointers.
+      // However, here we can only check negative offset on
+      // object base address. Note that a base address may not be
+      // a GC-base pointer because objects can be embedded in another
+      // object.
+      if (!Off.isNegative()) {
+        continue;
+      }
+
+      Value *P = GEP->getPointerOperand();
+      if (isBadBasePointerForNegativeOffset(P)) {
+        // All other cases are potential invalid;
+        if (PrintObsoleted) {
+          dbgs() << F.getName() << ": found a bad pointer " << I << "\n";
+        }
+        I.setMetadata("go.pointerlike.illformed", MDNode::get(I.getContext(), {}));
+      }
+    } else if (BinaryOperator *BO = dyn_cast<BinaryOperator>(&I)) {
+      Value *Op0 = BO->getOperand(0);
+      Value *Op1 = BO->getOperand(1);
+      Value *Base = nullptr;
+      Value *Off = nullptr;
+      if (BO->getOpcode() == Instruction::Add
+         // || BO->getOpcode() == Instruction::And
+         // || BO->getOpcode() == Instruction::Or
+          ) {
+        if (isGoGCPointerLikeValue(Op0)) {
+          if (isNegativeOffset(Op1)) {
+            Base = Op0;
+            Off = Op1;
+          }
+        } else if (isGoGCPointerLikeValue(Op1)) {
+          assert(isGoGCPointerLikeValue(Op1) && "invariant");
+          if (isNegativeOffset(Op0)) {
+            Base = Op1;
+            Off = Op0;
+          }
+        } else {
+          dbgs() << "Not a pointer like value: " << *BO << "\n";
+        }
+      } else if (BO->getOpcode() == Instruction::Sub) {
+        if (isPositiveOffset(Op1)) {
+          Base = Op0;
+          Off = Op1;
+        }
+      } else {
+        // llvm_unreachable("unsupported pointer like value");
+      }
+      if (Base && Off && isNegativeOffset(Off) && isBadBasePointerForNegativeOffset(Base)) {
+        if (PrintObsoleted) {
+          dbgs() << F.getName() << ": found a bad pointer " << I << "\n";
+        }
+        I.setMetadata("go.pointerlike.illformed", MDNode::get(I.getContext(), {}));
+      }
+    }
+  }
+}
+
+// Mark all values that depends on a PtrToInt value.
+static void checkForward(Function &F, Instruction *Start, const Type *PtrIntTy) {
+  SmallVector<Instruction*, 32> Worklist;
+  SmallSet<Instruction*, 32> Visited;
+
+  Worklist.push_back(Start);
+
+  while (!Worklist.empty()) {
+    Instruction *V = Worklist.pop_back_val();
+    Visited.insert(V);
+    // We simply use V->uses().
+    for (auto &U : V->uses()) {
+      Instruction *I = dyn_cast<Instruction>(U.getUser());
+      if (!I)
+        continue;
+
+      // TODO: AtomicRMWInst
+      if (isa<CallInst>(I)
+          || isa<InsertElementInst>(I)
+          || isa<InsertValueInst>(I)
+          || isa<AtomicRMWInst>(I))
+        continue;
+
+      if (isa<IntToPtrInst>(I)) {
+        // We try to find a chain from PtrToInt to IntToPtr.
+        // All well-formed pointer values in the Chain must
+        // be GC-live to keep IntToPtr live.
+        checkBackward(F, V, PtrIntTy);
+        if (V->hasMetadata("go.pointerlike.illformed"))
+          // Mark IntToPtr as IllFormed
+          I->setMetadata("go.pointerlike.illformed", MDNode::get(I->getContext(), {}));
+        continue;
+      }
+
+      if (StoreInst *SI = dyn_cast<StoreInst>(I)) {
+        if (CheckIllFormedPointerStore && SI->getValueOperand() == V) {
+          // StoreInst is like IntToPtr.
+          // Since Opaque Pointer, we may store a pointer-like value without casting
+          // it to a pointer.
+          if (PrintObsoleted) {
+            dbgs() << F.getName() << ": found a dangerous store of well-formed pointer-like integer: " << *I << "\n";
+          }
+          // Start from V not I because I is StoreInst and it is not a
+          // pointer-like value.
+          checkBackward(F, V, PtrIntTy);
+        }
+        continue;
+      }
+
+      if (AtomicCmpXchgInst *ACXI = dyn_cast<AtomicCmpXchgInst>(I)) {
+        // Similar to Store
+        if (CheckIllFormedPointerStore && (ACXI->getCompareOperand() == V || ACXI->getNewValOperand() == V)) {
+          if (PrintObsoleted) {
+            dbgs() << F.getName() << ": found a dangerous atomic cmpxchg of well-formed pointer-like integer: " << *I << "\n";
+          }
+          checkBackward(F, V, PtrIntTy);
+        }
+        continue;
+      }
+
+      // We only care about Use that may be a pointer-like-value
+      Type *T = I->getType()->getScalarType();
+      if (T->isVoidTy())
+        continue; // void cannot propagate
+
+      if (T->isPointerTy())
+        continue; // already a pointer, no need to propagate
+
+      if (!Visited.count(I))
+        Worklist.push_back(I);
+    }
+  }
+
 }
 
 static void checkGoPointerLikeValues(Function &F) {
   const DataLayout &DL = F.getParent()->getDataLayout();
+  const unsigned PtrSize = DL.getPointerSize();
+  assert(PtrSize == 8 && "only 64bit");
+  const Type *PtrIntTy = Type::getInt64Ty(F.getContext());
 
-  if (VerifyAllocaCast) {
-    // Check Alloca cast to pointer
-    // Remove if all bugs have been fixed
-    for (BasicBlock &BB : F) {
-      for (Instruction &I : BB) {
-        // must be a real pointer type.
-        // TODO: other types
-        if (!I.getType()->isPointerTy())
-          continue;
-
-        if (auto *BCI = dyn_cast<BitCastInst>(&I)) {
-          if (auto *AI = dyn_cast<AllocaInst>(I.stripPointerCasts())) {
-            auto * FromTy = getValueElementType(AI);
-            auto * ToTy = getValueElementType(&I);
-            auto FromSize = DL.getTypeSizeInBits(FromTy);
-            auto ToSize = DL.getTypeSizeInBits(ToTy);
-            if (!hasPointer(FromTy) && FromSize > 0
-                && FromSize >= ToSize // From could be a prefix of To
-                && hasPointer(ToTy)) {
-              F.getParent()->dump();
-              dbgs() << "Alloca: " << *AI << "\n";
-              dbgs() << "BitCast: " << *BCI << "\n";
-              dbgs() << "AllocaType: " << *AI->getType() << ", goType=" << *getGoType(AI) << "\n";
-              dbgs() << "try to cast a non-pointer alloca to a pointer alloca in " << F.getName() << "\n";
-              report_fatal_error("cannot cast a no pointer alloca to a pointer alloca.");
-            }
-          }
-          continue;
-        }
-      }
+  for (Instruction &I : instructions(F)) {
+    if (PtrToIntInst *PTI = dyn_cast<PtrToIntInst>(&I)) {
+      checkForward(F, PTI, PtrIntTy);
+      continue;
     }
   }
 
-#if 0
-  // Record stack objects associated with the value
-  // For PHI it may be multiple values
-  MapVector<Value*, SetVector<Value *>> ValueToStackObjects;
-#endif
-
-  bool Changed = true;
-  while (Changed) {
-    Changed = false;
-    // see isGoGCPointerOrPointerLikeValue
-    for (BasicBlock &BB : F) {
-      for (Instruction &I : BB) {
-        if (isHandledGCPointerType(getGoType(&I)) || isGoPreAllocated(&I) || hasPointerInOpacusType(&I))
-          continue; // already a pointer
-
-        if (isGoConstantLikeValue(&I))
-          continue; // not a pointer of interest
-
-        // Store has no type
-        if (isa<StoreInst>(I))
-          continue;
-
-        if (isa<ICmpInst>(I) || isa<BranchInst>(I)) {
-          // boolean is not a pointer value
-          // we have no need to keep tracking it.
-          continue;
-        }
-
-        if (isa<CallInst>(I)) {
-          // we have no idea about the return value.
-          assert(!isGoPreAllocated(&I) && "pre allocated");
-          continue;
-        }
-
-        // a value that is not of a pointer type.
-        bool HasPointerLikeOp = false;
-        for (Value *V : I.operands()) {
-          if (!isa<Instruction>(V))
-            continue;
-          if (isa<PtrToIntInst>(V)) {
-            HasPointerLikeOp = true;
-            break;
-          }
-          if (cast<Instruction>(V)->hasMetadata("go.pointerlike")) {
-            HasPointerLikeOp = true;
-            break;
-          }
-        }
-
-        // Not a pointer like value
-        // Note that LoadInst has a single pointer operand.
-        // So HasPointerLikeOp is always false for LoadInst.
-        if (!HasPointerLikeOp)
-          continue;
-
-        if (isa<ReturnInst>(I)) {
-          // ReturnInst does not have a type so we do not need to track it.
-          // ReturnInst is permissive. For example, we may compute the offset
-          // of a struct field by subtracting the field address and the base address.
-          continue;
-        }
-
-        if (isa<InsertValueInst>(I)
-              || isa<ExtractValueInst>(I)
-              || isa<InsertElementInst>(I)
-              || isa<ExtractElementInst>(I)
-              || isa<AtomicCmpXchgInst>(I)
-              || isa<AtomicRMWInst>(I)
-              ) {
-          // InsertXXX is like StoreInst
-          // ExtractXXX is like LoadInst
-          // Atomic is like combined Store and Load
-          continue;
-        }
-
-
-        if (!(isa<IntToPtrInst>(I)
-              || isa<BinaryOperator>(I)
-              || isa<SelectInst>(I)
-              || isa<PHINode>(I)
-              // TODO: vector of pointers are usually represented in vector of i64
-              || isa<ShuffleVectorInst>(I)
-              // trunc
-              || isa<CastInst>(I))) {
-          auto Fn = cast<Instruction>(&I)->getParent()->getParent();
-          // dbgs() << "Module: " << Fn->getParent()->getName() << "\n";
-          dbgs() << "Function: " << Fn->getName() << "\n";
-          Fn->dump();
-          dbgs() << "unsupported instructions for pointer-like value: " << I << "\n";
-          assert(false && "unsupported instructions");
-        }
-
-#if 0
-        // update stack object set: for debugging
-        SetVector<Value*> &StackObjects = ValueToStackObjects[&I];
-        size_t OldSize = StackObjects.size();
-        for (Value *V : I.operands()) {
-          if (isa<AllocaInst>(V)) {
-            StackObjects.insert(V);
-          } else if (isGoPreAllocated(V)) {
-            StackObjects.insert(V);
-          } else {
-            SetVector<Value*> &SOs = ValueToStackObjects[V];
-            StackObjects.set_union(SOs);
-          }
-        }
-        if (OldSize != StackObjects.size())
-          Changed = true;
-#endif
-
-        // mark metadata
-        if (!I.hasMetadata("go.pointerlike")) {
-          I.setMetadata("go.pointerlike", MDNode::get(I.getContext(), {}));
-          Changed = true;
-        }
-      }
-    }
-  }
-
-#if 0
-  for (BasicBlock &BB : F) {
-    for (Instruction &I : BB) {
-      if (!isa<PHINode>(I) && !isa<SelectInst>(I)) {
+  std::function<void(Value*)> MarkAllIllFormed;
+  MarkAllIllFormed = [&](Value *V) {
+    for (auto &U : V->uses()) {
+      Instruction *I = dyn_cast<Instruction>(U.getUser());
+      if (!I)
         continue;
+
+      if (I->hasMetadata("go.pointerlike.illformed"))
+        continue;
+
+      if (I->hasMetadata("go.pointerlike")) {
+        I->setMetadata("go.pointerlike.illformed", MDNode::get(I->getContext(), {}));
+        MarkAllIllFormed(I);
       }
+    }
+  };
 
-      if (auto * PN = dyn_cast<PHINode>(&I)) {
-        unsigned NumPHIValues = PN->getNumIncomingValues();
-        for (unsigned i = 0; i < NumPHIValues; i++) {
-          Value *InVal = PN->getIncomingValue(i)->stripPointerCasts();
-          if (auto *A = dyn_cast<AllocaInst>(InVal)) {
-            if (!hasPointer(getGoType(A)->getElementType()))
-              continue;
-            if (!A->hasMetadata("go.stackobject.gcdata")) {
-              auto * F = A->getParent()->getParent();
-              auto * M = F->getParent();
-              dbgs() << "Find bad alloca " << *A << "(" << *getGoType(A) << ")" << " in " << F->getName() << "\n";
-              M->dump();
-              report_fatal_error("An Address-Taken Alloca is not identified");
-            }
-          }
-        }
-      } else if (auto *SI = dyn_cast<SelectInst>(&I)) {
-        for (unsigned i = 1; i < 3; i++) {
-          Value *InVal = SI->getOperand(i)->stripPointerCasts();
-          if (auto *A = dyn_cast<AllocaInst>(InVal)) {
-            if (!hasPointer(getGoType(A)->getElementType()))
-              continue;
-            if (!A->hasMetadata("go.stackobject.gcdata")) {
-              auto * F = A->getParent()->getParent();
-              auto * M = F->getParent();
-              dbgs() << "Find bad alloca 2 " << *A << " in " << F->getName() << "\n";
-              M->dump();
-              report_fatal_error("An Address-Taken Alloca is not identified");
-            }
-          }
-        }
-      }
-
-      SetVector<Value*> &SOs = ValueToStackObjects[&I];
-      for (Value *V : SOs) {
-        if (!isa<AllocaInst>(V))
+  // Assumption: A PtrToIntInst is valid if it is not converted
+  // from a non-zero constant or ill-formed integer to IntToPtr
+  for (Instruction &I : instructions(F)) {
+    if (PtrToIntInst *PTI = dyn_cast<PtrToIntInst>(&I)) {
+      Value * Src = PTI->getOperand(0);
+      if (ConstantInt *CI = dyn_cast<ConstantInt>(Src)) {
+        if (CI->isZero()) {
           continue;
-
-        if (!hasPointer(getGoType(V)->getElementType()))
-          continue;
-        if (!dyn_cast<Instruction>(V)->hasMetadata("go.stackobject.gcdata")) {
-          auto * F = cast<Instruction>(V)->getParent()->getParent();
-          auto * M = F->getParent();
-          dbgs() << "Find bad alloca 3 " << *V << " in " << F->getName() << "\n";
-          M->dump();
-          report_fatal_error("An Address-Taken Alloca is not identified");
+        }
+        // report error:
+        if (PrintObsoleted) {
+          dbgs() << F.getName() << ": a PtrToInt depends on a non-zero constant: " << *Src << "\n";
+          F.dump();
+        }
+        MarkAllIllFormed(PTI);
+      } else if (IntToPtrInst *ITP = dyn_cast<IntToPtrInst>(Src)) {
+        if (Instruction *I = dyn_cast<Instruction>(ITP->getOperand(0))) {
+          if (I->hasMetadata("go.pointerlike.illformed")) {
+            if (PrintObsoleted) {
+              dbgs() << F.getName() << ": a PtrToInt depends on an ill-formed IntToPtr: " << *ITP << "\n";
+              F.dump();
+            }
+            MarkAllIllFormed(PTI);
+          }
         }
       }
     }
   }
-#endif
+
+  checkNegativeOffset(F);
 }
 
 static bool SameBlockUsage(Instruction *Def) {
@@ -3525,10 +3034,651 @@ static bool moveUnusedGEPAfterStatepoints(BasicBlock &BB, GCPtrLivenessData &Dat
   return false;
 }
 
-static void computeLiveInValues(DominatorTree &DT, Function &F,
+// Unpack a pointer to base + offset
+// Note that we already use isTrackedAlloca to find the Base.
+// We may fail to successfully unpack a GEP. Use -1 to indicate this case.
+static int getPtrOffsetFromBase(Value *Base, Value *Ptr, const DataLayout &DL) {
+  Ptr = Ptr->stripPointerCasts();
+
+  // If Ptr is a stack object, simpley return it.
+  if (Base == Ptr) {
+    return 0;
+  }
+
+  // If V is a GEP, unpack it.
+  // TODO: we may need to handle more cases.
+  if (auto *GEP = dyn_cast<GetElementPtrInst>(Ptr)) {
+    // Use the same Base
+    auto PtrOff = getPtrOffsetFromBase(Base, GEP->getPointerOperand(), DL);
+    if (PtrOff == -1) {
+      return -1;
+    }
+
+    APInt Off(DL.getPointerSizeInBits(0), 0);
+    if (!GEP->accumulateConstantOffset(DL, Off)) {
+      return -1;
+    }
+
+    return PtrOff + (unsigned)Off.getSExtValue();
+  }
+
+  // Not a derived pointer from Base
+  return -1;
+}
+
+// compute StoredSize inited by typedmemmove and typedmemclr
+static unsigned getTypedmemmoveSize(Value* V, const DataLayout& DL, DefiningValueMapTy &DVCache) {
+  if (BitCastInst* BCI = dyn_cast<BitCastInst>(V)) {
+    return getTypedmemmoveSize(BCI->getOperand(0), DL, DVCache);
+  } else if (GetElementPtrInst* GEP = dyn_cast<GetElementPtrInst>(V)) {
+    return DL.getTypeStoreSize(GEP->getResultElementType());
+  } else if (Value* Base = isTrackedAlloca(V, DVCache)) {
+    return DL.getTypeStoreSize(getValueElementType(Base));
+  }
+  return 0;
+}
+
+// Compute the initialization state of Alloca
+// This could be done with the computeLiveInValues. But for simplicity,
+// let's implement it stand-alone here.
+//
+// The Go frontend ensures that there is no bad load. Here, we only need to track
+// the init-state of pointers. However, for simplicity we may track all bits but only
+// bits of pointers matter.
+//
+// We leverage a Backward data flow analysis to find must-init bytes for each Alloca (with pointers).
+// We use a BitVector to track the state of each Alloca. A bit is set if the bit must be initialized.
+// Any USE of the Alloca requires that all necessary bits must be initialized.
+// Any DEF will clear the bits that has been defined, which means these bits are not necessarily to be
+// initialized before the DEF. When flow joins, we need to unify all bits.
+//
+// For an Alloca, the DEF can be StoreInst, MemSet/MemCpy/MemMove
+// For an Alloca, the USE can be LoadInst or AddrTaken instructions such as
+// CallInst/PHINode. For a live-out Alloca, it can also be used by the garbage collector.
+// So any GCStatepointInst is a use of a live-out Alloca.
+//
+// This analysis depends on the result of findBasePointer.
+static void computeAllocaDefState(DominatorTree &DT, LoopInfo &LI, Function &F,
                                 GCPtrLivenessData &Data,
-                                SetVector<Value *> &ToZero,
-                                SetVector<Value *> &BadLoads,
+                                DenseMap<Value *, ToZeroInfo> &ToZero,
+                                DefiningValueMapTy &DVCache) {
+
+  const DataLayout &DL = F.getParent()->getDataLayout();
+  const unsigned PtrSize = DL.getPointerSize();
+
+  BasicBlock &Entry = F.getEntryBlock();
+  bool HasAlloca = false;
+  SmallVector<Instruction*, 4> ToBeMoved;
+  for (Instruction &I: instructions(F)) {
+    if (isa<AllocaInst>(&I) || isGoPreAllocated(&I)) {
+      HasAlloca = true;
+      if (I.getParent() != &Entry) {
+        ToBeMoved.push_back(&I);
+      }
+    }
+  }
+
+  if (!HasAlloca)
+    return;
+
+  for (Instruction* I : ToBeMoved) {
+    I->moveBefore(Entry.getFirstNonPHIOrDbg());
+  }
+
+  auto IsTrackedAllocaChecked = [&](Value *V) {
+    if (isGoGCPointerOrPointerLikeValue(V))
+      if (Value *Base = isTrackedAlloca(V, DVCache))
+        return Base;
+    return (Value*)nullptr;
+  };
+
+  // Return a deep copy that we can manipulate directly
+  auto GetTypePtrMap = [&](Type* Ty) {
+    // make a deep copy
+    BitVector Ret;
+    auto Found = Data.TypeToPtrMap.find(Ty);
+    if (Found != Data.TypeToPtrMap.end()) {
+      Ret = Found->second;
+    } else {
+      BitVector &BV = Data.TypeToPtrMap[Ty];
+      uint64_t Size = DL.getTypeStoreSize(Ty);
+      BV.resize(Size/PtrSize);
+      getPtrBitmapForTypeHelper(Ty, DL, 0, BV);
+      Ret = BV;
+    }
+    return Ret;
+  };
+
+  bool Debug = false;
+  auto DumpAllocaStates = [&](DenseMap<Value*, BitVector> &States) {
+    for (auto &It : States) {
+      dbgs() << "Value: " << *It.first << "\n";
+      auto TypePtrMap = GetTypePtrMap(getValueElementType(It.first));
+      dbgs() << "TypePtrMap: ";
+      for (auto Word : TypePtrMap.getData()) {
+        dbgs() << llvm::format("%llX", Word);
+      }
+      dbgs() << "\n    PtrMap: ";
+      for (auto Word : It.second.getData()) {
+        dbgs() << llvm::format("%llX", Word);
+      }
+      dbgs() << "\n";
+    }
+  };
+
+  // Return true if all bit in LHS are not set in RHS
+  auto AllBitsUnset = [](BitVector &LHS, BitVector &RHS) {
+    assert(RHS.size() == LHS.size() && "invariant");
+
+    auto RHSData = RHS.getData();
+    auto LHSData = LHS.getData();
+
+    for (size_t i = 0; i < RHSData.size(); i++) {
+      auto LHSBits = LHSData[i];
+      auto RHSBits = RHSData[i];
+      if ((RHSBits & LHSBits) != 0) {
+        // Return false if any bits in common
+        return false;
+      }
+    }
+
+    return true;
+  };
+
+  auto AllBitsSet = [](BitVector &LHS, BitVector &RHS) {
+    assert(RHS.size() == LHS.size() && "invariant");
+    auto RHSData = RHS.getData();
+    auto LHSData = LHS.getData();
+
+    for (size_t i = 0; i < RHSData.size(); i++) {
+      auto RHSBits = RHSData[i];
+      auto LHSBits = LHSData[i];
+      if ((RHSBits & ~LHSBits) != RHSBits) {
+        return false;
+      }
+    }
+
+    return true;
+  };
+
+
+  // At a Safepoint, all Alloca must be fully initialized
+  auto ResetAtSafepoint = [&](DenseMap<Value*, BitVector> &States) {
+    for (auto &It : States) {
+      auto &S = It.second;
+      auto TypePtrMap = GetTypePtrMap(getValueElementType(It.first));
+      assert(TypePtrMap.size() == S.size() && "invariant");
+      if (AllBitsUnset(TypePtrMap, S)) {
+        // No bits in TypePtrMap are set, which means
+        // even the object is live, all bits of the object will have
+        // no use-before-def-after-this-bb.
+        States.erase(It.first);
+      } else {
+        // true means at least one bit in TypePtrMap has been set in
+        // The object must be live-out or live-through.
+        // We must ensure all bits are set before this statepoint.
+        S = std::move(TypePtrMap);
+      }
+    }
+  };
+
+  // Mark bits that are not necessarily to be initialized before this instruciton
+  // because this instruction will initialize it and override old values.
+  // Return true if States have changed.
+  // We apply CheckDef only if we know the size and the offset.
+  auto CheckDef = [&](Value *Base, Value *Ptr, unsigned Size, DenseMap<Value*, BitVector> &States) {
+    // Ptr is the destination of a store
+    int PtrOff = getPtrOffsetFromBase(Base, Ptr, DL);
+    if (PtrOff == -1)
+      return false; // We cannot determine the offset from the base.
+
+    // For use we do not need to know the exact offset and size
+    auto Found = States.find(Base);
+    if (Found == States.end()) {
+      // no use of this def
+      // ignore
+      return false;
+    } else {
+      auto &S = Found->second;
+      bool Changed = false;
+      // TODO: Size may be smaller than PtrSize.
+      // In this case, the slot must not be poitner.
+      // We still set the entire slot since ideally a pointer should not be partially updated.
+      for (unsigned I = 0, Idx = (unsigned)PtrOff/PtrSize; I < Size; I += PtrSize, Idx++) {
+        assert(Idx < S.size() && "invariant");
+        if (S.test(Idx)) {
+          S.reset(Idx);
+          Changed = true;
+        }
+      }
+
+      return Changed;
+    }
+  };
+
+  // Mark all bits must be initialized
+  auto CheckUse = [&](Value *Base, Value *Ptr, DenseMap<Value*, BitVector> &States) {
+    // For use we do not need to know the exact offset and size.
+    // TODO: we currently require that a Alloca must be fully initialized
+    // before any REAL or AddrTaken use (e.g., load or Phi or Call).
+    // For Load, we actually can precisely track which bytes are used.
+    // But it seems that it is not worth doing this.
+    auto Found = States.find(Base);
+    auto TypePtrMap = GetTypePtrMap(getValueElementType(Base));
+    if (Found == States.end()) {
+      auto &S = States[Base];
+      S = std::move(TypePtrMap);
+      return true;
+    } else {
+      auto &S = Found->second;
+      bool Changed = !AllBitsSet(TypePtrMap, S);
+      S = std::move(TypePtrMap);
+      return Changed;
+    }
+  };
+
+  // We can only zero an Alloca once. If the Alloca is used in a Loop,
+  // we should zero it before entering loop.
+  auto FindNonLoopDom = [&](BasicBlock *BB) {
+    if (BB == &F.getEntryBlock()) {
+      return BB;
+    }
+
+    auto *Loop = LI.getLoopFor(BB);
+    if (Loop == nullptr) {
+      return BB;
+    }
+
+    // Iterate to find the outer-most loop
+    for (; Loop->getParentLoop() != nullptr; Loop = Loop->getParentLoop()) {
+
+    }
+
+    // Preheader dominates everything in loop, including Header
+    BasicBlock * Preheader = Loop->getLoopPreheader();
+    if (Preheader != nullptr) {
+      // dbgs() << "Use " << Preheader->getName() << " for " << BB->getName() << " depth=" << Loop->getLoopDepth() << "\n";
+      assert(DT.dominates(Preheader, BB) && "loop header dominates everything in a loop");
+      return Preheader;
+    }
+    return &F.getEntryBlock();
+  };
+
+  // We need to use IsTrackedAllocaChecked to compute
+  // the dominator of all real usage of Alloca
+  DenseMap<Value *, BasicBlock *> AllocaToDomUse;
+  for (BasicBlock &BB : F) {
+    BasicBlock *DomOfBB = FindNonLoopDom(&BB);
+    for (Instruction &I : BB) {
+      if (isa<BitCastInst>(I) || isa<GetElementPtrInst>(I)) {
+        continue;
+      }
+
+      // PHI is also not a real use.
+      // PHI: we could initialize the Alloca used in PHI after PHI
+      for (Value *V : I.operands()) {
+        Value *Base = IsTrackedAllocaChecked(V);
+        if (Base != nullptr) {
+          auto It = AllocaToDomUse.find(Base);
+          if (It == AllocaToDomUse.end()) {
+            // dbgs() << "Set DOM use for "  << *Base << " to " << BB.getName() << " reason=" << I << "\n";
+            AllocaToDomUse[Base] = DomOfBB;
+          } else if (It->second == DomOfBB) {
+            // do nothing if they are the same.
+            continue;
+          } else {
+            // dbgs() << "Set DOM use for "  << *Base << " to " << BB.getName() << " reason=" << I << " old=" << It->second->getName() << "\n";
+            It->second = DT.findNearestCommonDominator(It->second, DomOfBB);
+            assert(It->second != nullptr && "invariant: all BB must be reachable from Entry");
+          }
+        }
+      }
+    }
+  }
+
+  auto GetAllocaDomUse = [&AllocaToDomUse](Value *Base) {
+    auto It = AllocaToDomUse.find(Base);
+    if (It == AllocaToDomUse.end()) {
+      return (BasicBlock*)nullptr;
+    }
+    return It->second;
+  };
+
+  SmallSetVector<BasicBlock *, 32> Worklist;
+
+  for (BasicBlock &BB : F) {
+    // Lets try all BB first.
+    Worklist.insert(&BB);
+    if (isa<ReturnInst>(BB.getTerminator()) && !Data.ParamOut.empty()) {
+      DenseMap<Value*, BitVector> &States = Data.OutAllocaDefStates[&BB];
+      // On-stack ParamOut
+      for (Value *ParamOut : Data.ParamOut) {
+        if (Value *Base = IsTrackedAllocaChecked(ParamOut))
+          CheckUse(Base, ParamOut, States);
+      }
+    }
+  }
+
+
+  // TODO: Use worklist instead of a simple big loop
+  while (!Worklist.empty()) {
+    BasicBlock *BB = Worklist.pop_back_val();
+
+    // We maintain an OutStates for PHI.
+    // TODO: we actually can pull effects of each PHI from successor.
+    // Then, we can start with an empty states and simply pull changes from successor's InStates
+    DenseMap<Value*, BitVector> &OutStates = Data.OutAllocaDefStates[BB];
+
+    // Join of all successors and update OutStates in-place
+    for (BasicBlock *Succ : successors(BB)) {
+      auto &SuccStates = Data.InAllocaDefStates[Succ];
+      for (auto &It : SuccStates) {
+        auto Found = OutStates.find(It.first);
+        if (Found == OutStates.end()) {
+          auto &S = OutStates[It.first];
+          // deep copy
+          S = It.second;
+        } else {
+          // Bits union
+          Found->second |= It.second;
+        }
+      }
+    }
+
+    // Start with Out states
+    DenseMap<Value*, BitVector> States = OutStates;
+
+    if (Debug) {
+      dbgs() << "Dump OutStates for " << BB->getName() << "\n";
+      DumpAllocaStates(States);
+    }
+
+    // Backward propagation
+    for (Instruction &I : llvm::reverse(*BB)) {
+
+      // PHINode must be handled differently because
+      // an incoming value only needs to be live in the corresponding incoming block.
+      if (auto *PN = dyn_cast<PHINode>(&I)) {
+        if (isGoGCPointerOrPointerLikeValue(PN)) {
+          unsigned NumPHIValues = PN->getNumIncomingValues();
+          for (unsigned N = 0; N < NumPHIValues; N++) {
+            Value *InVal = PN->getIncomingValue(N);
+            if (Value *Base = IsTrackedAllocaChecked(InVal)) {
+              BasicBlock *InBB = PN->getIncomingBlock(N);
+              DenseMap<Value*, BitVector> &InOutStates = Data.OutAllocaDefStates[InBB];
+              // Phi is also a use f InVal.
+              // Note that we do not update the InStates of BB.
+              if (BB == GetAllocaDomUse(Base)) {
+                // Phi is the only use of Base
+                if (!ToZero.count(Base)) {
+                  // We should insert a zeroing here.
+                  ToZeroInfo Info;
+                  Info.State = GetTypePtrMap(getValueElementType(Base));
+                  if (InBB == &Entry) {
+                    // Zeroing after Alloca
+                    Info.Pos = nullptr;
+                  } else {
+                    // Zeroing after the first NonPHI in this block
+                    Info.Pos = InBB;
+                  }
+                  ToZero[Base] = Info;
+                  if (PrintToZero)
+                    dbgs() << "Add zeroing in " << BB->getName() << " for " << *Base << " in " << F.getName() << "\n";
+                }
+                // do not add Base into InOutStates
+              } else if (CheckUse(Base, InVal, InOutStates)) {
+                Worklist.insert(InBB);
+              }
+            }
+          }
+        }
+        continue;
+      }
+
+      if (isa<BitCastInst>(I) || isa<GetElementPtrInst>(I)) {
+        // isTrackedAlloca can remove BitCast
+        continue;
+      }
+
+      // Handle Def first, it could be Store and MemIntrinsics
+      if (StoreInst *SI = dyn_cast<StoreInst>(&I)) {
+        // Process DEF
+        Value *Ptr = SI->getPointerOperand();
+        Value *PtrBase = IsTrackedAllocaChecked(Ptr);
+        if (PtrBase) {
+          CheckDef(PtrBase, Ptr, DL.getTypeStoreSize(SI->getValueOperand()->getType()), States);
+        }
+
+        // Process USE
+        Value *Val = SI->getValueOperand();
+        if (Value *ValBase = IsTrackedAllocaChecked(Val)) {
+          // NOTE: This case is tricky. An addr is not a real usage of the Alloca.
+          // We can safely use the address of an Alloca during initializing the same Alloca.
+          // See strings.Join and strings.Builder
+          if (ValBase != PtrBase) {
+            CheckUse(ValBase, Val, States);
+          } else {
+            // Ignore update the use of the same Alloca
+            // We can ignore because Val must a BitCast or a GE
+            // that is not a real use of the Alloca.
+          }
+        }
+
+        continue;
+      } else if (CallInst *CI = dyn_cast<CallInst>(&I)) {
+
+        // We need to mark all live-out Alloca fully initialized.
+        // This reset also includes those initialized by CI.
+        if (needsRewriteForGo(CI)) {
+          ResetAtSafepoint(States);
+        }
+
+        // Make control flow clean. Use a bool variable to track whether
+        // we need fall-through to handle all operands as Use.
+        bool OperandAdded = false;
+        if (Function *Fn = CI->getCalledFunction()) {
+          switch (Fn->getIntrinsicID()) {
+          case Intrinsic::memmove:
+          case Intrinsic::memcpy:
+          case Intrinsic::memcpy_inline:
+          case Intrinsic::memset: {
+            Value *Ptr = CI->getArgOperand(0);
+            if (Value *Base = IsTrackedAllocaChecked(Ptr)) {
+              ConstantInt *Len = dyn_cast<ConstantInt>(cast<AnyMemIntrinsic>(CI)->getLength());
+              if (Len) {
+                CheckDef(Base, Ptr, (unsigned)Len->getZExtValue(), States);
+              }
+            }
+            if (auto *MT = dyn_cast<AnyMemTransferInst>(CI)) {
+              Value *Src = MT->getRawSource();
+              if (Value *Base = IsTrackedAllocaChecked(Src)) {
+                CheckUse(Base, Src, States);
+              }
+            } else if (auto *MS = dyn_cast<AnyMemSetInst>(CI)) {
+              Value *Val = MS->getValue();
+              if (Value *Base = IsTrackedAllocaChecked(Val)) {
+                CheckUse(Base, Val, States);
+              }
+            }
+            // Avoid fall-through
+            OperandAdded = true;
+            break;
+          }
+          default:
+            if (Fn->getName() == "runtime.typedmemmove" || Fn->getName() == "runtime.typedmemclr") {
+              // Dst is the second argument. The first argument is type descriptor.
+              Value *Ptr = CI->getArgOperand(1);
+              if (Value *Base = IsTrackedAllocaChecked(Ptr)) {
+                // The typedmemmove should take a known type descriptor in most cases.
+                // We cannot trust the size of getTypedmemmoveSize.
+                // If we cannot get the size, we may ignore this def and trigger an
+                // potential zeroing.
+                unsigned Size = getTypedmemmoveSize(Ptr, DL, DVCache);
+                if (Size) {
+                  CheckDef(Base, Ptr, Size, States);
+                }
+              }
+
+              if (Fn->getName() == "runtime.typedmemmove") {
+                Value *Src = CI->getArgOperand(2);
+                if (Value *Base = IsTrackedAllocaChecked(Src)) {
+                  CheckUse(Base, Src, States);
+                }
+              }
+
+              OperandAdded = true;
+              break;
+            } else if (Fn->getName() == "runtime.memmove") {
+              // Dst is the first argument
+              Value *Ptr = CI->getArgOperand(0);
+              if (Value *Base = IsTrackedAllocaChecked(Ptr)) {
+                ConstantInt *Len = dyn_cast<ConstantInt>(CI->getArgOperand(2));
+                if (Len) {
+                  CheckDef(Base, Ptr, (unsigned)Len->getZExtValue(), States);
+                }
+              }
+
+              Value *Src = CI->getArgOperand(1);
+              if (Value *Base = IsTrackedAllocaChecked(Src)) {
+                CheckUse(Base, Src, States);
+              }
+
+              // continue to handle next instruction;
+              OperandAdded = true;
+              break;
+            } // fall-through
+          } // fall-through
+        } // fall-through
+
+        if (OperandAdded)
+          continue;
+
+        // fall-through to handle all operands as Use.
+
+      } // fall-through
+
+      // For all other instructions, including unhandled CallInst
+      for (Value *V : I.operands()) {
+        if (isGoGCPointerOrPointerLikeValue(V))
+          if (Value *Base = IsTrackedAllocaChecked(V)) {
+            CheckUse(Base, V, States);
+          }
+      }
+    }
+
+    // Remove all fully initialized objects since
+    // we could insert a VarDef here.
+    for (auto &It : States) {
+      auto &S = It.second;
+      auto TypePtrMap = GetTypePtrMap(getValueElementType(It.first));
+      if (AllBitsUnset(TypePtrMap, S)) {
+        // No bits in TypePtrMap should be initialized, which means
+        // even the object is live, all bits of the object will have
+        // no use-before-def-after-this-bb.
+        States.erase(It.first);
+      } else if (BB == GetAllocaDomUse(It.first)) {
+        if (!ToZero.count(It.first)) {
+          // We should insert a zeroing here.
+          ToZeroInfo Info;
+          Info.State = S;
+          if (BB == &Entry) {
+            // Zeroing after Alloca
+            Info.Pos = nullptr;
+          } else {
+            // Zeroing after the first NonPHI in this block
+            Info.Pos = BB;
+          }
+          ToZero[It.first] = Info;
+          if (PrintToZero)
+            dbgs() << "Add zeroing in " << BB->getName() << " for " << *It.first << " in " << F.getName() << "\n";
+        }
+        // After zeroing we can safely remove It.first
+        States.erase(It.first);
+      }
+    }
+
+    auto &InStates = Data.InAllocaDefStates[BB];
+
+    if (Debug) {
+      dbgs() << "Dump Old IntStates for " << BB->getName() << "\n";
+      DumpAllocaStates(InStates);
+    }
+
+    // Make sure operator!= works
+    if (InStates != States) {
+
+      if (Debug) {
+        dbgs() << "Dump New IntStates for " << BB->getName() << "\n";
+        DumpAllocaStates(States);
+      }
+      // make a deep copy
+      InStates = States;
+      Worklist.insert(pred_begin(BB), pred_end(BB));
+    }
+  }
+
+
+  // Sanity Check
+  // Make sure all Alloca is at the Entry block
+  // TODO: we could add Alloca at any basic block.
+  // Also, we should not handle lifetime.start and lifetime.end
+  // 3. Ensure no Alloca is used in GEP indices.
+  DenseMap<Value*, BitVector> &EntryStates = Data.InAllocaDefStates[&Entry];
+  for (BasicBlock &BB : F) {
+    for (Instruction &I : BB) {
+      if (isa<AllocaInst>(&I) || isGoPreAllocated(&I)) {
+        if (&BB != &Entry) {
+          // Remove the sanity check if we allocate stack objects in other basic blocks.
+          F.dump();
+          dbgs() << "stack objects must be declared in entry block: " << I << "\n";
+          report_fatal_error("stack objects must be declared in entry block");
+        }
+        auto It = EntryStates.find(&I);
+        if (It != EntryStates.end()) {
+          auto &S = It->second;
+          auto TypePtrMap = GetTypePtrMap(getValueElementType(It->first));
+          if (!AllBitsUnset(TypePtrMap, S)) {
+            if (!ToZero.count(It->first) && GetAllocaDomUse(It->first) != nullptr) {
+              F.dump();
+              dbgs() << "must be added to ToZero: " << *It->first << "\n";
+              report_fatal_error("must be added to ToZero");
+            }
+          }
+        }
+      } else if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(&I)) {
+        // Remove the following sanity check if we need lifetime_start
+        switch (II->getIntrinsicID()) {
+          case Intrinsic::lifetime_start:
+          case Intrinsic::lifetime_end:
+            report_fatal_error("lifetime intrinsics are not handled");
+        }
+      } else if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(&I)) {
+        for (Use &Idx : GEP->indices()) {
+          if (IsTrackedAllocaChecked(Idx)) {
+            report_fatal_error("address of alloca is used as GEP indice");
+          }
+        }
+      }
+    }
+  }
+
+#if 0
+  if (ToZero.empty())
+    return;
+
+  // Compute AllocaDef in each BB
+  F.dump();
+  for (BasicBlock &BB : F) {
+    auto &InStates = Data.InAllocaDefStates[&BB];
+    dbgs() << "Dump at " << BB.getName() << "\n";
+    DumpAllocaStates(InStates);
+  }
+#endif
+}
+
+static void computeLiveInValues(DominatorTree &DT, LoopInfo &LI, Function &F,
+                                GCPtrLivenessData &Data,
+                                DenseMap<Value *, ToZeroInfo> &ToZero,
                                 DefiningValueMapTy &DVCache) {
   // collect all parameter out
   for (BasicBlock &BB : F) {
@@ -3550,14 +3700,13 @@ static void computeLiveInValues(DominatorTree &DT, Function &F,
   // including those derived from PtrToInt
   checkGoPointerLikeValues(F);
 
+  computeAllocaDefState(DT, LI, F, Data, ToZero, DVCache);
+
   // Seed the liveness for each individual block
   for (BasicBlock &BB : F) {
     Data.KillSet[&BB] = computeKillSet(&BB, DVCache);
     Data.LiveSet[&BB].clear();
     computeLiveInValues(BB.rbegin(), BB.rend(), Data.LiveSet[&BB], DVCache, Data.GenAtInst);
-    computeAllocaDefs(BB.begin(), BB.end(), Data.AllocaDefSet[&BB], Data.AllocaKillSet[&BB], DVCache);
-    Data.AllocaDefAny[&BB] = Data.AllocaDefSet[&BB];
-    Data.AllocaDefAny[&BB].set_subtract(Data.AllocaKillSet[&BB]);
     Data.LiveOut[&BB] = SetVector<Value *>();
     computeLiveOutSeed(&BB, Data.LiveOut[&BB], DVCache);
 
@@ -3565,109 +3714,6 @@ static void computeLiveInValues(DominatorTree &DT, Function &F,
     for (Value *Kill : Data.KillSet[&BB])
       assert(!Data.LiveSet[&BB].count(Kill) && "live set contains kill");
 #endif
-  }
-
-  // Propagate Alloca def any until stable.
-  bool changed = true;
-  while (changed) {
-    changed = false;
-    for (BasicBlock &BB : F) {
-      unsigned OldSize = Data.AllocaDefAny[&BB].size();
-      for (BasicBlock *Pred : predecessors(&BB))
-        Data.AllocaDefAny[&BB].set_union(Data.AllocaDefAny[Pred]);
-      Data.AllocaDefAny[&BB].set_subtract(Data.AllocaKillSet[&BB]);
-      if (Data.AllocaDefAny[&BB].size() != OldSize)
-        changed = true;
-    }
-  }
-
-#if 0
-  dbgs() << "Dump DefAny and DefAll before propagation.\n";
-  for (BasicBlock &BB : F) {
-    dbgs() << BB.getName() << ": DefAnySize: " <<Data.AllocaDefAny[&BB].size() << "\n";
-    for (auto DA : Data.AllocaDefAny[&BB]) {
-      dbgs() << BB.getName() << ": DefAny: " << *DA << "\n";
-    }
-    dbgs() << BB.getName() << ": DefAllSize: " <<Data.AllocaDefAll[&BB].size() << "\n";
-    for (auto DA : Data.AllocaDefAll[&BB]) {
-      dbgs() << BB.getName() << ": DefAll: " << *DA << "\n";
-    }
-  }
-#endif
-
-  // Propagate Alloca def all until stable.
-  for (BasicBlock &BB : F)
-    Data.AllocaDefAll[&BB] = Data.AllocaDefAny[&BB];
-  changed = true;
-  while (changed) {
-    changed = false;
-    for (BasicBlock &BB : F) {
-      auto NotDefAll = [&](Value *V) {
-        // 1. Check whether the alloca has been defined in this BB
-        // If yes, we mark it as DefAll since any access to the alloca will trigger
-        // the fully initialization of the alloca.
-        if (Data.AllocaDefSet[&BB].count(V) != 0)
-          return false;
-        // 2. If the alloca V is not defined in all in any predecessors,
-        // it cannot be marked as defall.
-        for (BasicBlock *Pred : predecessors(&BB))
-          if (Data.AllocaDefAll[Pred].count(V) == 0) {
-            if (PrintLiveSet)
-              dbgs() << ">>> removing " << V->getName() << " from " <<
-                        BB.getName() << " DefAll;  pred = " <<
-                        Pred->getName() << "\n";
-            return true;
-          }
-        return false;
-      };
-      if (Data.AllocaDefAll[&BB].remove_if(NotDefAll))
-        changed = true;
-    }
-  }
-
-
-#if 0
-  dbgs() << "Dump DefAny and DefAll after propagation.\n";
-  for (BasicBlock &BB : F) {
-    dbgs() << BB.getName() << ": DefAnySize: " <<Data.AllocaDefAny[&BB].size() << "\n";
-    for (auto DA : Data.AllocaDefAny[&BB]) {
-      dbgs() << BB.getName() << ": DefAny: " << *DA << "\n";
-    }
-    dbgs() << BB.getName() << ": DefAllSize: " <<Data.AllocaDefAll[&BB].size() << "\n";
-    for (auto DA : Data.AllocaDefAll[&BB]) {
-      dbgs() << BB.getName() << ": DefAll: " << *DA << "\n";
-    }
-  }
-#endif
-
-  const DataLayout &DL = F.getParent()->getDataLayout();
-
-  // An alloca is live only after it is initialized.
-  // It is initialized in a block if it is defined there and not defined
-  // in all of the predecessors (or there is no predecessors).
-  for (BasicBlock &BB : F) {
-    for (Value *V : Data.AllocaDefSet[&BB]) {
-      bool Init = false;
-      if (&BB == &F.getEntryBlock())
-        Init = true;
-      for (BasicBlock *Pred : predecessors(&BB))
-        if (!Data.AllocaDefAll[Pred].count(V)) {
-          Init = true;
-          break;
-        }
-      if (!Init)
-        continue;
-
-      // V is fully initialized in this block.
-      // We have to remove it from LiveSet and add it into KillSet..
-      // During propagation, V will not be backward propagated to LiveIn.
-      Data.KillSet[&BB].insert(V);
-      Data.LiveSet[&BB].remove(V);
-
-      // If it is incomplete initialization, it needs zeroing.
-      // dbgs() << "CHECK V: " << *V << "\n";
-      checkStoreSize(V, BB, DL, ToZero, DVCache);
-    }
   }
 
   SmallSetVector<BasicBlock *, 32> Worklist;
@@ -3734,10 +3780,10 @@ static void computeLiveInValues(DominatorTree &DT, Function &F,
           size_t OldSize = StackObjects.size();
           for (Value *V : I.operands()) {
             // TODO: we only need to track Alloca with pointers, right?
-            if (isa<AllocaInst>(V) /*&& hasPointer(getGoType(V))*/) {
+            if (isa<AllocaInst>(V) /*&& hasPointer(getValueElementType(V))*/) {
               StackObjects.insert(V);
               AllocaSets.insert(V);
-            } else if (isGoPreAllocated(V) /*&& hasPointer(getGoType(V))*/) {
+            } else if (isGoPreAllocated(V) /*&& hasPointer(getValueElementType(V))*/) {
               StackObjects.insert(V);
             } else if (Data.ValueToStackObjects.count(V)) {
               SetVector<Value*> &SOs = Data.ValueToStackObjects[V];
@@ -3764,110 +3810,18 @@ static void computeLiveInValues(DominatorTree &DT, Function &F,
     }
   }
 
-  // Find the bad loads, i.e. loads from uninitialized slots.
-  // See also the comment in function insertParsePoints.
-  for (Instruction &I : instructions(F))
-    if (LoadInst *LI = dyn_cast<LoadInst>(&I)) {
-      Value *V = LI->getPointerOperand();
-      if (Value *Base = isTrackedAlloca(V, DVCache)) {
-        BasicBlock *BB = LI->getParent();
-        // AllocaDefAll is the set of allocas initialized at the
-        // end of BB. It doesn't include ones that are killed in
-        // BB (as they don't reach the end). Add KillSet explicitly.
-        if (!Data.AllocaDefAll[BB].count(Base) &&
-            !Data.AllocaKillSet[BB].count(Base)) {
-          BadLoads.insert(LI);
-          dbgs() << "!!! load off uninitialized slot:\n\t" <<
-                    F.getName() << "\n\t" << *LI << "\n";
-          report_fatal_error("!!! load off uninitialized slot");
-        }
+  auto StackObjectNotDefAll = [&](Value *V, BasicBlock *BB){
+    // if (!isGoGCPointerOrPointerLikeValue(V))
+    //   return false;
+    if (Value *Base = isTrackedAlloca(V, DVCache)) {
+      if (!Data.OutAllocaDefStates[BB].count(Base)) {
+        // dbgs() << "!!! alloca live but not initialized:\n\t" <<
+        //          F.getName() << "  " << BB.getName() << "\n" << *V << "\n";
+        return true;
       }
     }
-
-  // Sanity check: live alloca must be initialized.
-  // Due to the reason above, uninitialized slot may appear live,
-  // as the bad load counts as a use. Remove them, as well as the
-  // bad loads.
-  for (BasicBlock &BB : F) {
-    auto NotDefAll = [&](Value *V){
-      if (isa<AllocaInst>(V)) {
-        if (!Data.AllocaDefAll[&BB].count(V)) {
-          // dbgs() << "!!! alloca live but not initialized:\n\t" <<
-          //          F.getName() << "  " << BB.getName() << "\n" << *V << "\n";
-          return true;
-        }
-      }
-      return false;
-    };
-    Data.LiveOut[&BB].remove_if(NotDefAll);
-    Data.LiveOut[&BB].set_subtract(BadLoads);
-  }
-
-  // After this point, we only care address-taken allocas. Remove the rest.
-  // for (BasicBlock &BB : F) {
-  //   auto NotAddrTaken = [&](Value *V){ return !AddrTakenAllocas.count(V); };
-  //   Data.AllocaDefAny[&BB].remove_if(NotAddrTaken);
-
-  //   // AllocaDefAll doesn't really matter, because we subtract it below.
-  //   // Update it just for printing.
-  //   Data.AllocaDefAll[&BB].remove_if(NotAddrTaken);
-  // }
-
-  // Address-taken allocas initialized and not killed at the end of block is live-out.
-  // We don't update live-in sets, since live-in is not used after this point.
-  // for (BasicBlock &BB : F)
-  //   Data.LiveOut[&BB].set_union(Data.AllocaDefAny[&BB]);
-
-
-  // Record ambiguously live slots (AllocaDefAny - AllocaDefAll), which we need to zero.
-  for (BasicBlock &BB : F) {
-    if (PrintLiveSet) {
-      dbgs() << BB.getName() << " AllocaDefAny:\n";
-      printLiveSet(Data.AllocaDefAny[&BB]);
-      dbgs() << BB.getName() << " AllocaDefAll:\n";
-      printLiveSet(Data.AllocaDefAll[&BB]);
-    }
-
-    // NOTE: this clobbers AllocaDefAny. Don't use it after this point.
-    Data.AllocaDefAny[&BB].set_subtract(Data.AllocaDefAll[&BB]);
-    ToZero.set_union(Data.AllocaDefAny[&BB]);
-
-    if (PrintLiveSet) {
-      dbgs() << BB.getName() << " ambiguously live:\n";
-      printLiveSet(Data.AllocaDefAny[&BB]);
-      dbgs() << BB.getName() << " LiveOut:\n";
-      printLiveSet(Data.LiveOut[&BB]);
-    }
-  }
-
-  // We track pointer and pointer-like values during liveness analysis.
-  // But in StackMap we only need to track pointer values because
-  // all pointer-like values are only used to compute full liveness
-  // and they must have a corresponding pointer values (i.e., the input to
-  // the PtrToIntInst).
-  //
-  // Here, we need to remove all pointer-like values (those values derived from PtrToIntInst)
-  // to avoid any inconsistent errors.
-  auto NotPointer = [&](Value *V){
-    if (isHandledGCPointerType(getGoType(V)) || isGoPreAllocated(V) || hasPointerInOpacusType(V))
-      return false;
-      
-    if (isa<PtrToIntInst>(V)) {
-      // not a pointer value but should track their liveness.
-      return true;
-    }
-    if (isa<Instruction>(V) && cast<Instruction>(V)->hasMetadata("go.pointerlike")) {
-      // not a pointer value but should track their liveness.
-      return true;
-    }
-
-    dbgs() << "neither a pointer nor a pointer-like value: " << *V << "\n";
-    report_fatal_error("neither a pointer nor a pointer-like value");
-    return true;
+    return false;
   };
-  for (BasicBlock &BB : F) {
-    Data.LiveOut[&BB].remove_if(NotPointer);
-  }
 
   if (MoveGEPBackward) {
     std::vector<BasicBlock*> IPO;
@@ -3900,7 +3854,6 @@ static void computeLiveInValues(DominatorTree &DT, Function &F,
     // Here we only need to handle Alloca as all Preallocated should already be initialized.
     // TODO: we split the basic block at each CallInst. The terminator should have no side effect.
     // That means, we actually can use the LiveOut of the split basic block for the CallInst.
-    SetVector<Value*> DefAll = Data.AllocaDefAll[&BB];
     SetVector<Value*> LiveTmp = Data.LiveOut[&BB];
     for (auto &I : make_range(BB.rbegin(), BB.rend())) {
       // KILL/Def - Remove this definition from LiveIn
@@ -3910,25 +3863,18 @@ static void computeLiveInValues(DominatorTree &DT, Function &F,
       // See NeedsRewrite to filter out irrelevant CallInst
       if (CallInst *Call = dyn_cast<CallInst>(&I)) {
         if (!isa<GCStatepointInst>(Call) && hasStackMap(Call)) {
-          for (auto I = LiveTmp.begin(); I != LiveTmp.end();) {
-            // DefAll: safe to track
-            // NotDefAll but ToZero: safe to track
-            // Neither case: unsafe, ignore it.
-            if (isTrackedAlloca(*I, DVCache) && DefAll.count(*I) == 0 && ToZero.count(*I) == 0) {
-              // dbgs() << "Remove an uninitialized alloca: " << **I << " for " << *Call << "\n";
-              I = LiveTmp.erase(I);
-            } else {
-              I++;
-            }
-          }
+          LiveTmp.remove_if([&](Value *V) {
+              return StackObjectNotDefAll(V, &BB);
+              });
           Data.LiveAtInst[&I] = LiveTmp;
+          // TODO: Very important!!!
+          // A basic block should have only a single state point.
+          break;
         }
       }
 
       SetVector<Value*> &Gen = Data.GenAtInst[&I];
       LiveTmp.insert(Gen.begin(), Gen.end());
-      // remove all non-pointer values inserted from Gen
-      LiveTmp.remove_if(NotPointer);
 
       // no CallInst before PHINode
       if (isa<PHINode>(I))

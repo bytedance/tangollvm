@@ -691,6 +691,15 @@ lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
     SDValue Incoming = getSDValue(V, Builder);
     if (GoGC) {
       LLVM_DEBUG(dbgs() << "Value " << *V << " GoGC\n");
+      if (isIntOrFPConstant(Incoming)) {
+        // We only put ConstantInt in DeoptArgs.
+        if (!isa<ConstantInt>(V)) {
+          // A LoadInst on Alloca with known state will be lowered to the constant
+          // directly. This constant is the same as Undef.
+          pushStackMapConstant(Ops, Builder, 0xFEFEFEFE);
+          continue;
+        }
+      }
       lowerIncomingStatepointValue(Incoming, false, Ops, MemRefs, Builder);
     } else {
       LLVM_DEBUG(dbgs() << "Value " << *V
