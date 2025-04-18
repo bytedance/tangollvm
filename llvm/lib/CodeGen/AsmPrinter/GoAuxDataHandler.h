@@ -66,6 +66,7 @@ private:
   std::vector<PCData> PCStackMapIndex;
 
   std::vector<FileEntry> FileTable;
+  bool FuncInfoHasStartLine;
 
   int32_t LastSPAdjust;
   DenseMap<const MachineInstr*, int32_t> PostSPMap;
@@ -109,6 +110,7 @@ private:
     resetFunction();
 
     FileTable.clear();
+    FuncInfoHasStartLine = false;
     MaxStatepointID = 0;
   }
 

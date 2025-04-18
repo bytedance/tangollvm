@@ -6232,12 +6232,21 @@ LSRInstance::LSRInstance(Loop *L, IVUsers &IU, ScalarEvolution &SE,
     return;
 
   if (TangoLLVM::isGoABIInternal(*L->getHeader()->getParent())) {
+    const DataLayout &DL = L->getHeader()->getDataLayout();
+    assert(DL.getPointerSize() == 8 && "invariant");
+    Type *PtrIntTy = Type::getInt64Ty(L->getHeader()->getContext());
+    auto IsPtrOrPtrLikeType = [&](Type *Ty) {
+      Ty = Ty->getScalarType();
+      // TODO: check the PtrIntTy is a pointer-like value.
+      return Ty->isPointerTy() || Ty == PtrIntTy;
+    };
     // Go: skip when the use has address type. This is because SCEV may generate
     // out-of-bound GEPs that may lead to invalid stackmap entries and confuse GC
     for (const LSRUse &LU : Uses) {
-      if (LU.Kind == LSRUse::Address) {
+      if (LU.Kind == LSRUse::Address)
         return;
-      }
+      if (IsPtrOrPtrLikeType(LU.WidestFixupType))
+        return;
     }
   }
 

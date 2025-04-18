@@ -60,6 +60,16 @@ void MCGoAuxData::beginModule(Module *M) {
 
   NamedMDNode *FileTabMeta = M->getNamedMetadata("go.local.filetab");
   MDNodeToFileTab(FileTable, FileTabMeta);
+
+  if (NamedMDNode *CUNodes = M->getNamedMetadata("go.version")) {
+    StringRef GoVersion = cast<MDString>(CUNodes->getOperand(0)->getOperand(0))->getString();
+    int GoMinorVersion = 0;
+    if (std::sscanf(GoVersion.data(), "go1.%d", &GoMinorVersion)) {
+      if (GoMinorVersion > 22) {
+        FuncInfoHasStartLine = true;
+      }
+    }
+  }
 }
 
 
@@ -122,18 +132,12 @@ void MCGoAuxData::computeFuncInfo(const MachineFunction *MF) {
   FuncInfo.FuncID = uint8_t(cast<ConstantAsMetadata>(FIM->getOperand(1))->getValue()->getUniqueInteger().getZExtValue());
   FuncInfo.FuncFlag = uint8_t(cast<ConstantAsMetadata>(FIM->getOperand(2))->getValue()->getUniqueInteger().getZExtValue());
 
-  // TODO:
-  const Module* TheModule = MF->getFunction().getParent();
   FuncInfo.StartLine = 0;
   FuncInfo.WriteStartLine = false;
-  if (NamedMDNode *CUNodes = TheModule->getNamedMetadata("go.version")) {
-    StringRef GoVersion = cast<MDString>(CUNodes->getOperand(0)->getOperand(0))->getString();
-    if (GoVersion.starts_with("go1.22")) {
-      FuncInfo.WriteStartLine = true;
-      FuncInfo.StartLine = uint32_t(cast<ConstantAsMetadata>(FIM->getOperand(3))->getValue()->getUniqueInteger().getZExtValue());
-    }
+  if (FuncInfoHasStartLine) {
+    FuncInfo.WriteStartLine = true;
+    FuncInfo.StartLine = uint32_t(cast<ConstantAsMetadata>(FIM->getOperand(3))->getValue()->getUniqueInteger().getZExtValue());
   }
-
 
   const MachineFrameInfo &MFI = MF->getFrameInfo();
   FuncInfo.Locals = uint32_t(MFI.getStackSize());

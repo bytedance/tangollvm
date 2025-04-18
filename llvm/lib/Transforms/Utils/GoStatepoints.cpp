@@ -1423,15 +1423,15 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
     }
   }
 
-#if 0
-  dbgs() << "Dump GCArgs for function " << Call->getParent()->getParent()->getName() << "\n";
-  dbgs() << "Call: " << *Call << "\n";
-  for (Value *V : BasePtrs)
-    dbgs() << "BasePtr: " << *V << "\n";
+  if (PrintLiveSet)  {
+    dbgs() << "Dump GCArgs for function " << Call->getParent()->getParent()->getName() << "\n";
+    dbgs() << "Call: " << *Call << "\n";
+    for (Value *V : BasePtrs)
+      dbgs() << "BasePtr: " << *V << "\n";
 
-  for (Value *V : PtrFields)
-    dbgs() << "Final GCArg: " << *V << "\n";
-#endif
+    for (Value *V : PtrFields)
+      dbgs() << "Final GCArg: " << *V << "\n";
+  }
 
   // Check Ill-formed pointer-like value
   for (Value *V : PtrFields) {
@@ -2072,7 +2072,9 @@ static bool hasStackMap(const CallBase *Call) {
     }
 
     if (Name == "runtime.typedmemclr"
-        || Name == "runtime.typedmemmove") {
+        || Name == "runtime.typedmemmove"
+        || Name == "runtime.wbZero"
+        || Name == "runtime.wbMove") {
       return false;
     }
   }
@@ -2415,7 +2417,9 @@ static void computeLiveInValues(BasicBlock::reverse_iterator Begin,
 
           // The only real use are Load/Store.
           // CallInst is a potential real use.
-          if (isa<LoadInst>(I) || isa<StoreInst>(I)) {
+          if (isa<LoadInst>(I) || isa<StoreInst>(I)
+              || isa<AtomicCmpXchgInst>(I)
+              || isa<AtomicRMWInst>(I) ) {
             Gen.insert(Base);
             LiveTmp.insert(Base);
             continue;
