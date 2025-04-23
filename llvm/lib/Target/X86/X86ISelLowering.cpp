@@ -27348,9 +27348,12 @@ SDValue X86TargetLowering::LowerGO_AVG64U(SDValue Op,
                                           SelectionDAG &DAG) const {
   SDLoc dl(Op);
   EVT VT = Op.getValueType();
-  SDValue add = DAG.getNode(ISD::ADD, dl, VT, Op.getOperand(0), Op.getOperand(1));
-  return SDValue(DAG.getMachineNode(X86::RCR64ri, dl, VT, add,
-                                    DAG.getTargetConstant(1, dl, MVT::i64)), 0);
+  SDValue add = DAG.getNode(X86ISD::ADD, dl, DAG.getVTList(VT, MVT::i32), Op.getOperand(0), Op.getOperand(1));
+  SDValue EFLAGS = DAG.getCopyToReg(DAG.getEntryNode(), dl, X86::EFLAGS,
+                                      add.getValue(1), SDValue());
+
+  return SDValue(DAG.getMachineNode(X86::RCR64ri, dl, VT, add.getValue(0),
+                                    DAG.getTargetConstant(1, dl, MVT::i64), EFLAGS), 0);
 }
 
 SDValue X86TargetLowering::LowerADDROFRETURNADDR(SDValue Op,
