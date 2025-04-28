@@ -119,11 +119,11 @@ static cl::opt<bool> PrintToZero("gogc-print-tozero", cl::Hidden,
 
 // Find a better place for inserting zeroing
 static cl::opt<bool> OptToZeroPosition("gogc-optimize-tozero-position", cl::Hidden,
-                                  cl::init(false));
+                                  cl::init(true));
 
 // Only zeroing necessary bits
 static cl::opt<bool> OptToZeroPattern("gogc-optimize-tozero-pattern", cl::Hidden,
-                                  cl::init(false));
+                                  cl::init(true));
 
 // Print the liveset found at the insert location
 static cl::opt<bool> PrintLiveSet("gogc-print-liveset", cl::Hidden,
@@ -144,6 +144,17 @@ static cl::opt<bool> VerifyAllocaCast("gogc-verify-alloca-cast", cl::Hidden,
 
 // Move GEP after some statepoints
 static cl::opt<bool> MoveGEPBackward("gogc-move-gep-backward", cl::Hidden,
+                                  cl::init(true));
+
+// Move ITP to Def
+static cl::opt<bool> MoveITPToDef("gogc-move-itp-to-def", cl::Hidden,
+                                  cl::init(true));
+
+// Move PTI to Use
+static cl::opt<bool> MovePTIToUse("gogc-move-pti-to-use", cl::Hidden,
+                                  cl::init(false));
+
+static cl::opt<bool> RehoistGEP("gogc-rehoist-gep", cl::Hidden,
                                   cl::init(true));
 
 // Print the liveset found at the insert location
@@ -613,9 +624,6 @@ struct GCPtrLivenessData {
 
   // On-Stack PARAMOUT
   SetVector<Value*> ParamOut;
-
-  // Record Stack Objects that can be used by Value
-  MapVector<Value*, SetVector<Value *>> ValueToStackObjects;
 
   // Alloca liveness.
 
@@ -1446,6 +1454,10 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
     } else {
       if (I->hasMetadata("go.pointerlike.illformed")) {
         IllFormedPtr.push_back(V);
+      } else if (I->hasMetadata("go.maybe.outofbounds")) {
+        Function *F = Call->getParent()->getParent();
+        // dbgs() << "Maybe out of bounds: " << *I << " in " << F->getName() << "\n";
+        IllFormedPtr.push_back(V);
       }
     }
   }
@@ -2111,6 +2123,19 @@ static bool replaceUndefPointerWithNullPointer(Function &F) {
   return Changed;
 }
 
+struct UpdateUse {
+  Value *Val;
+  Instruction *User;
+  unsigned OpNo;
+
+  UpdateUse(Value *V, Instruction *U, unsigned O)
+    : Val(V), User(U), OpNo(O) {}
+
+  void apply() {
+    User->setOperand(OpNo, Val);
+  }
+};
+
 /**
  * we change the code
  * ////////////////////
@@ -2131,25 +2156,89 @@ static bool replaceUndefPointerWithNullPointer(Function &F) {
  * so that %2 can be record in StatePoints and copystack can process %2
  * correctly
  */
-static bool moveITPToDef(Function &F) {
-  DenseMap<Instruction*, Instruction*> UseToDef;
-  for (BasicBlock& BB : F) {
-    for (Instruction& Inst : BB) {
-      if (IntToPtrInst* ITP = dyn_cast<IntToPtrInst>(&Inst)) {
-        if (Instruction *Def = dyn_cast<Instruction>(ITP->getOperand(0))) {
-          UseToDef[ITP] = Def;
-        }
+static bool moveITPToDefAndPTIToUse(Function &F) {
+  if (!MoveITPToDef && !MovePTIToUse)
+    return false;
+  bool Changed = false;
+  SmallVector<Instruction*, 4> ITPs;
+  SmallVector<Instruction*, 4> PTIs;
+  for (Instruction &I : instructions(F))
+    if (IntToPtrInst* ITP = dyn_cast<IntToPtrInst>(&I))
+      ITPs.push_back(ITP);
+    else if (PtrToIntInst* PTI = dyn_cast<PtrToIntInst>(&I))
+      PTIs.push_back(PTI);
+
+  if (MoveITPToDef) {
+    for (Instruction *ITP : ITPs) {
+      Instruction *Src = dyn_cast<Instruction>(ITP->getOperand(0));
+      if (Src == nullptr)
+        continue;
+
+      Changed = true;
+      if (isa<PHINode>(Src)) {
+        ITP->moveBefore(Src->getParent()->getFirstNonPHIOrDbg());
+      } else {
+        ITP->moveAfter(Src);
       }
     }
   }
-  for (auto& Pair : UseToDef) {
-    if (isa<PHINode>(Pair.second)) {
-      Pair.first->moveBefore(Pair.second->getParent()->getFirstNonPHIOrDbg());
-    } else {
-      Pair.first->moveAfter(Pair.second);
+
+  if (MovePTIToUse) {
+    IRBuilder<> Builder(F.getContext());
+    for (Instruction *PTI : PTIs) {
+      if (PTI->use_empty())
+        continue;
+
+      SmallVector<UpdateUse, 4> Actions;
+      bool Used = false;
+
+      DenseMap<Instruction*,Instruction*> IP2NewPTI;
+      auto NextPTI = [&](Instruction *IP) {
+        auto It = IP2NewPTI.find(IP);
+        if (It != IP2NewPTI.end()) {
+          return It->second;
+        }
+
+        if (!Used) {
+          Used = true;
+          PTI->moveBefore(IP);
+          IP2NewPTI[IP] = PTI;
+          return PTI;
+        }
+
+        Builder.SetInsertPoint(IP);
+        Instruction *NewPTI = cast<Instruction>(Builder.CreatePtrToInt(PTI->getOperand(0), PTI->getType()));
+        // TODO: can we copy all metadata?
+        NewPTI->copyMetadata(*PTI);
+        IP2NewPTI[IP] = NewPTI;
+        return NewPTI;
+      };
+
+      for (auto &U : PTI->uses()) {
+        Instruction *I = dyn_cast<Instruction>(U.getUser());
+        if (I == nullptr)
+          continue;
+
+        Instruction *IP = I;
+        if (PHINode *PN = dyn_cast<PHINode>(I)) {
+          unsigned Num = PHINode::getIncomingValueNumForOperand(U.getOperandNo());
+          BasicBlock *UseBlock = PN->getIncomingBlock(Num);
+          IP = UseBlock->getTerminator();
+        }
+
+        Changed = true;
+        Instruction *NewPTI = NextPTI(IP);
+        if (NewPTI != PTI) {
+          Actions.push_back({NewPTI, I, U.getOperandNo()});
+        }
+      }
+
+      for (auto &A : Actions)
+        A.apply();
     }
   }
-  return !UseToDef.empty();
+
+  return Changed;
 }
 
 static bool needsRewriteForGo(CallBase *Call) {
@@ -2287,7 +2376,7 @@ bool GoStatepoints::runOnFunction(Function &F, DominatorTree &DT,
       }
   }
 
-  MadeChange |= moveITPToDef(F);
+  MadeChange |= moveITPToDefAndPTIToUse(F);
   MadeChange |= insertParsePoints(F, DT, LI, TTI, ParsePointNeeded);
   MadeChange |= replaceUndefPointerWithNullPointer(F);
 
@@ -2733,15 +2822,19 @@ static void checkNegativeOffset(Function &F) {
     return false;
   };
 
-  std::function<bool(Value*)> isBadBasePointerForNegativeOffset = nullptr;
-  isBadBasePointerForNegativeOffset = [&](Value *Ptr) {
+
+  std::function<bool(Value*,SmallSet<Value*, 4>&)> isBadBasePointerForNegativeOffsetRecur = nullptr;
+  isBadBasePointerForNegativeOffsetRecur = [&](Value *Ptr, SmallSet<Value*, 4> &Visited) {
     if (isa<GetElementPtrInst>(Ptr)
         || isa<IntToPtrInst>(Ptr)) {
       return false;
     }
     if (PHINode *PHI = dyn_cast<PHINode>(Ptr)) {
+      if (Visited.count(PHI))
+        return false;
+      Visited.insert(PHI); // only need to avoid visiting PHI repeatedly
       for (Value *InVal : PHI->incoming_values())
-        if (isBadBasePointerForNegativeOffset(InVal))
+        if (isBadBasePointerForNegativeOffsetRecur(InVal, Visited))
           return true;
       // assume PHI are safe and always related to loop
       return false;
@@ -2756,6 +2849,11 @@ static void checkNegativeOffset(Function &F) {
       return true;
     }
     return false;
+  };
+
+  auto isBadBasePointerForNegativeOffset = [&](Value *Ptr) {
+    SmallSet<Value*, 4> Visited;
+    return isBadBasePointerForNegativeOffsetRecur(Ptr, Visited);
   };
 
   // Another check: separated in another loop for simplicity
@@ -2987,7 +3085,6 @@ static bool SameBlockUsage(Instruction *Def) {
   }
   return false;
 }
-
 
 static bool moveUnusedGEPAfterStatepoints(BasicBlock &BB, GCPtrLivenessData &Data) {
   // We only handle BB that has a single unique successor.
@@ -3767,50 +3864,24 @@ static void computeLiveInValues(DominatorTree &DT, LoopInfo &LI, Function &F,
     }
   } // while (!Worklist.empty())
 
-  //
   {
-    SmallSet<Value*, 10> AllocaSets;
-    // Flow all stack objects to live pointers
-    bool Changed = true;
-    while (Changed) {
-      Changed = false;
-
-      for (BasicBlock &BB : F) {
-        for (Instruction &I : BB) {
-          // skip non-pointer values
-          if (!isGoGCPointerOrPointerLikeValue(&I))
-            continue;
-          SetVector<Value*> &StackObjects = Data.ValueToStackObjects[&I];
-          size_t OldSize = StackObjects.size();
-          for (Value *V : I.operands()) {
-            // TODO: we only need to track Alloca with pointers, right?
-            if (isa<AllocaInst>(V) /*&& hasPointer(getValueElementType(V))*/) {
-              StackObjects.insert(V);
-              AllocaSets.insert(V);
-            } else if (isGoPreAllocated(V) /*&& hasPointer(getValueElementType(V))*/) {
-              StackObjects.insert(V);
-            } else if (Data.ValueToStackObjects.count(V)) {
-              SetVector<Value*> &SOs = Data.ValueToStackObjects[V];
-              StackObjects.set_union(SOs);
-            }
-          }
-          if (OldSize != StackObjects.size())
-            Changed = true;
-        }
-      }
-    }
-
-    for (Value* V : AllocaSets) {
-      Instruction* I = dyn_cast<Instruction>(V);
-      if (I->hasMetadata("go.stackobject.gcdata")) {
+    // TODO: collect all Alloca that has pointers
+    LLVMContext& Context = F.getContext();
+    Metadata *Zero = ConstantAsMetadata::get(ConstantInt::get(Type::getInt64Ty(Context), 0));
+    Metadata *Empty = MDString::get(Context, "go.empty");
+    MDNode *MD = MDNode::get(Context, {Zero, Zero, Empty});
+    for (Instruction &I : instructions(F)) {
+      AllocaInst *AI = dyn_cast<AllocaInst>(&I);
+      if (!AI)
         continue;
-      }
-      SmallVector<Metadata *, 3> MDs;
-      LLVMContext& Context = I->getContext();
-      MDs.push_back(llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt64Ty(Context), 0)));
-      MDs.push_back(llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(llvm::Type::getInt64Ty(Context), 0)));
-      MDs.push_back(llvm::MDString::get(I->getContext(), "go.empty"));
-      I->setMetadata("go.stackobject.gcdata", MDNode::get(I->getContext(), MDs));
+
+      if (!hasPointer(AI->getAllocatedType()))
+        continue;
+
+      if (AI->hasMetadata("go.stackobject.gcdata"))
+        continue;
+
+      AI->setMetadata("go.stackobject.gcdata", MD);
     }
   }
 
@@ -3828,13 +3899,10 @@ static void computeLiveInValues(DominatorTree &DT, LoopInfo &LI, Function &F,
   };
 
   if (MoveGEPBackward) {
-    std::vector<BasicBlock*> IPO;
-    IPO.reserve(F.size());
-    for (BasicBlock *BB : post_order(&F))
-      if (BB->getUniqueSuccessor())
-        IPO.push_back(BB);
-
-    for (BasicBlock *BB : llvm::reverse(IPO)) {
+    ReversePostOrderTraversal<Function *> RPOT(&F);
+    // for performance: we can avoid save GEP too early and we only
+    // move GEP following unconditional branches.
+    for (BasicBlock *BB : RPOT) {
       // until fixed point
       while (true) {
         if (!moveUnusedGEPAfterStatepoints(*BB, Data))
@@ -3843,6 +3911,246 @@ static void computeLiveInValues(DominatorTree &DT, LoopInfo &LI, Function &F,
     }
   }
 
+  if (RehoistGEP) {
+    // LICM may move GEP to an invalid position for GC.
+    // The root cause is that the base pointer of GEP is null
+    // at runtime. A bad pointer error may be triggered at runtime,
+    // when the stack is being copied.
+    // 1). We only handle hoisted GEPs, i.e., those annotated with go.hoist.
+    // 2). If a GEP never appears in any stack map, we do not move it.
+    // 3). If there is some use of base that dominates the GEP, we do not
+    //     move the GEP because any REAL use of the base is a null check.
+    // 4). We must have to move GEP to a proper place, before any use of the GEP
+    //     and after any real use of the Base
+    auto InAnyStackMap = [&](Instruction *I) {
+      // Fast check
+      if (!Data.LiveOut[I->getParent()].count(I))
+        return false;
+
+      SmallVector<BasicBlock*, 8> Worklist;
+      SmallSet<BasicBlock*, 8> Visited;
+
+      Worklist.push_back(I->getParent());
+      while (!Worklist.empty()) {
+        BasicBlock *Cur = Worklist.pop_back_val();
+        Visited.insert(Cur);
+
+        if (!Data.LiveOut[I->getParent()].count(I))
+          continue;
+
+        auto RI = Cur->rbegin();
+        ++RI; // skip terminator
+        if (RI != Cur->rend())
+          if (const CallBase* CB = dyn_cast<CallBase>(&*RI))
+            if (hasStackMap(CB))
+              return true; // used by some stack map
+
+        for (BasicBlock *Succ : successors(Cur)) {
+          if (Visited.count(Succ))
+            continue;
+
+          Worklist.push_back(Succ);
+        }
+
+      }
+
+      return false;
+    };
+
+
+    std::function<Instruction*(Instruction*,BasicBlock*)> IsDominatedBySelfOrRealUse;
+    IsDominatedBySelfOrRealUse = [&](Instruction *I, BasicBlock *Cur) {
+      if (isa<GetElementPtrInst>(I)
+          || isa<PtrToIntInst>(I)
+          || isa<IntToPtrInst>(I)
+          || isa<BitCastInst>(I)
+          || isa<ICmpInst>(I)
+          || isa<FCmpInst>(I)) {
+        for (auto &UU : I->uses()) {
+          Instruction *II = dyn_cast<Instruction>(UU.getUser());
+          if (II == nullptr)
+            continue;
+          if (auto RU = IsDominatedBySelfOrRealUse(II, Cur))
+            return RU;
+        }
+        return (Instruction*) nullptr;
+      }
+
+      if (BranchInst *BI = dyn_cast<BranchInst>(I)) {
+        // must be conditional
+        assert(BI->isConditional() && "invariant");
+        // TODO: a CmpInst of Ptr does not read from or write to the Ptr.
+        // TODO: If CmpInst is a null-check, we can conclude that the Ptr is non-null in one branch.
+        // It should not be considered as a real use.
+        // if (DT.dominates(BI->getSuccessor(0), Cur) || DT.dominates(BI->getSuccessor(1), Cur))
+        //   return cast<Instruction>(BI->getOperand(0));
+        return (Instruction*) nullptr;
+      }
+
+      // TODO: Call is tricky. Call can pass a null pointer without deference it.
+      if (DT.dominates(I->getParent(), Cur)) {
+        return I;
+      }
+
+      return (Instruction*) nullptr;
+    };
+
+
+    std::function<Instruction*(Value*,BasicBlock*)> IsDominatedByAnyUseOf;
+    IsDominatedByAnyUseOf = [&](Value*V, BasicBlock *Cur) {
+      // If V itself is a GEP, we should check its base;
+      if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(V)) {
+        return IsDominatedByAnyUseOf(GEP->getPointerOperand(), Cur);
+      }
+
+      // strip all pointer casts here because here is the start point.
+      V = V->stripPointerCasts();
+
+      for (auto &U : V->uses()) {
+        Instruction *I = dyn_cast<Instruction>(U.getUser());
+        if (!I)
+          continue;
+
+        if (auto *RU = IsDominatedBySelfOrRealUse(I, Cur))
+          return RU;
+      }
+
+      return (Instruction*) nullptr;
+    };
+
+
+    auto UpdateCommonDom = [&](BasicBlock* Common, BasicBlock *New) {
+      if (Common == nullptr)
+        return New;
+      if (Common == New)
+        return New;
+      return DT.findNearestCommonDominator(Common, New);
+    };
+
+    auto GetUseCommonDom = [&](Instruction* V) {
+        BasicBlock *CommonDom = nullptr;
+        // dbgs() << "Checking " << *GEP << " in " << F.getName() << "\n";
+        for (auto &U : V->uses()) {
+          Instruction *I = dyn_cast<Instruction>(U.getUser());
+          if (!I)
+            continue;
+          if (PHINode *PN = dyn_cast<PHINode>(I)) {
+            unsigned Num = PHINode::getIncomingValueNumForOperand(U.getOperandNo());
+            CommonDom = UpdateCommonDom(CommonDom, PN->getIncomingBlock(Num));
+          } else {
+            CommonDom = UpdateCommonDom(CommonDom, I->getParent());
+          }
+        }
+
+        return CommonDom;
+    };
+
+    // 1). Collect all candidates
+    SmallVector<Value*, 16> ToBeMoved;
+    for (Instruction &I : instructions(F)) {
+      if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(&I)) {
+        if (GEP->hasMetadata("go.hoisted")) {
+          if (!InAnyStackMap(GEP)) {
+            // dbgs() << "A hoisted GEP is not used in any stack map: " << *GEP << " in " << F.getName() << "\n";
+            continue;
+          }
+
+          if (auto RU = IsDominatedByAnyUseOf(GEP->getPointerOperand(), GEP->getParent())) {
+            // Note the real use may be in the same block as GEP.
+            // In this case, the real USE of base may not dominate the GEP.
+            // It is still safe here because the real USE and the GEP can be executed together
+            // unconditionally.
+            // dbgs() << "A hoisted GEP is dominated by some real use of the GEP: " << *GEP << " and use: " << *RU << " in " << F.getName() << "\n";
+            continue;
+          }
+
+          BasicBlock *CommonDom = GetUseCommonDom(GEP);
+          if (CommonDom == nullptr || CommonDom == GEP->getParent())
+            continue;
+
+          auto *DefNode = DT.getNode(GEP->getParent());
+          auto *DomNode = DT.getNode(CommonDom);
+          BasicBlock *NewDst = nullptr;
+          while (DomNode != nullptr) {
+            if (DomNode == DefNode) {
+              break;
+            }
+            DomNode = DomNode->getIDom();
+
+            if (auto RU = IsDominatedByAnyUseOf(GEP->getPointerOperand(), DomNode->getBlock())) {
+              // Test if we can move to DomNode.
+              NewDst = DomNode->getBlock();
+            }
+          }
+
+          // dbgs() << "The DOM of all use of " << *GEP << " is " << CommonDom->getName() << "\n";
+          ToBeMoved.push_back(GEP);
+          if (NewDst != nullptr) {
+            // dbgs() << "We have found a better one: " << NewDst->getName() << " than " << CommonDom->getName()  << "\n";
+            assert(DT.dominates(GEP->getParent(), NewDst) && "invariant");
+            ToBeMoved.push_back(NewDst);
+          } else {
+            assert(DT.dominates(GEP->getParent(), CommonDom) && "invariant");
+            ToBeMoved.push_back(CommonDom);
+          }
+        }
+      }
+    }
+
+    if (!ToBeMoved.empty()) {
+      for (unsigned i = 0; i < ToBeMoved.size(); i +=2) {
+        GetElementPtrInst *GEP = cast<GetElementPtrInst>(ToBeMoved[i]);
+        BasicBlock *Dst = cast<BasicBlock>(ToBeMoved[i + 1]);
+        // dbgs() << "Move GEP " << *GEP << " to " << Dst->getName() << " in " << F.getName() << "\n";
+        assert(Data.LiveIn[Dst].count(GEP) && "invariant: GEP must be live in DOM");
+
+        BasicBlock *Src = GEP->getParent();
+        Value *Base = GEP->getPointerOperand();
+
+        // Remove GEP from current BB's LiveSet
+        Data.LiveSet[Src].remove(GEP);
+        // Replace GEP by Base in LiveOut
+        Data.LiveOut[Src].remove(GEP);
+        Data.LiveOut[Src].insert(Base);
+
+        SmallVector<BasicBlock*, 32> Worklist;
+        SmallSet<BasicBlock*, 32> Visited;
+
+        Worklist.push_back(Src);
+        while (!Worklist.empty()) {
+          BasicBlock *Cur = Worklist.pop_back_val();
+          Visited.insert(Cur);
+
+          for (BasicBlock *Succ : successors(Cur)) {
+            if (Visited.count(Succ))
+              continue;
+
+            if (Succ == Dst)
+              continue;
+
+            // Not live-through this GEP
+            if (!Data.LiveOut[Succ].count(GEP))
+              continue;
+
+            // Replace GEP by Base in LiveOut and LiveIn
+            Data.LiveIn[Succ].remove(GEP);
+            Data.LiveIn[Succ].insert(Base);
+            Data.LiveOut[Succ].remove(GEP);
+            Data.LiveOut[Succ].insert(Base);
+
+            Worklist.push_back(Succ);
+          }
+        }
+
+        Data.LiveSet[Dst].insert(GEP);
+        Data.LiveIn[Dst].remove(GEP);
+        Data.LiveIn[Dst].insert(Base);
+
+        //TODO: Do we need to update DebugLoc here?
+        GEP->moveBefore(Dst->getFirstNonPHIOrDbg());
+      }
+    }
+  }
 
   // After Liveout is finalized, we can compute live-in values at each CallInst.
   for (BasicBlock &BB : F) {

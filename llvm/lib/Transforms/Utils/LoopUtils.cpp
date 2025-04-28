@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-04-28.
 //===----------------------------------------------------------------------===//
 //
 // This file defines common loop utility functions.
@@ -38,6 +40,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/ProfDataUtils.h"
+#include "llvm/IR/TangoLLVM.h"
 #include "llvm/IR/ValueHandle.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
@@ -1925,8 +1928,48 @@ Value *llvm::addRuntimeChecks(
     // bound0 = (B.Start < A.End)
     // bound1 = (A.Start < B.End)
     //  IsConflict = bound0 & bound1
-    Value *Cmp0 = ChkBuilder.CreateICmpULT(A.Start, B.End, "bound0");
-    Value *Cmp1 = ChkBuilder.CreateICmpULT(B.Start, A.End, "bound1");
+    Value *Cmp0, *Cmp1;
+    if (TangoLLVM::isGoABIInternal(*Loc->getParent()->getParent())) {
+      // In Go, we cannot expose End+1 to GC. We have to use ULE End instead of ULT End+1
+      // We only check GEP here because we should not load an invalid end pointer.
+      // TODO: Check inttoptr
+      // Note that we have no need to check start because Start points to the
+      // first ACCESSED byte.
+      auto CheckPointerAndCmp = [&](Value *Start, Value *End, StringRef Name) {
+        // First, mark the original End.
+        if (Instruction *I = dyn_cast<Instruction>(End))
+          I->setMetadata("go.maybe.outofbounds", MDNode::get(I->getContext(), {}));
+        Value *Cmp;
+        if (auto *GEP = dyn_cast<GetElementPtrInst>(End)) {
+          // The easiest way to create a end pointer from End+1 is to substract 1
+          auto IP = ChkBuilder.GetInsertPoint();
+          ChkBuilder.SetInsertPoint(GEP);
+          Type *IntIdxTy = GEP->getDataLayout().getIndexType(GEP->getType());
+          if (GEP->getSourceElementType()->isIntegerTy(8) && GEP->getNumIndices() == 1) {
+            // Create a New GEP
+            Value *Base = GEP->getOperand(0);
+            Value *Offset = GEP->getOperand(1);
+            Value *OffsetM1 = ChkBuilder.CreateSub(Offset, ConstantInt::get(IntIdxTy, 1));
+            End = ChkBuilder.CreatePtrAdd(Base, OffsetM1, "go.norm.ptr.end");
+          } else {
+            Value *M1 = ConstantInt::get(IntIdxTy, uint64_t(-1));
+            End = ChkBuilder.CreatePtrAdd(End, M1, "go.norm.ptr.end");
+          }
+
+          ChkBuilder.SetInsertPoint(IP);
+          Cmp = ChkBuilder.CreateICmpULE(Start, End, Name);
+        } else {
+          Cmp = ChkBuilder.CreateICmpULT(Start, End, Name);
+        }
+        return Cmp;
+      };
+
+      Cmp0 = CheckPointerAndCmp(A.Start, B.End, "bound0");
+      Cmp1 = CheckPointerAndCmp(B.Start, A.End, "bound1");
+    } else {
+      Cmp0 = ChkBuilder.CreateICmpULT(A.Start, B.End, "bound0");
+      Cmp1 = ChkBuilder.CreateICmpULT(B.Start, A.End, "bound1");
+    }
     Value *IsConflict = ChkBuilder.CreateAnd(Cmp0, Cmp1, "found.conflict");
     if (A.StrideToCheck) {
       Value *IsNegativeStride = ChkBuilder.CreateICmpSLT(

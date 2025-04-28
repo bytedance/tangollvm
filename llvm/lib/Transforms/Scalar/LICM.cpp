@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-04-28.
 //===----------------------------------------------------------------------===//
 //
 // This pass performs loop invariant code motion, attempting to remove as much
@@ -72,6 +74,7 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/PredIteratorCache.h"
+#include "llvm/IR/TangoLLVM.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
@@ -1740,6 +1743,34 @@ static void hoist(Instruction &I, const DominatorTree *DT, const Loop *CurLoop,
                   BasicBlock *Dest, ICFLoopSafetyInfo *SafetyInfo,
                   MemorySSAUpdater &MSSAU, ScalarEvolution *SE,
                   OptimizationRemarkEmitter *ORE) {
+  bool MarkHoisted = false;
+  if (TangoLLVM::isGoABIInternal(*I.getParent()->getParent())) {
+    // We only handle GEP now because other pointers (e.g., loaded from memory)
+    // cannot be an invalid GC pointer.
+    // TODO: we should also handle int and inttoptr
+    auto IsNonNullPtr = [&](Value *Ptr) {
+      if (isa<AllocaInst>(Ptr)
+          || isa<GlobalValue>(Ptr))
+        return true;
+
+      if (CallBase *CB = dyn_cast<CallBase>(Ptr))
+        // TODO: add CallSite attr?
+        if (Function *Callee = CB->getCalledFunction())
+          if (Callee->getAttributes().hasRetAttr(Attribute::NonNull))
+            return true;
+
+      // TODO: do we consider GEP over non-null base?
+      return false;
+    };
+    if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(&I)) {
+      Value *Base = GEP->getPointerOperand();
+      if (!IsNonNullPtr(Base) && !SafetyInfo->isGuaranteedToExecute(I, DT, CurLoop)) {
+        // dbgs() << "Hoisting a dangerous GEP " << *GEP << " in BB " << I.getParent()->getName() << " in " << GEP->getParent()->getParent()->getName() << "\n";
+        MarkHoisted = true;
+      }
+    }
+  }
+
   LLVM_DEBUG(dbgs() << "LICM hoisting to " << Dest->getNameOrAsOperand() << ": "
                     << I << "\n");
   ORE->emit([&]() {
@@ -1772,6 +1803,8 @@ static void hoist(Instruction &I, const DominatorTree *DT, const Loop *CurLoop,
 
   I.updateLocationAfterHoist();
 
+  if (MarkHoisted)
+    I.setMetadata("go.hoisted", MDNode::get(I.getContext(), {}));
   if (isa<LoadInst>(I))
     ++NumMovedLoads;
   else if (isa<CallInst>(I))
