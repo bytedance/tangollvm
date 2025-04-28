@@ -89,6 +89,7 @@
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/Statepoint.h"
 #include "llvm/IR/Type.h"
+#include "llvm/IR/TangoLLVM.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Value.h"
 #include "llvm/MC/MCContext.h"
@@ -2249,14 +2250,19 @@ void SelectionDAGBuilder::visitRet(const ReturnInst &I) {
       else if (F->getAttributes().hasRetAttr(Attribute::ZExt))
         ExtendKind = ISD::ZERO_EXTEND;
 
+      bool isGoABIInternal = TangoLLVM::isGoABIInternal(*F);
       LLVMContext &Context = F->getContext();
       bool RetInReg = F->getAttributes().hasRetAttr(Attribute::InReg);
 
       for (unsigned j = 0; j != NumValues; ++j) {
         EVT VT = ValueVTs[j];
 
-        if (ExtendKind != ISD::ANY_EXTEND && VT.isInteger())
-          VT = TLI.getTypeForExtReturn(Context, VT, ExtendKind);
+        ISD::NodeType ValueExtendKind = ExtendKind;
+        if (VT == MVT::i1 && isGoABIInternal)
+          ValueExtendKind = ISD::ZERO_EXTEND;
+
+        if (ValueExtendKind != ISD::ANY_EXTEND && VT.isInteger())
+          VT = TLI.getTypeForExtReturn(Context, VT, ValueExtendKind);
 
         CallingConv::ID CC = F->getCallingConv();
 
@@ -2265,7 +2271,7 @@ void SelectionDAGBuilder::visitRet(const ReturnInst &I) {
         SmallVector<SDValue, 4> Parts(NumParts);
         getCopyToParts(DAG, getCurSDLoc(),
                        SDValue(RetOp.getNode(), RetOp.getResNo() + j),
-                       &Parts[0], NumParts, PartVT, &I, CC, ExtendKind);
+                       &Parts[0], NumParts, PartVT, &I, CC, ValueExtendKind);
 
         // 'inreg' on function refers to return value
         ISD::ArgFlagsTy Flags = ISD::ArgFlagsTy();
@@ -2285,9 +2291,9 @@ void SelectionDAGBuilder::visitRet(const ReturnInst &I) {
         }
 
         // Propagate extension type if any
-        if (ExtendKind == ISD::SIGN_EXTEND)
+        if (ValueExtendKind == ISD::SIGN_EXTEND)
           Flags.setSExt();
-        else if (ExtendKind == ISD::ZERO_EXTEND)
+        else if (ValueExtendKind == ISD::ZERO_EXTEND)
           Flags.setZExt();
 
         for (unsigned i = 0; i < NumParts; ++i) {
