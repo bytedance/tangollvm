@@ -203,9 +203,16 @@ computeBitVector(Function * Fn, uint64_t StackSize, bool requireFP,
       if (Loc.Size > PtrSize) {
         assert(Loc.Type == StackMaps::Location::Indirect);
         for (unsigned j = 0; j < Loc.Size / PtrSize; j++) {
-          if (Idx + j >= BV->size())
-            BV->resize(Idx + j + 1);
-          BV->set(Idx + j);
+          unsigned SlotIndex = 0;
+          if (IsLocal) {
+            assert(Idx >= j && "stack grows down");
+            SlotIndex = Idx - j;
+          } else {
+            SlotIndex = Idx + j;
+          }
+          if (SlotIndex >= BV->size())
+            BV->resize(SlotIndex + 1);
+          BV->set(SlotIndex);
         }
         break;
       }
