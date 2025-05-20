@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-05-19.
 //===----------------------------------------------------------------------===//
 //
 // This transformation analyzes and transforms the induction variables (and
@@ -1079,6 +1081,25 @@ linearFunctionTestReplace(Loop *L, BasicBlock *ExitingBB,
   // will make old comparison dead.
   BI->setCondition(Cond);
   DeadInsts.emplace_back(OrigCond);
+
+  if (!OrigCond->use_empty()) {
+    // A rare case is OrigCond is used by PHI in the successors of BI
+    bool HasUnknownUse = false;
+    for (auto &U : OrigCond->uses()) {
+      if (PHINode *PN = dyn_cast<PHINode>(U.getUser())) {
+        unsigned Num = PHINode::getIncomingValueNumForOperand(U.getOperandNo());
+        BasicBlock *UseBlock = PN->getIncomingBlock(Num);
+        if ((PN->getParent() == BI->getSuccessor(0) || PN->getParent() == BI->getSuccessor(1))
+            && UseBlock == BI->getParent())
+          continue;
+      }
+      HasUnknownUse = true;
+      break;
+    }
+    if (!HasUnknownUse) {
+      OrigCond->replaceAllUsesWith(Cond);
+    }
+  }
 
   ++NumLFTR;
   return true;
