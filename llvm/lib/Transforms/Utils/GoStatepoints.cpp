@@ -2909,7 +2909,8 @@ static void checkNegativeOffset(Function &F) {
             Off = Op0;
           }
         } else {
-          dbgs() << "Not a pointer like value: " << *BO << "\n";
+          if (PrintObsoleted)    
+            dbgs() << "Not a pointer like value: " << *BO << "\n";
         }
       } else if (BO->getOpcode() == Instruction::Sub) {
         if (isPositiveOffset(Op1)) {
