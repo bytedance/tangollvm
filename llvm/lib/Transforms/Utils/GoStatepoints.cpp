@@ -157,6 +157,9 @@ static cl::opt<bool> MovePTIToUse("gogc-move-pti-to-use", cl::Hidden,
 static cl::opt<bool> RehoistGEP("gogc-rehoist-gep", cl::Hidden,
                                   cl::init(true));
 
+static cl::opt<bool> PrintMoved("gogc-print-moved", cl::Hidden,
+                                  cl::init(false));
+
 // Print the liveset found at the insert location
 static cl::opt<bool> PrintObsoleted("gogc-print-obsoleted", cl::Hidden,
                                   cl::init(false));
@@ -1051,6 +1054,13 @@ static Value *findBasePointer(Value *I, DefiningValueMapTy &Cache) {
     if (auto *PTI = dyn_cast<PtrToIntInst>(I))
       return findBasePointer(PTI->getOperand(0), Cache);
 
+    MDNode *MD = cast<Instruction>(I)->getMetadata("go.pointerlike");
+    if (!MD) {
+      dbgs() << "try to find the base pointer for "
+        << (MD ? "pointer-like values" : "non-pointer values") << *I << "\n";
+      report_fatal_error("must be a pointer-like non-pointer value");
+    }
+
     if (isa<PHINode>(I) || isa<SelectInst>(I) || isa<ShuffleVectorInst>(I)) {
       return I;
     }
@@ -1068,12 +1078,6 @@ static Value *findBasePointer(Value *I, DefiningValueMapTy &Cache) {
       return BI;
     }
 
-    MDNode *MD = cast<Instruction>(I)->getMetadata("go.pointerlike");
-    if (!MD) {
-      dbgs() << "try to find the base pointer for "
-        << (MD ? "pointer-like values" : "non-pointer values") << *I << "\n";
-      report_fatal_error("must be a pointer-like non-pointer value");
-    }
     return I;
   }
 
@@ -2387,7 +2391,7 @@ bool GoStatepoints::runOnFunction(Function &F, DominatorTree &DT,
       }
   }
 
-  MadeChange != legalizeAlloca(F);
+  MadeChange |= legalizeAlloca(F);
   MadeChange |= moveITPToDefAndPTIToUse(F);
   MadeChange |= insertParsePoints(F, DT, LI, TTI, ParsePointNeeded);
   MadeChange |= replaceUndefPointerWithNullPointer(F);
@@ -4071,7 +4075,10 @@ static void computeLiveInValues(DominatorTree &DT, LoopInfo &LI, Function &F,
     SmallVector<Value*, 16> ToBeMoved;
     for (Instruction &I : instructions(F)) {
       if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(&I)) {
-        if (GEP->hasMetadata("go.hoisted")) {
+        // For newly created GEP for moved GEP from front
+        // TODO: currently we only mark moved GEP in LICM. We need to mark more such
+        // pointers in all optimizations.
+        if (!GEP->hasMetadata("go.gep") || GEP->hasMetadata("go.hoisted")) {
           if (!InAnyStackMap(GEP)) {
             // dbgs() << "A hoisted GEP is not used in any stack map: " << *GEP << " in " << F.getName() << "\n";
             continue;
@@ -4123,7 +4130,10 @@ static void computeLiveInValues(DominatorTree &DT, LoopInfo &LI, Function &F,
       for (unsigned i = 0; i < ToBeMoved.size(); i +=2) {
         GetElementPtrInst *GEP = cast<GetElementPtrInst>(ToBeMoved[i]);
         BasicBlock *Dst = cast<BasicBlock>(ToBeMoved[i + 1]);
-        // dbgs() << "Move GEP " << *GEP << " to " << Dst->getName() << " in " << F.getName() << "\n";
+
+        if (PrintMoved)
+          dbgs() << "move GEP " << *GEP << " to " << Dst->getName() << " in " << F.getName() << "\n";
+
         assert(Data.LiveIn[Dst].count(GEP) && "invariant: GEP must be live in DOM");
 
         BasicBlock *Src = GEP->getParent();

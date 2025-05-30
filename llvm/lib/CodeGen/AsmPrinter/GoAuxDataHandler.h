@@ -31,7 +31,6 @@ namespace llvm {
 class AsmPrinter;
 class MCSymbol;
 class DILocation;
-class MCGoFileEntry;
 
 class MCGoAuxData : public DebugHandlerBase {
 public:
