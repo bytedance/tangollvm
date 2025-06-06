@@ -4082,6 +4082,9 @@ private:
       if (int NI = NewPhi->getBasicBlockIndex(BB); NI >= 0) {
         NewGEP = NewPhi->getIncomingValue(NI);
       } else {
+        // insert GEP to entry may result in invalid pointers at state point for GO
+        if (TangoLLVM::isGoABIInternal(*GEPI.getFunction()))
+          IRB.SetInsertPoint(BB->getTerminator());
         SmallVector<Value *> NewOps = GetNewOps(Op);
         NewGEP =
             IRB.CreateGEP(SourceTy, NewOps[0], ArrayRef(NewOps).drop_front(),

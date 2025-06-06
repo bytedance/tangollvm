@@ -899,9 +899,18 @@ static Value* findBaseDefiningValue(Value *I) {
 
   if (CastInst *CI = dyn_cast<CastInst>(I)) {
     Value *Def = CI->stripPointerCasts();
-    if (isa<IntToPtrInst>(Def))
-      // Pointer converted from integer is a base.
+    // "%1 = inttoptr (ptrtoint ptr %alloca to i64) to ptr"
+    // points to the alloca base and will be converted to StackMaps::Direct
+    // which lacks the pointer bitmap, which will cause some ptr fields of
+    // alloca not to be marked by GC. Currently we only support this simplest
+    // situation, need to extended in the future
+    if (IntToPtrInst* ITP = dyn_cast<IntToPtrInst>(Def)) {
+      if (PtrToIntInst *PTI = dyn_cast<PtrToIntInst>(ITP->getOperand(0)))
+        return findBaseDefiningValue(PTI->getOperand(0));
       return Def;
+    } else if (PtrToIntInst* PTI = dyn_cast<PtrToIntInst>(Def)) {
+      return findBaseDefiningValue(PTI->getOperand(0));
+    }
 
     // Pointer-to-pointer and int-to-pointer casts are handled above.
     // We don't know how to handle other type of casts.
@@ -932,10 +941,10 @@ static Value* findBaseDefiningValue(Value *I) {
         return Base;
     }
 
-    // The base of this GEP is the base if all indices are zero. Otherwise
+    // The base of this GEP is the base if all indices are constant. Otherwise
     // we cannot simply return the base pointer; instead, we have to treat
     // the GEP as a new base value
-    if (GEP->hasAllZeroIndices())
+    if (GEP->hasAllConstantIndices())
       return findBaseDefiningValue(GEP->getPointerOperand());
     else
       return I;

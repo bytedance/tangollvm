@@ -3370,7 +3370,7 @@ void X86FrameLowering::adjustForSegmentedStacks(
       return;
     }
 
-    if (StackSize < StackSmall) {
+    if (StackSize < StackSmall && !MF.getFunction().hasFnAttribute("go-keep-attr")) {
       // see obj6.go
       // check whether this function is a leaf function with only call to some
       // runtime functions.

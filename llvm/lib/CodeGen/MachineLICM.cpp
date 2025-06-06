@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-06-06.
 //===----------------------------------------------------------------------===//
 //
 // This pass performs loop invariant code motion on machine instructions. We
@@ -40,6 +42,7 @@
 #include "llvm/CodeGen/TargetSchedule.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/DebugLoc.h"
+#include "llvm/IR/TangoLLVM.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/MC/MCInstrDesc.h"
 #include "llvm/MC/MCRegister.h"
@@ -1594,6 +1597,14 @@ bool MachineLICMBase::MayCSE(MachineInstr *MI) {
 unsigned MachineLICMBase::Hoist(MachineInstr *MI, MachineBasicBlock *Preheader,
                                 MachineLoop *CurLoop) {
   MachineBasicBlock *SrcBlock = MI->getParent();
+
+  MachineFunction* MF = SrcBlock->getParent();
+  if (TangoLLVM::isGoABIInternal(MF->getFunction()) && MI->getOpcode() == TargetOpcode::INLINEASM) {
+    const MachineOperand &OP = MI->getOperand(0);
+    if (OP.isSymbol() && StringRef(OP.getSymbolName()) == "nop") {
+      return HoistResult::NotHoisted;
+    }
+  }
 
   // Disable the instruction hoisting due to block hotness
   if ((DisableHoistingToHotterBlocks == UseBFI::All ||

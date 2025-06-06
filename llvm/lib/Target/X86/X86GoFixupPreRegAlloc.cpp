@@ -89,6 +89,7 @@ private:
                               bool isRegIndex);
   bool optimizeOpSP();
   bool cloneStackPointers();
+  bool cloneRdiIfNeeded();
   bool checkHoistedPointers();
   bool checkDerivedPointers();
 
@@ -139,6 +140,7 @@ bool X86GoFixupPreRegAllocPass::runOnMachineFunction(MachineFunction &fn) {
 
   Changed |= optimizeOpSP();
   Changed |= cloneStackPointers();
+  Changed |= cloneRdiIfNeeded();
   Changed |= checkHoistedPointers();
   Changed |= checkDerivedPointers();
 
@@ -583,6 +585,120 @@ bool X86GoFixupPreRegAllocPass::cloneStackPointers() {
   return Changed;
 }
 
+// entry:
+//   lea 0x40(%rsp),%rcx
+//   add $-0x20,%rcx
+//   mov %rcx,0x1c8(%rsp)
+//...
+// loope_header:
+//   statepoint             // 0x1c8(%rsp) not get updated when copystack
+//   mov 0x1c8(%rsp), rdi
+//   duffzero
+//   ...
+// loop_body:
+//   mov 0xd0(rsp), rax
+bool X86GoFixupPreRegAllocPass::cloneRdiIfNeeded() {
+  bool Changed = false;
+  uint16_t ChangedNum = 0;
+
+  auto GetFuncName = [](MachineInstr* MI) -> StringRef {
+    if (MI->isCall()) {
+      for (const MachineOperand &MO : MI->operands()) {
+        if (MO.isGlobal()) {
+          const GlobalValue *GV = MO.getGlobal();
+          if (const Function *F = dyn_cast<Function>(GV)) {
+            return F->getName();
+          }
+        }
+      }
+    }
+    return "";
+  };
+  // duffzero -> rdi
+  DenseMap<MachineInstr*, MachineInstr*> Calls;
+  for (MachineBasicBlock &MBB : *MF) {
+    for (MachineInstr &MI : MBB) {
+      if (GetFuncName(&MI) == "runtime.duffzero") {
+        MachineInstr *Pre = MI.getPrevNode();
+        if (MachineOperand &MO = Pre->getOperand(0);
+            Pre->isCopy() && MO.isReg() && MO.getReg() == X86::RDI &&
+            Register::isVirtualRegister(Pre->getOperand(1).getReg()))
+          Calls.insert({&MI, Pre});
+      }
+    }
+  }
+  if (Calls.empty())
+    return false;
+
+  auto GetDef = [&](MachineInstr* MI, uint8_t& Found) -> MachineInstr* {
+    int FrameIndex;
+    Register Reg = TII->isLoadStackSlotAddress(*MI, FrameIndex);
+    if (Reg) {
+      Found |= 0x2;
+      return nullptr;
+    }
+    if (MI->isCopy() && MI->getOperand(1).isReg()) {
+      Reg = MI->getOperand(1).getReg();
+    } else if (MI->getOpcode() == X86::ADD64ri32 ||
+               MI->getOpcode() == X86::ADD64ri8 ||
+               MI->getOpcode() == X86::SUB64ri32 ||
+               MI->getOpcode() == X86::SUB64ri8) {
+      Found |= 0x1;
+      Reg = MI->getOperand(1).getReg();
+    }
+    if (Register::isVirtualRegister(Reg))
+      return MRI->getVRegDef(Reg);
+
+    return nullptr;
+  };
+
+  for (auto &P : Calls) {
+    SmallVector<MachineInstr*> Stack;
+    MachineInstr* Src = P.second;
+    // todo cross state point check
+    uint8_t Found = 0x0;
+    while (MachineInstr* Def = GetDef(Src, Found)) {
+      Stack.push_back(Def);
+      Src = Def;
+    }
+    if (Found != 0x3)
+      continue;
+
+    Changed = true;
+    ChangedNum++;
+
+    Register PreReg = MCRegister::NoRegister;
+    SmallVector<MachineInstr*> OldMIs;
+    while (!Stack.empty()) {
+      MachineInstr *OldMI = Stack.pop_back_val();
+      OldMIs.push_back(OldMI);
+      Register OldReg = OldMI->getOperand(0).getReg();
+      unsigned OldSubReg = OldMI->getOperand(0).getSubReg();
+      Register NewReg = MRI->createVirtualRegister(MRI->getRegClass(OldReg));
+      MachineInstr &NewMI = TII->duplicate(*P.first->getParent(), P.second, *OldMI);
+      NewMI.getOperand(0).setReg(NewReg);
+      if (OldSubReg)
+        NewMI.getOperand(0).setSubReg(OldSubReg);
+      if (Register::isVirtualRegister(PreReg)) {
+        unsigned OldPreSubReg = OldMI->getOperand(1).getSubReg();
+        NewMI.getOperand(1).setReg(PreReg);
+        if (OldPreSubReg)
+          NewMI.getOperand(1).setSubReg(OldPreSubReg);
+      }
+      PreReg = NewReg;
+      if (Stack.empty())
+        P.second->getOperand(1).setReg(NewReg);
+    }
+    while (!OldMIs.empty()) {
+      MachineInstr* MI = OldMIs.pop_back_val();
+      if (MRI->use_empty(MI->getOperand(0).getReg()))
+        MI->eraseFromParent();
+    }
+  }
+
+  return Changed;
+}
+
 // This should be implemented as a target independent pass.
 // However, we need to place it before RA because other
 // machine optimization may move pointers. During RA, we should
@@ -727,6 +843,8 @@ bool X86GoFixupPreRegAllocPass::checkDerivedPointers() {
     return false;
 
   bool Changed = false;
+  DenseSet<unsigned> CandidateRegs;
+  DenseMap<unsigned, SmallSetVector<unsigned, 8>> BaseToDerived;
   DenseMap<unsigned, SmallSetVector<unsigned, 8>> DerivedToBase;
   DenseMap<MachineBasicBlock*, SetVector<unsigned>> LiveInValues;
   DenseMap<MachineBasicBlock*, SetVector<unsigned>> LiveOutValues;
@@ -757,47 +875,77 @@ bool X86GoFixupPreRegAllocPass::checkDerivedPointers() {
   };
   ////// Debug only
 
-  auto GetBaseReg = [&](MachineInstr &MI) -> unsigned {
+  auto GetBaseReg = [&](MachineInstr &MI) -> Register {
+    Register Result = MCRegister::NoRegister;
     auto Opcode = MI.getOpcode();
-    // don't process SUB, because the pointer generated by SUB may not
-    // point to the same Object(array or something else) with Base.
-    // The offset of ADD must be greater than zero.
-    if (Opcode == X86::LEA64r ||
-        (((Opcode == X86::ADD64ri32 || Opcode == X86::ADD64ri8) &&
-         MI.getOperand(2).isImm() && MI.getOperand(2).getImm() >= 0)
-        || ((Opcode == X86::SUB64ri32 || Opcode == X86::SUB64ri8) &&
-         MI.getOperand(2).isImm() && MI.getOperand(2).getImm() <= 0))) {
-      if (MI.getOperand(1 + X86::AddrBaseReg).isReg()) {
-        // FI is already handled by cloneStackPointers, and we don't care about
-        // AddrIndexReg since we only add Reg to StatePoint and do nothing else
-        auto Reg = MI.getOperand(1 + X86::AddrBaseReg).getReg();
-        if (Register::isVirtualRegister(Reg))
-          return Reg;
-      }
+    // just handle these three cases now. we don't care if the derived/base
+    // pointer is a valid pointer or not, because we only add it into
+    // state point when the base/derived pointer is in the state point
+    switch (Opcode) {
+    case X86::LEA64r: {
+      MachineOperand &MOBase = MI.getOperand(1 + X86::AddrBaseReg);
+      MachineOperand &MOScale = MI.getOperand(1 + X86::AddrScaleAmt);
+      MachineOperand &MOIndex = MI.getOperand(1 + X86::AddrIndexReg);
+      MachineOperand &MODisp = MI.getOperand(1 + X86::AddrDisp);
+      if (MOBase.isReg() && Register::isVirtualRegister(MOBase.getReg()) &&
+          (MOIndex.getReg() == MCRegister::NoRegister ||
+           (MOScale.isImm() && MOScale.getImm() != 1)) &&
+          MODisp.isImm() && MODisp.getImm() >= 0)
+        Result = MOBase.getReg();
+      break;
     }
-    return 0;
+    case X86::ADD64ri32:
+    case X86::ADD64ri8: {
+      if (Register::isVirtualRegister(MI.getOperand(1).getReg()) &&
+          MI.getOperand(2).getImm() >= 0)
+        Result = MI.getOperand(1).getReg();
+      break;
+    }
+    case X86::SUB64ri32:
+    case X86::SUB64ri8: {
+      if (Register::isVirtualRegister(MI.getOperand(1).getReg()) &&
+          MI.getOperand(2).getImm() <= 0)
+        Result = MI.getOperand(1).getReg();
+      break;
+    }
+    default: {
+      // anything else?
+      break;
+    }
+    }
+    return Result;
   };
-  std::function<void(unsigned,unsigned,MachineInstr&)> CollectUse;
-  CollectUse = [&](unsigned Reg, unsigned Base, MachineInstr &MI) {
+  std::function<void(unsigned,MachineInstr&,unsigned,MachineInstr&)> CollectUse;
+  CollectUse = [&](unsigned Reg, MachineInstr &MI, unsigned Base, MachineInstr& BaseMI) {
     if (Register::isVirtualRegister(Reg) && !MRI->use_empty(Reg)) {
       DerivedToBase[Reg].insert(Base);
       DefinedInBlock[MI.getParent()].insert(Reg);
-      for (auto I = MRI->use_instr_begin(Reg), E = MRI->use_instr_end();
-           I != E; I++) {
-        auto UsedMBB = I->getParent();
-        if (I->isPHI()) {
-          // don't consider Phi's incoming value as real use, adding it
-          // to predBB's LiveOut
-          for (unsigned i = 1, e = I->getNumOperands(); i < e; i += 2) {
-            if (!I->getOperand(i).isReg())
-              continue;
-            auto IncomingReg = I->getOperand(i).getReg();
-            auto IncomingBlock = I->getOperand(i + 1).getMBB();
-            if (IncomingReg == Reg)
-              LiveOutValues[IncomingBlock].insert(Reg);
+      DefinedInBlock[BaseMI.getParent()].insert(Base);
+      Register Regs[2] = {Reg, Base};
+      for (int Idx = 0; Idx < 2; Idx++) {
+        Register Tmp = Regs[Idx];
+        for (auto I = MRI->use_instr_begin(Tmp), E = MRI->use_instr_end();
+             I != E; I++) {
+          auto UsedMBB = I->getParent();
+          if (I->isPHI()) {
+            // don't consider Phi's incoming value as real use, adding it
+            // to predBB's LiveOut
+            for (unsigned i = 1, e = I->getNumOperands(); i < e; i += 2) {
+              if (!I->getOperand(i).isReg())
+                continue;
+              auto IncomingReg = I->getOperand(i).getReg();
+              auto IncomingBlock = I->getOperand(i + 1).getMBB();
+              if (IncomingReg == Tmp)
+                LiveOutValues[IncomingBlock].insert(Tmp);
+            }
+          } else if(I->getOpcode() == TargetOpcode::STATEPOINT) {
+            StatepointOpers SO(&*I);
+            for (unsigned  i = 0; i < SO.getCCIdx(); i++)
+              if (I->getOperand(i).isReg() && I->getOperand(i).getReg() == Tmp)
+                UsedInBlock[UsedMBB].insert(Tmp);
+          } else {
+            UsedInBlock[UsedMBB].insert(Tmp);
           }
-        } else {
-          UsedInBlock[UsedMBB].insert(Reg);
         }
       }
     }
@@ -806,7 +954,8 @@ bool X86GoFixupPreRegAllocPass::checkDerivedPointers() {
   for (MachineBasicBlock &MBB : *MF) {
     for (MachineInstr &MI : MBB) {
       if (auto Base = GetBaseReg(MI)) {
-        CollectUse(MI.getOperand(0).getReg(), Base, MI);
+        MachineInstr &BaseMI = *MRI->def_instructions(Base).begin();
+        CollectUse(MI.getOperand(0).getReg(), MI, Base, BaseMI);
       }
     }
   }
@@ -837,14 +986,27 @@ bool X86GoFixupPreRegAllocPass::checkDerivedPointers() {
       }
     }
   }
+  for (auto& Pair : DerivedToBase) {
+    unsigned Derived = Pair.first;
+    CandidateRegs.insert(Derived);
+    for (unsigned Base : Pair.second) {
+      BaseToDerived[Base].insert(Derived);
+      CandidateRegs.insert(Base);
+    }
+  }
 
-  if (DebugCheckDerivedPointers)
-    for (auto& P : DerivedToBase) {
+  if (DebugCheckDerivedPointers) {
+    dbgs() << "### Candidates: ";
+    for (unsigned Reg : CandidateRegs)
+      dbgs() << RegName(Reg) << " ";
+    dbgs() << "\n";
+    for (auto &P : DerivedToBase) {
       dbgs() << "### Reg-Bases: " << RegName(P.first) << "\n";
-      for (auto& C : P.second)
-        dbgs() <<"       Bases: " << RegName(C) << " ";
+      for (auto &C : P.second)
+        dbgs() << "       Bases: " << RegName(C) << " ";
       dbgs() << "\n";
     }
+  }
 
   // find the blocks which should keep these registers live by a
   // 'liveness-like' anlaysis
@@ -858,6 +1020,7 @@ bool X86GoFixupPreRegAllocPass::checkDerivedPointers() {
       Worklist.insert(MBB.predecessors().begin(), MBB.predecessors().end());
     PrintLive(&MBB, "LiveIn-init", LiveInValues[&MBB]);
   }
+
   while (!Worklist.empty()) {
     MachineBasicBlock* MBB = Worklist.pop_back_val();
     if (DebugCheckDerivedPointers)
@@ -874,6 +1037,7 @@ bool X86GoFixupPreRegAllocPass::checkDerivedPointers() {
       continue;
 
     auto LiveTmp = LiveOutValues[MBB];
+    PrintLive(MBB, "LiveIn(before)", LiveInValues[MBB]);
     PrintLive(MBB, "Used", UsedInBlock[MBB]);
     PrintLive(MBB, "Defined", DefinedInBlock[MBB]);
     LiveTmp.set_union(UsedInBlock[MBB]);
@@ -882,7 +1046,7 @@ bool X86GoFixupPreRegAllocPass::checkDerivedPointers() {
       LiveInValues[MBB] = LiveTmp;
       Worklist.insert(MBB->predecessors().begin(), MBB->predecessors().end());
     }
-    PrintLive(MBB, "LiveIn", LiveInValues[MBB]);
+    PrintLive(MBB, "LiveIn(after)", LiveInValues[MBB]);
   }
 
   if (DebugCheckDerivedPointers)
@@ -891,74 +1055,66 @@ bool X86GoFixupPreRegAllocPass::checkDerivedPointers() {
 
   size_t ChangedSO = 0;
   size_t AddedPointer = 0;
-  for (auto& Pair : LiveOutValues) {
-    MachineBasicBlock* MBB = Pair.first;
-    SetVector<unsigned> LiveTmp = Pair.second;
-    SmallSet<unsigned, 4> KilledReg;
-    for (MachineInstr &MI : llvm::reverse(*MBB)) {
-      for (const MachineOperand &MO : MI.operands()) {
+  for (MachineBasicBlock &MBB : *MF) {
+    SetVector<unsigned> LiveTmp = LiveOutValues[&MBB];
+    for (MachineInstr &MI : llvm::reverse(MBB)) {
+      unsigned UseEnd = MI.getNumOperands();
+      if (MI.getOpcode() == TargetOpcode::STATEPOINT) {
+        StatepointOpers SO(&MI);
+        SmallSet<unsigned, 8> AlreadyLivedReg;
+        for (auto Idx = SO.getNumDeoptArgsIdx(), E = SO.getNumGCPtrIdx();
+             Idx < E; ++Idx) {
+          auto &MO = MI.getOperand(Idx);
+          if (MO.isReg()) {
+            AlreadyLivedReg.insert(MO.getReg());
+          }
+        }
+
+        SmallSetVector<unsigned, 8> NeedAddedReg;
+        for (auto Reg : LiveTmp) {
+          if (!CandidateRegs.contains(Reg))
+            continue;
+
+          // if the Base/Derived exists in StatePoint, we need to add this Reg
+          // into StatePoint too.
+          if (!AlreadyLivedReg.contains(Reg)) {
+            const auto& Bases = DerivedToBase[Reg];
+            const auto& Deriveds = BaseToDerived[Reg];
+            SmallSetVector<unsigned, 8> All(Bases);
+            All.set_union(Deriveds);
+            for (auto Tmp : All) {
+              if (AlreadyLivedReg.contains(Tmp)) {
+                NeedAddedReg.insert(Reg);
+                break;
+              }
+            }
+          }
+        }
+
+        if (!NeedAddedReg.empty()) {
+          Changed |= true;
+          ChangedSO++;
+          AddedPointer += NeedAddedReg.size();
+          AddOperandToStatePoint(MI, NeedAddedReg, false);
+        }
+
+        UseEnd = SO.getCCIdx();
+      }
+      for (unsigned Idx = 0; Idx < UseEnd; Idx++) {
+        MachineOperand& MO = MI.getOperand(Idx);
         if (MO.isReg() && Register::isVirtualRegister(MO.getReg()) &&
-            DerivedToBase.count(MO.getReg())) {
+            CandidateRegs.count(MO.getReg())) {
           if (MO.isDef())
             LiveTmp.remove(MO.getReg());
           else
             LiveTmp.insert(MO.getReg());
         }
       }
-
-      if (MI.getOpcode() != TargetOpcode::STATEPOINT)
-        continue;
-      StatepointOpers SO(&MI);
-      SmallSet<unsigned, 8> AlreadLivedReg;
-      for (auto Idx = SO.getNumDeoptArgsIdx(), E = SO.getNumGCPtrIdx();
-           Idx < E; ++Idx) {
-        auto &MO = MI.getOperand(Idx);
-        if (MO.isReg()) {
-          AlreadLivedReg.insert(MO.getReg());
-        }
-      }
-      SmallSetVector<unsigned, 8> NeedAddedReg;
-      for (auto Reg : LiveTmp) {
-        // if the Base exists in StatePoint, this implies that the Base is a
-        // pointer. consequently, the register derived by ADD/SUB is also
-        // a pointer, so we can add it to StatePoint.
-        // for LEA, the register is definitely a pointer, thus we can skip
-        // this check, and the Base of the LEA must already be in
-        // StatePoint (not sure? added a log).
-        if (!AlreadLivedReg.contains(Reg)) {
-          const auto& Bases = DerivedToBase[Reg];
-          auto Added = false;
-          for (auto Base : Bases) {
-            if (AlreadLivedReg.contains(Base)) {
-              NeedAddedReg.insert(Reg);
-              Added = true;
-              break;
-            }
-          }
-          if (!Added &&
-              DebugCheckDerivedPointers &&
-              MRI->def_instructions(Reg).begin()->getOpcode() == X86::LEA64r) {
-            dbgs() << "Reg's base is not in StatePoint, Reg: "
-                   << RegName(Reg)
-                   << ", MBB: " << MBB->getName()
-                   << ", SO: " << MI
-                   << "\n";
-          }
-        }
-      }
-      if (NeedAddedReg.empty())
-        continue;
-      Changed |= true;
-
-      ChangedSO++;
-      AddedPointer += NeedAddedReg.size();
-
-      AddOperandToStatePoint(MI, NeedAddedReg, false);
     }
   }
 
   if (DebugCheckDerivedPointers && ChangedSO > 0)
-    dbgs() << "Add " << AddedPointer << " derived pointers to " << ChangedSO
+    dbgs() << "Add " << AddedPointer << " pointers to " << ChangedSO
            << " StatePoints in " << MF->getName() << "\n";
 
   return Changed;
