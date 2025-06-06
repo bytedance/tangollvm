@@ -113,6 +113,48 @@ void MCGoAuxData::beginModule(Module *M) {
       }
     }
   }
+
+
+  // switch section after creating end symbol
+  const TargetLoweringObjectFile &TLOF= Asm->getObjFileLowering();
+  const DataLayout &DL = Asm->getDataLayout();
+  Align Alignment(1); // variant length encoding
+  MCSection *ReadOnlySection = TLOF.getSectionForConstant(
+      DL, SectionKind::getReadOnly(), /*C=*/nullptr, Alignment);
+  Asm->OutStreamer->pushSection();
+  Asm->OutStreamer->switchSection(ReadOnlySection);
+
+  Asm->OutStreamer->emitLabel(Asm->OutContext.getOrCreateSymbol("go.rodata.begin"));
+  Asm->OutStreamer->emitInt64(0);
+
+  for (GlobalVariable &GV : M->globals()) {
+    auto *ROData = GV.getMetadata("go.rodata");
+    if (!ROData)
+      continue;
+
+    StringRef Data = cast<MDString>(ROData->getOperand(0))->getString();
+    std::string Symbol = "go.rodata." + GV.getName().str();
+    MCSymbol *AddrSymbol = Asm->OutContext.getOrCreateSymbol(Symbol);
+    Asm->OutStreamer->emitLabel(AddrSymbol);
+    uint64_t Size = (uint64_t)((uint32_t)Data.size());
+    std::string s;
+    raw_string_ostream OSE(s);
+    OSE << uint8_t(Size&0xFF);
+    Size = Size >> 8;
+    OSE << uint8_t(Size&0xFF);
+    Size = Size >> 8;
+    OSE << uint8_t(Size&0xFF);
+    Size = Size >> 8;
+    OSE << uint8_t(Size&0xFF);
+    Size = Size >> 8;
+    OSE << Data;
+    Asm->OutStreamer->emitBinaryData(s);
+  }
+
+  Asm->OutStreamer->emitLabel(Asm->OutContext.getOrCreateSymbol("go.rodata.end"));
+  Asm->OutStreamer->emitInt64(0);
+
+  Asm->OutStreamer->popSection();
 }
 
 
@@ -670,7 +712,8 @@ void MCGoAuxData::endFunctionImpl(const MachineFunction *MF) {
           MCSymbolRefExpr::VariantKind Variant = MCSymbolRefExpr::VK_GOT;
           auto gcdatasym = MCSymbolRefExpr::create(gcdata, Variant, Asm->OutContext);
 
-          // dbgs() << "Alloca: " << i << " " << offset << " " << size << " " << ptrdata << " " << gcdata << "\n";
+          // dbgs() << "Alloca: " << i << " " << offset << " " << size << " " << ptrdata << " " << gcdata
+          //  << " for " << MF->getFunction().getName() << "\n";
           StackObjects.emplace_back(int32_t(offset), int32_t(size), int32_t(ptrdata), gcdatasym);
         }
       }
