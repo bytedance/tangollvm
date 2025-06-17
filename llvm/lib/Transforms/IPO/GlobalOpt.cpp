@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-06-17.
 //===----------------------------------------------------------------------===//
 //
 // This pass transforms simple global variables that never have their address
@@ -1316,6 +1318,10 @@ static bool
 deleteIfDead(GlobalValue &GV,
              SmallPtrSetImpl<const Comdat *> &NotDiscardableComdats,
              function_ref<void(Function &)> DeleteFnCallback = nullptr) {
+  if (GlobalVariable *G = dyn_cast<GlobalVariable>(&GV))
+    if (G->hasMetadata("go.global"))
+      return false;
+
   GV.removeDeadConstantUsers();
 
   if (!GV.isDiscardableIfUnused() && !GV.isDeclaration())

@@ -132,6 +132,9 @@ void MCGoAuxData::beginModule(Module *M) {
     if (!ROData)
       continue;
 
+    if (ROData->getNumOperands() > 1)
+      continue; // not pure data, additional data are relocations
+
     StringRef Data = cast<MDString>(ROData->getOperand(0))->getString();
     std::string Symbol = "go.rodata." + GV.getName().str();
     MCSymbol *AddrSymbol = Asm->OutContext.getOrCreateSymbol(Symbol);

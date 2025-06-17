@@ -28,7 +28,6 @@
 #include "llvm/IR/TangoLLVM.h"
 #include "llvm/Support/CBindingWrapping.h"
 
-
 namespace llvm {
 
 // TANGOLLVM
@@ -88,6 +87,188 @@ void TangoLLVM::markObsoleted(Function *Fn) {
   // 3). Replace the old function by the new function
   Fn->replaceAllUsesWith(NewFn);
   Fn->addFnAttr("go.obsolete");
+}
+
+struct PtrAndOff {
+  GlobalVariable *GV;
+  uint64_t Offset;
+};
+
+static PtrAndOff findBasePtrAndOff(Value *V, const DataLayout &DL) {
+  if (auto *GEP = dyn_cast<GetElementPtrInst>(V)) {
+    unsigned BitWidth = DL.getIndexTypeSizeInBits(GEP->getType());
+    APInt GEPOffset(BitWidth, 0);
+    if (!GEP->accumulateConstantOffset(DL, GEPOffset)) {
+      return {};
+    }
+    auto PO = findBasePtrAndOff(GEP->getPointerOperand(), DL);
+    return {PO.GV, PO.Offset + GEPOffset.getZExtValue()};
+  }
+
+  if (auto *BC = dyn_cast<BitCastInst>(V)) {
+    return findBasePtrAndOff(BC->getOperand(0), DL);
+  }
+
+  if (auto *GV = dyn_cast<GlobalVariable>(V)) {
+    return {GV, 0};
+  }
+
+  return {};
+}
+
+Value *TangoLLVM::resolveLoadROData(LoadInst *LI, const DataLayout &DL) {
+  auto PO = findBasePtrAndOff(LI->getPointerOperand(), DL);
+  GlobalVariable *GV = PO.GV;
+  if (GV == nullptr) {
+    return nullptr;
+  }
+
+  uint64_t Offset = PO.Offset;
+  auto *ROData = GV->getMetadata("go.rodata");
+  if (!ROData) {
+    return nullptr;
+  }
+
+  const unsigned PtrSizeInBits = DL.getPointerSizeInBits();
+  assert(PtrSizeInBits == 64 && "64bit only");
+
+  Type *ValType = LI->getType();
+  // TODO: ValSize could be zero in LLVM but non-zero in Go, e.g., empty struct
+  auto ValSize = DL.getTypeStoreSize(ValType);
+
+  StringRef Data = cast<MDString>(ROData->getOperand(0))->getString();
+  // TODO: load from all zero data is zero, even the offset is out of bounds
+  if (Offset >= Data.size() || (Offset + ValSize) > Data.size()) {
+    if (GV->hasMetadata("go.zerorodata")) {
+      return Constant::getNullValue(ValType);
+    }
+    return nullptr;
+  }
+
+  if (ROData->getNumOperands() == 2) {
+    MDNode *Reloc = cast<MDNode>(ROData->getOperand(1));
+
+    // Function *F = LI->getParent()->getParent();
+    // dbgs() << F->getName() << " GlobalVariable: "
+    //   << *LI << ", GV="
+    //   << *GV << ", Reloc=" << *Reloc << "\n";
+    for (unsigned i = 0; i < Reloc->getNumOperands(); i += 5) {
+      uint64_t Off = dyn_cast<ConstantAsMetadata>(Reloc->getOperand(i + 1))
+        ->getValue()->getUniqueInteger().getZExtValue();
+      uint64_t Siz = dyn_cast<ConstantAsMetadata>(Reloc->getOperand(i + 2))
+        ->getValue()->getUniqueInteger().getZExtValue();
+
+      // We must stop constant replacement if the Offset+ValSize has overlap with the Reloc
+      if (Off < Offset) {
+        if (Off + Siz > Offset)
+          return nullptr; // overlap
+        continue;
+      }
+
+      if (Off > Offset) {
+        if (Offset + ValSize > Off)
+          return nullptr; // overlap
+        break;
+      }
+
+      uint64_t enabled = dyn_cast<ConstantAsMetadata>(Reloc->getOperand(i + 0))
+        ->getValue()->getUniqueInteger().getZExtValue();
+      if (enabled == 0)
+        return nullptr; // unknown relocation type or invalid offset
+
+      // Now, we can only return a pointer or pointer-like integer
+      if (!(ValType->isPointerTy() || ValType->isIntegerTy(PtrSizeInBits)))
+        return nullptr;
+
+      // Reloc.Siz must be PtrSize
+      if (Siz != PtrSizeInBits/8)
+        return nullptr;
+
+      if (Reloc->getOperand(i + 4) == nullptr)
+        return nullptr; // constant symbol is dead and removed by GlobalOpt
+
+      Value *Ptr = dyn_cast<ConstantAsMetadata>(Reloc->getOperand(i + 4))->getValue();
+      if (!(isa<GlobalVariable>(Ptr) || isa<Function>(Ptr)))
+        return nullptr; // other constants are not supported yet
+
+      assert(Ptr->getType()->isPointerTy() && "must be a global");
+
+      uint64_t Add = dyn_cast<ConstantAsMetadata>(Reloc->getOperand(i + 3))
+        ->getValue()->getUniqueInteger().getZExtValue();
+
+      if (Add != 0) {
+        if (!GV->getValueType()->isIntegerTy(8)) {
+          return nullptr;
+        }
+        // Add is the offset in bytes. We can only make a GEP here
+        // if the GV is i8*.
+        Ptr = ConstantExpr::getGetElementPtr(GV->getValueType(), GV,
+            ConstantInt::get(DL.getIndexType(GV->getType()), Add));
+      }
+
+      // Let caller do the cast
+      // dbgs() << "find load from rodata " << GV->getName() << ": " << i << " "
+      //   << Offset << ","
+      //   << Add << ","
+      //   << *Ptr << "\n"
+      //   ;
+
+      return Ptr;
+    }
+
+  } else if (ROData->getNumOperands() > 2) {
+    // TODO: llvm-link may merge ROData
+    return nullptr;
+  }
+
+  // Load raw bytes from Data
+  // We can only load integer or float
+  // TODO: endian?
+  if (!(ValType->isIntegerTy() || ValType->isFloatTy() || ValType->isDoubleTy()))
+    return nullptr;
+
+  const char * DataPtr = Data.data() + Offset;
+
+  if (ValType->isIntegerTy()) {
+    switch (ValType->getIntegerBitWidth()) {
+    case 1: {
+      int8_t val = *(const int8_t*)DataPtr;
+      return ConstantInt::get(ValType, val == 0 ? 0 : 1);
+    }
+    case 8: {
+      int8_t val = *(const int8_t*)DataPtr;
+      return ConstantInt::get(ValType, uint64_t(val));
+    }
+    case 16: {
+      int16_t val = *(const int16_t*)DataPtr;
+      return ConstantInt::get(ValType, uint64_t(val));
+    }
+    case 32: {
+      int32_t val = *(const int32_t*)DataPtr;
+      return ConstantInt::get(ValType, uint64_t(val));
+    }
+    case 64: {
+      int64_t val = *(const int64_t*)DataPtr;
+      return ConstantInt::get(ValType, uint64_t(val));
+    }
+    default:
+      return nullptr;
+    }
+  }
+
+  if (ValType->isFloatTy()) {
+    assert(sizeof(float) == 4 && "invariant");
+    double val = (double)(*(const float*)DataPtr);
+    return ConstantFP::get(ValType, val);
+  }
+
+  if (ValType->isDoubleTy()) {
+    assert(sizeof(double) == 8 && "invariant");
+    double val = *(const double*)DataPtr;
+    return ConstantFP::get(ValType, val);
+  }
+
+  return nullptr;
 }
 
 } // namespace llvm

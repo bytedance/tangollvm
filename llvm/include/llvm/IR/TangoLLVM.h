@@ -10,6 +10,7 @@
 #define LLVM_IR_TANGOLLVM_H_
 
 #include <llvm/IR/Function.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/CodeGen/MachineInstr.h>
 
 
@@ -85,6 +86,20 @@ public:
   static bool isGoABIInternal(const Function &Fn) {
     return Fn.getCallingConv() == CallingConv::Go_Internal;
   }
+
+  static bool isGoPreAllocated(Value * V) {
+    // V = V->stripPointerCasts();
+    if (CallInst *Call = dyn_cast<CallInst>(V)) {
+      if (Function *Fn = Call->getCalledFunction()) {
+        if (Fn->getIntrinsicID() == Intrinsic::go_preallocated) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  static Value *resolveLoadROData(LoadInst *LI, const DataLayout &DL);
 
 };
 

@@ -55,6 +55,7 @@
 #include "llvm/Transforms/IPO/GlobalDCE.h"
 #include "llvm/Transforms/IPO/GlobalOpt.h"
 #include "llvm/Transforms/IPO/GlobalSplit.h"
+#include "llvm/Transforms/IPO/GoROData.h"
 #include "llvm/Transforms/IPO/HotColdSplitting.h"
 #include "llvm/Transforms/IPO/IROutliner.h"
 #include "llvm/Transforms/IPO/InferFunctionAttrs.h"
@@ -1595,6 +1596,9 @@ PassBuilder::buildPerModuleDefaultPipeline(OptimizationLevel Level,
                                           : ThinOrFullLTOPhase::None;
   // Add the core simplification pipeline.
   MPM.addPass(buildModuleSimplificationPipeline(Level, LTOPhase));
+
+  if (TM->getTargetTriple().isGoEnvironment())
+    MPM.addPass(GoRODataPass());
 
   // Now add the optimization pipeline.
   MPM.addPass(buildModuleOptimizationPipeline(Level, LTOPhase));

@@ -2073,15 +2073,7 @@ static bool isGoStackAddr(Value * V) {
 }
 
 static bool isGoPreAllocated(Value * V) {
-  // V = V->stripPointerCasts();
-  if (CallInst *Call = dyn_cast<CallInst>(V)) {
-    if (Function *Fn = Call->getCalledFunction()) {
-      if (Fn->getIntrinsicID() == Intrinsic::go_preallocated) {
-        return true;
-      }
-    }
-  }
-  return false;
+  return TangoLLVM::isGoPreAllocated(V);
 }
 
 static bool hasStackMap(const CallBase *Call) {
@@ -3443,6 +3435,21 @@ static void computeAllocaDefState(DominatorTree &DT, LoopInfo &LI, Function &F,
   // We need to use IsTrackedAllocaChecked to compute
   // the dominator of all real usage of Alloca
   DenseMap<Value *, BasicBlock *> AllocaToDomUse;
+  auto UpdateCommonDom = [&](Value* Base, BasicBlock *DomOfBB) {
+    auto It = AllocaToDomUse.find(Base);
+    if (It == AllocaToDomUse.end()) {
+      // dbgs() << "Set DOM use for "  << *Base << " to " << BB.getName() << " reason=" << I << "\n";
+      AllocaToDomUse[Base] = DomOfBB;
+    } else if (It->second == DomOfBB) {
+      // do nothing if they are the same.
+      return;
+    } else {
+      // dbgs() << "Set DOM use for "  << *Base << " to " << BB.getName() << " reason=" << I << " old=" << It->second->getName() << "\n";
+      It->second = DT.findNearestCommonDominator(It->second, DomOfBB);
+      assert(It->second != nullptr && "invariant: all BB must be reachable from Entry");
+    }
+  };
+
   for (BasicBlock &BB : F) {
     BasicBlock *DomOfBB = FindNonLoopDom(&BB);
     for (Instruction &I : BB) {
@@ -3455,19 +3462,21 @@ static void computeAllocaDefState(DominatorTree &DT, LoopInfo &LI, Function &F,
       for (Value *V : I.operands()) {
         Value *Base = IsTrackedAllocaChecked(V);
         if (Base != nullptr) {
-          auto It = AllocaToDomUse.find(Base);
-          if (It == AllocaToDomUse.end()) {
-            // dbgs() << "Set DOM use for "  << *Base << " to " << BB.getName() << " reason=" << I << "\n";
-            AllocaToDomUse[Base] = DomOfBB;
-          } else if (It->second == DomOfBB) {
-            // do nothing if they are the same.
-            continue;
-          } else {
-            // dbgs() << "Set DOM use for "  << *Base << " to " << BB.getName() << " reason=" << I << " old=" << It->second->getName() << "\n";
-            It->second = DT.findNearestCommonDominator(It->second, DomOfBB);
-            assert(It->second != nullptr && "invariant: all BB must be reachable from Entry");
-          }
+          UpdateCommonDom(Base, DomOfBB);
         }
+      }
+    }
+  }
+
+  // ParamOut are used by all return st
+  for (Value *ParamOut : Data.ParamOut) {
+    if (!IsTrackedAllocaChecked(ParamOut))
+      continue;
+
+    for (BasicBlock &BB : F) {
+      if (isa<ReturnInst>(BB.getTerminator())) {
+        BasicBlock *DomOfBB = FindNonLoopDom(&BB);
+        UpdateCommonDom(ParamOut, DomOfBB);
       }
     }
   }
@@ -4093,7 +4102,7 @@ static void computeLiveInValues(DominatorTree &DT, LoopInfo &LI, Function &F,
             continue;
           }
 
-          if (auto RU = IsDominatedByAnyUseOf(GEP->getPointerOperand(), GEP->getParent())) {
+          if (IsDominatedByAnyUseOf(GEP->getPointerOperand(), GEP->getParent())) {
             // Note the real use may be in the same block as GEP.
             // In this case, the real USE of base may not dominate the GEP.
             // It is still safe here because the real USE and the GEP can be executed together
@@ -4115,7 +4124,7 @@ static void computeLiveInValues(DominatorTree &DT, LoopInfo &LI, Function &F,
             }
             DomNode = DomNode->getIDom();
 
-            if (auto RU = IsDominatedByAnyUseOf(GEP->getPointerOperand(), DomNode->getBlock())) {
+            if (IsDominatedByAnyUseOf(GEP->getPointerOperand(), DomNode->getBlock())) {
               // Test if we can move to DomNode.
               NewDst = DomNode->getBlock();
             }

@@ -28,6 +28,7 @@ static_library("Scalar") {
     "GVN.cpp",
     "GVNHoist.cpp",
     "GVNSink.cpp",
+    "GoNilCheckElim.cpp",
     "GuardWidening.cpp",
     "IVUsersPrinter.cpp",
     "IndVarSimplify.cpp",
