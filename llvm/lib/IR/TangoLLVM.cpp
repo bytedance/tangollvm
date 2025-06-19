@@ -435,6 +435,16 @@ void LLVMRemoveFunctionBody(LLVMValueRef C) {
 }
 
 
+LLVMValueRef LLVMBuildIntrinsic(LLVMBuilderRef B, unsigned IntrinsicID,
+      LLVMTypeRef *Types,
+      unsigned NumTypes,
+      LLVMValueRef *Args,
+      unsigned NumArgs, const char *Name) {
+  return wrap(unwrap(B)->CreateIntrinsic((Intrinsic::ID)IntrinsicID,
+        ArrayRef(unwrap(Types), NumTypes),
+        ArrayRef(unwrap(Args), NumArgs), nullptr, Name));
+}
+
 TangoLLVMEnv* TangoLLVMCreateTangoLLVMEnvironment() {
 
   TangoLLVMEnv *ENV = new TangoLLVMEnv;
@@ -1286,6 +1296,7 @@ TangoLLVMEnv* TangoLLVMCreateTangoLLVMEnvironment() {
   ENV->TangoLLVMGetHostCPUName = &LLVMGetHostCPUName;
   ENV->TangoLLVMGetHostCPUFeatures = &LLVMGetHostCPUFeatures;
   ENV->TangoLLVMRemoveFunctionBody = &LLVMRemoveFunctionBody;
+  ENV->TangoLLVMBuildIntrinsic = &LLVMBuildIntrinsic;
   ENV->TangoLLVMAddAnalysisPasses = &LLVMAddAnalysisPasses;
   return ENV;
 }

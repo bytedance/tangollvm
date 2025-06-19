@@ -221,9 +221,7 @@ static bool isGoConstantLikeValue(Value *V) {
 static bool isGoGCPointerOrPointerLikeValue(Value *V);
 
 static bool isGoPreAllocatedParamOut(Value * V) {
-  if (CallInst* Call = dyn_cast<CallInst>(V))
-    return Call->hasMetadata("go.stack.paramout");
-  return false;
+  return TangoLLVM::isGoPreAllocatedParamOut(V);
 }
 
 static bool isStackConstantPointer(Value *V) {
@@ -263,11 +261,9 @@ static bool isStackConstantPointer(Value *V) {
 static Type* getValueElementType(Value *V) {
   // Handle different instruction types
   if (auto I = dyn_cast<Instruction>(V)) {
-    if (auto M = I->getMetadata("go.type")) {
-      assert(isGoPreAllocated(V) && "only go.preallocated has go.type");
-      assert(M->getNumOperands() == 1 && "must have exactly one member");
-      assert(isa<ConstantAsMetadata>(M->getOperand(0)) && "must be a constant");
-      return dyn_cast<ConstantAsMetadata>(M->getOperand(0))->getType();
+    if (Type *Ty = TangoLLVM::getGoPreAllocatedElementType(V)) {
+      assert(isGoPreAllocated(V) && "only go.preallocated has go type");
+      return Ty;
     }
 
     // For alloca, return the allocated type
@@ -281,6 +277,7 @@ static Type* getValueElementType(Value *V) {
     }
   }
 
+  dbgs() << "cannot determine result type of " << *V << "\n";
   llvm_unreachable("cannot determine element type");
 }
 

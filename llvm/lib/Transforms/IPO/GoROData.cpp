@@ -11,7 +11,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/IPO/GoROData.h"
-#include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
@@ -25,10 +24,6 @@ using namespace llvm;
 
 // Enable Go RO data optimization
 static cl::opt<bool> EnableGoROData("go-rodata", cl::Hidden,
-                                  cl::init(true));
-
-// Eager inline
-static cl::opt<bool> EagerInline("go-rodata-inline", cl::Hidden,
                                   cl::init(true));
 
 #define DEBUG_TYPE "gorodata"
@@ -94,31 +89,11 @@ static bool replaceLoadROData(Function &F) {
             }
           }
 
-          SmallVector<CallInst*, 8> InlineCandidates;
           for (Instruction *R : Replacement) {
-            if (EagerInline)
-              for (auto &U : R->uses()) {
-                if (CallInst *CI= dyn_cast<CallInst>(U.getUser()))
-                  if (CI->isCallee(&U))
-                    InlineCandidates.push_back(CI);
-              }
-
             // We are safe to erase because a ITP has only one operand
             // and it will appear in the Replacement vector once.
             R->replaceAllUsesWith(ConstValue);
             R->eraseFromParent();
-          }
-
-          for (CallInst *CI : InlineCandidates) {
-            Function *Fn = CI->getCalledFunction();
-            if (Fn == nullptr)
-              continue;
-            InlineFunctionInfo FnInfo;
-            auto InlineRes = InlineFunction(*CI, FnInfo);
-            LLVM_DEBUG(dbgs() << "GoROData: try to inline a call to " << Fn->getName() << " in " << F.getName()
-                << ", results=" << (InlineRes.isSuccess() ? "success" : InlineRes.getFailureReason())
-                <<  "\n");
-            (void)InlineRes;
           }
 
           if (!LI->use_empty()) {

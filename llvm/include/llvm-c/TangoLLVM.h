@@ -2056,6 +2056,12 @@ void (*TangoLLVMAddCallSiteFnAttribute)(LLVMValueRef C, LLVMAttributeRef A);
   void (*TangoLLVMAddAnalysisPasses)(LLVMTargetMachineRef T, LLVMPassManagerRef PM);
 
   void (*TangoLLVMRemoveFunctionBody)(LLVMValueRef C);
+
+  LLVMValueRef (*TangoLLVMBuildIntrinsic)(LLVMBuilderRef B, unsigned IntrinsicID,
+      LLVMTypeRef *Types,
+      unsigned NumTypes,
+      LLVMValueRef *Args,
+      unsigned NumArgs, const char *Name);
 } TangoLLVMEnv;
 
 TangoLLVMEnv* TangoLLVMCreateTangoLLVMEnvironment(void);

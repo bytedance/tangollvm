@@ -11,6 +11,7 @@
 
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/Constants.h>
 #include <llvm/CodeGen/MachineInstr.h>
 
 
@@ -88,11 +89,34 @@ public:
   }
 
   static bool isGoPreAllocated(Value * V) {
-    // V = V->stripPointerCasts();
     if (CallInst *Call = dyn_cast<CallInst>(V)) {
       if (Function *Fn = Call->getCalledFunction()) {
         if (Fn->getIntrinsicID() == Intrinsic::go_preallocated) {
           return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  static Type* getGoPreAllocatedElementType(Value * V) {
+    if (CallInst *Call = dyn_cast<CallInst>(V)) {
+      if (Function *Fn = Call->getCalledFunction()) {
+        if (Fn->getIntrinsicID() == Intrinsic::go_preallocated) {
+          return Call->getArgOperand(2)->getType();
+        }
+      }
+    }
+    return nullptr;
+  }
+
+  static bool isGoPreAllocatedParamOut(Value * V) {
+    if (CallInst *Call = dyn_cast<CallInst>(V)) {
+      if (Function *Fn = Call->getCalledFunction()) {
+        if (Fn->getIntrinsicID() == Intrinsic::go_preallocated) {
+          ConstantInt *ParamOut = dyn_cast<ConstantInt>(Call->getArgOperand(3));
+          assert(ParamOut != nullptr && "sanity check");
+          return !ParamOut->isZero();
         }
       }
     }
