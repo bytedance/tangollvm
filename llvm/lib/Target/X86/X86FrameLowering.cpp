@@ -3370,7 +3370,7 @@ void X86FrameLowering::adjustForSegmentedStacks(
       return;
     }
 
-    if (StackSize < StackSmall && !MF.getFunction().hasFnAttribute("go-keep-attr")) {
+    if (StackSize < StackSmall) {
       // see obj6.go
       // check whether this function is a leaf function with only call to some
       // runtime functions.
@@ -3512,6 +3512,8 @@ leafSearchDone:
     };
 
     checkMBB2 = InsertCheck(checkMBB, allocMBB);
+    // We need this to change sp to zero before call morestack
+    BuildMI(allocMBB, DL, TII.get(X86::NOOP));
 
     // RAX, RBX, RCX, RDI, RSI, R8, R9, R10, R11
     const unsigned GoABIInternalIntRegs[] = {

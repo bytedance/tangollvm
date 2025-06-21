@@ -338,6 +338,7 @@ void MCGoAuxData::computeFunctionSP(const MachineFunction *MF) {
         int32_t lastSP = Flow.first;
 
         for (auto &MI : MBB->instrs()) {
+          PreSPMap[&MI] = lastSP;
           lastSP += int32_t(TII.getSPAdjust(MI));
           PostSPMap[&MI] = lastSP;
         }
@@ -349,10 +350,61 @@ void MCGoAuxData::computeFunctionSP(const MachineFunction *MF) {
     }
   }
 
+  int32_t LastSP = 0;
   for (const auto &MBB : *MF) {
     if (PreBBSP.find(&MBB) == PreBBSP.end()) {
       report_fatal_error("cannot find MBB in PreSP\n");
     }
+    int32_t PreSP = PreBBSP[&MBB].first;
+    if (LastSP != PreSP) {
+      assert(!MBB.isEntryBlock() && "entry should be zero sp");
+      auto PrevMBB = &*std::prev(MBB.getIterator());
+      while (PrevMBB->empty()) {
+        assert(!PrevMBB->isEntryBlock() && "entry should not be empty");
+        PrevMBB = &*std::prev(PrevMBB->getIterator());
+      }
+      assert(!PrevMBB->empty() && "TODO");
+      bool IsPred = false;
+      for (auto *Succ : PrevMBB->successors()) {
+        if (Succ == &MBB) {
+          IsPred = true;
+          break;
+        }
+      }
+      if (!IsPred) {
+        auto &MI = PrevMBB->back();
+        assert(!MI.isMetaInstruction());
+        if (LastSP == 0) {
+          assert(PreSP != 0 && "invariant: LastSP != PreSP ");
+          assert(!MI.isCall() && "invariant: only return or morestack-jmp can change non-zero to zero");
+          PostSPMap[&MI] = PreSP;
+        } else if (PreSP == 0) {
+          // must not be Entry
+          assert(LastSP != 0 && "invariant: LastSP != PreSP ");
+          // MBB is not entry block. It must be morestack
+          assert(LastSP == int32_t(MFI.getStackSize()) && "stack size is fixed after setup");
+          bool HasMoreStack = false;
+          for (auto &MI : MBB) {
+            if (TangoLLVMCodeGen::isMoreStackCall(MI)) {
+              HasMoreStack = true;
+              break;
+            }
+          }
+          assert(HasMoreStack && "must be morestack");
+          if (!HasMoreStack)
+            report_fatal_error("bad interior MBB has zero preSP");
+          // morestack BB has a noop that can change SP to 0 before call morestack
+        } else {
+          report_fatal_error("bad pcsp in control flow graph");
+        }
+      } else {
+        // MF->dump();
+        // dbgs() << "MBB: " << MBB;
+        // dbgs() << "LastSP: " << LastSP << ", PreSP: " << PreSP << "\n";
+        report_fatal_error("bad pcsp in control flow graph");
+      }
+    }
+
     if (PostBBSP.find(&MBB) == PostBBSP.end()) {
       report_fatal_error("cannot find MBB in PostSP");
     }
@@ -364,6 +416,7 @@ void MCGoAuxData::computeFunctionSP(const MachineFunction *MF) {
       dbgs() << "Error: PostSP is negative for " << MBB << "\n";
       report_fatal_error("negative PostSP");
     }
+    LastSP = PostBBSP[&MBB].first;
     // TODO: check upbounds
   }
 }
@@ -624,7 +677,7 @@ void MCGoAuxData::endFunctionImpl(const MachineFunction *MF) {
     const int AttrNoSplit = 4;
     uint64_t Attr = 0;
     if (!MF->getFunction().hasFnAttribute("go-split")) {
-      Attr |= 1 << AttrNoSplit;
+      Attr |= AttrNoSplit;
     }
 
     std::string symbol = MF->getName().str();
@@ -927,10 +980,14 @@ void MCGoAuxData::beginInstruction(const MachineInstr *MI) {
       report_fatal_error("no post SP data for instruction");
     }
     int32_t PostSP = PostSPMap[MI];
+    int32_t PreSP = PreSPMap[MI];
+    // dbgs() << "PostSP: " << PostSP << "/" << PreSP << " for " << *MI << "\n";
+    if (PreSP != LastSPAdjust && PreSP != 0)
+      report_fatal_error("bad pcsp");
     // need to skip CFI instructions since they are of zero size and do not
     // advance the PC. The PostSP update on CFI instruction will be applied
     // on the next available instruction instead
-    if (LastSPAdjust != PostSP && !MI->isCFIInstruction()) {
+    if (LastSPAdjust != PostSP && !MI->isMetaInstruction()) {
       appendPCData(PCSP, LastSPAdjust, getOrCreatePostPCSymbol(MI));
       LastSPAdjust = PostSP;
     }

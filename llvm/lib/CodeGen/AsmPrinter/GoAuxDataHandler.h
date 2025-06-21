@@ -60,6 +60,7 @@ private:
   bool FuncInfoHasStartLine;
 
   int32_t LastSPAdjust;
+  DenseMap<const MachineInstr*, int32_t> PreSPMap;
   DenseMap<const MachineInstr*, int32_t> PostSPMap;
 
   int32_t LastFileIndex;
@@ -119,6 +120,7 @@ private:
     LineStarted = false;
     InlineTreeStarted = false;
 
+    PreSPMap.clear();
     PostSPMap.clear();
     PCSP.clear();
     PCFile.clear();
