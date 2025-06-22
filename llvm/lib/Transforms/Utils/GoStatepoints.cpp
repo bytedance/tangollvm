@@ -2095,6 +2095,38 @@ static bool hasStackMap(const CallBase *Call) {
   return true;
 }
 
+static bool optimizeNilCheck(Function &F) {
+  SmallVector<LoadInst*, 8> NilChecks;
+  for (Instruction &I : instructions(F)) {
+    LoadInst *LI = dyn_cast<LoadInst>(&I);
+    if (LI == nullptr)
+      continue;
+    if (LI->hasMetadata("go.nilcheckload"))
+      NilChecks.push_back(LI);
+  }
+
+  if (NilChecks.empty())
+    return false;
+
+  for (LoadInst *LI : NilChecks) {
+    Instruction *Pos = LI;
+    DebugLoc DL = LI->getDebugLoc();
+    Value *Ptr = LI->getPointerOperand();
+    Type *VoidTy = Type::getVoidTy(F.getContext());
+    FunctionType *FT = FunctionType::get(VoidTy, {Ptr->getType()}, false);
+    // TODO: x86-64 only
+    InlineAsm *IA = InlineAsm::get(FT, "testb ${0:b}, ($0)", "r,~{flags},~{dirflag}", true);
+    CallInst *Call = CallInst::Create(IA, {Ptr});
+    Call->setDebugLoc(DL);
+    Call->insertBefore(Pos);
+    if (LI->use_empty())
+      LI->eraseFromParent();
+  }
+
+
+  return true;
+}
+
 static bool replaceUndefPointerWithNullPointer(Function &F) {
   bool Changed = false;
 
@@ -2393,6 +2425,7 @@ bool GoStatepoints::runOnFunction(Function &F, DominatorTree &DT,
   MadeChange |= moveITPToDefAndPTIToUse(F);
   MadeChange |= insertParsePoints(F, DT, LI, TTI, ParsePointNeeded);
   MadeChange |= replaceUndefPointerWithNullPointer(F);
+  MadeChange |= optimizeNilCheck(F);
 
   if (!SplittedBlocks.empty()) {
     for (BasicBlock *BB : SplittedBlocks) {
