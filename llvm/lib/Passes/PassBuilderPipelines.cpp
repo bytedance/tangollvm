@@ -55,6 +55,7 @@
 #include "llvm/Transforms/IPO/GlobalDCE.h"
 #include "llvm/Transforms/IPO/GlobalOpt.h"
 #include "llvm/Transforms/IPO/GlobalSplit.h"
+#include "llvm/Transforms/IPO/GoDevirtualAnno.h"
 #include "llvm/Transforms/IPO/GoROData.h"
 #include "llvm/Transforms/IPO/HotColdSplitting.h"
 #include "llvm/Transforms/IPO/IROutliner.h"
@@ -92,8 +93,8 @@
 #include "llvm/Transforms/Scalar/DivRemPairs.h"
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
 #include "llvm/Transforms/Scalar/Float2Int.h"
-#include "llvm/Transforms/Scalar/GoNilCheckElim.h"
 #include "llvm/Transforms/Scalar/GVN.h"
+#include "llvm/Transforms/Scalar/GoNilCheckElim.h"
 #include "llvm/Transforms/Scalar/IndVarSimplify.h"
 #include "llvm/Transforms/Scalar/InferAlignment.h"
 #include "llvm/Transforms/Scalar/InstSimplifyPass.h"
@@ -1214,6 +1215,10 @@ PassBuilder::buildModuleSimplificationPipeline(OptimizationLevel Level,
 
   MPM.addPass(AlwaysInlinerPass(/*InsertLifetimeIntrinsics=*/true));
 
+  if (TM->getTargetTriple().isGoEnvironment()) {
+    MPM.addPass(GoDevirtualAnnotatorPass());
+  }
+
   if (EnableModuleInliner)
     MPM.addPass(buildModuleInlinerPipeline(Level, Phase));
   else
@@ -1838,6 +1843,9 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
   // Use in-range annotations on GEP indices to split globals where beneficial.
   MPM.addPass(GlobalSplitPass());
 
+  if (TM->getTargetTriple().isGoEnvironment()) {
+    MPM.addPass(GoDevirtualAnnotatorPass());
+  }
   // Run whole program optimization of virtual call when the list of callees
   // is fixed.
   MPM.addPass(WholeProgramDevirtPass(ExportSummary, nullptr));

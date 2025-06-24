@@ -66,5 +66,6 @@ static_library("IPO") {
     "SyntheticCountsPropagation.cpp",
     "ThinLTOBitcodeWriter.cpp",
     "WholeProgramDevirt.cpp",
+    "GoDevritualAnno.cpp",
   ]
 }
