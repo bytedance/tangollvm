@@ -400,7 +400,7 @@ PreservedAnalyses InlinerPass::run(LazyCallGraph::SCC &InitialC,
       InlinedCallees.insert(&Callee);
       ++NumInlined;
       // TANGOLLVM
-      TangoLLVM::updateGoCalleeArgsArea(&Callee, Caller);
+      TangoLLVM::updateMetadataForInlining(&Callee, Caller);
 
       LLVM_DEBUG(dbgs() << "    Size after inlining: "
                         << F.getInstructionCount() << "\n");

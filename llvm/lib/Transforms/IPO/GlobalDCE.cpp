@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-06-24.
 //===----------------------------------------------------------------------===//
 //
 // This transform is designed to eliminate unreachable internal globals from the
@@ -282,9 +284,15 @@ PreservedAnalyses GlobalDCEPass::run(Module &M, ModuleAnalysisManager &MAM) {
     // Functions with external linkage are needed if they have a body.
     // Externally visible & appending globals are needed, if they have an
     // initializer.
-    if (!GO.isDeclaration())
+    if (!GO.isDeclaration()) {
       if (!GO.isDiscardableIfUnused())
         MarkLive(GO);
+    } else {
+      // All Go Globals are external declarations
+      if (GlobalVariable *G = dyn_cast<GlobalVariable>(&GO))
+        if (G->hasMetadata("go.global"))
+          MarkLive(GO);
+    }
 
     UpdateGVDependencies(GO);
   }

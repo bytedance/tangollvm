@@ -688,6 +688,54 @@ void MCGoAuxData::endFunctionImpl(const MachineFunction *MF) {
   }
 
   {
+    if (auto N = MF->getFunction().getMetadata("go.marker.reloc")) {
+      unsigned NumOp = N->getNumOperands();
+      assert(NumOp % 4 == 0 && "must be array");
+
+      std::string symbol = MF->getName().str();
+      symbol += "..markerreloc";
+      MCSymbol *AddrSymbol = Asm->OutContext.getOrCreateSymbol(StringRef(symbol));
+      Asm->OutStreamer->emitLabel(AddrSymbol);
+
+      std::string s;
+      raw_string_ostream OSE(s);
+
+      size_t Offset = 0;
+      support::endian::write(OSE, uint32_t(NumOp / 4), endianness::little);
+      Offset += 4;
+
+      for (unsigned i = 0; i < NumOp; i += 4) {
+        // (type, addend, abi, name)
+        int64_t RType = dyn_cast<ConstantAsMetadata>(N->getOperand(i + 0))->getValue()->getUniqueInteger().getSExtValue();
+        int64_t Addend = dyn_cast<ConstantAsMetadata>(N->getOperand(i + 1))->getValue()->getUniqueInteger().getSExtValue();
+        int64_t ABI = dyn_cast<ConstantAsMetadata>(N->getOperand(i + 2))->getValue()->getUniqueInteger().getSExtValue();
+        StringRef Name = dyn_cast<MDString>(N->getOperand(i + 3))->getString();
+
+        // index
+        support::endian::write(OSE, int32_t(RType), endianness::little);
+        Offset += 4;
+
+        support::endian::write(OSE, uint32_t(ABI), endianness::little);
+        Offset += 4;
+
+        support::endian::write(OSE, int64_t(Addend), endianness::little);
+        Offset += 8;
+
+        uint64_t NameLen = Name.size();
+        support::endian::write(OSE, NameLen, endianness::little);
+        Offset += 8;
+
+        OSE.write(Name.data(), NameLen);
+        Offset += NameLen;
+      }
+
+      assert(Offset == s.size() && "invariant");
+
+      Asm->OutStreamer->emitBinaryData(s);
+    }
+  }
+
+  {
     // emit stack objects
     std::vector<MCGoStackObjectRecord> StackObjects;
     if (auto n = MF->getFunction().getMetadata("go.stackobject.gcdata")) {

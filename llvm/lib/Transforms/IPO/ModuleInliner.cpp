@@ -225,7 +225,7 @@ PreservedAnalyses ModuleInlinerPass::run(Module &M,
 
     Changed = true;
     ++NumInlined;
-    TangoLLVM::updateGoCalleeArgsArea(&Callee, CB->getCaller());
+    TangoLLVM::updateMetadataForInlining(&Callee, CB->getCaller());
 
     LLVM_DEBUG(dbgs() << "    Size after inlining: " << F.getInstructionCount()
                       << "\n");

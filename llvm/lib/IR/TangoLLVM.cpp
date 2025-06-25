@@ -44,20 +44,30 @@ static int64_t getArgAreaSize(Function *F) {
 }
 
 // update go.callee.args.area metadata when inlining
-void TangoLLVM::updateGoCalleeArgsArea(Function *Callee, Function *Caller) {
+void TangoLLVM::updateMetadataForInlining(Function *Callee, Function *Caller) {
+  if (auto CalleeMarker = Callee->getMetadata("go.marker.reloc")) {
+    if (auto CallerMarker = Caller->getMetadata("go.marker.reloc")) {
+      Caller->setMetadata("go.marker.reloc", CalleeMarker);
+    } else {
+      Caller->setMetadata("go.marker.reloc", MDNode::concatenate(CallerMarker, CalleeMarker));
+    }
+  }
+
+
   int64_t CalleeArgAreaSize = getArgAreaSize(Callee);
   int64_t CallerArgAreaSize = getArgAreaSize(Caller);
   // no need to update if the caller has enough arg area
-  if (CallerArgAreaSize >= CalleeArgAreaSize)
-    return;
-  // Caller's go.callee.args.area is too small, update
-  auto newSize = ConstantAsMetadata::get(ConstantInt::get(
-      Type::getInt64Ty(Caller->getContext()), CalleeArgAreaSize));
-  auto newType =
+  if (CallerArgAreaSize < CalleeArgAreaSize) {
+    // Caller's go.callee.args.area is too small, update
+    auto newSize = ConstantAsMetadata::get(ConstantInt::get(
+          Type::getInt64Ty(Caller->getContext()), CalleeArgAreaSize));
+    auto newType =
       ConstantAsMetadata::get(ConstantAggregateZero::get(ArrayType::get(
-          Type::getInt8Ty(Caller->getContext()), CalleeArgAreaSize)));
-  Caller->setMetadata("go.callee.args.area",
-                      MDNode::get(Caller->getContext(), {newSize, newType}));
+              Type::getInt8Ty(Caller->getContext()), CalleeArgAreaSize)));
+    Caller->setMetadata("go.callee.args.area",
+        MDNode::get(Caller->getContext(), {newSize, newType}));
+
+  }
 }
 
 bool TangoLLVM::isObsoleted(Function *Fn) {

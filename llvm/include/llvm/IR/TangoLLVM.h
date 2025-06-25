@@ -32,7 +32,7 @@ class TangoLLVM {
 
 public:
 
-  static void updateGoCalleeArgsArea(Function *Callee, Function *Caller);
+  static void updateMetadataForInlining(Function *Callee, Function *Caller);
 
   static bool isObsoleted(Function *Fn);
   static void markObsoleted(Function *Fn);
