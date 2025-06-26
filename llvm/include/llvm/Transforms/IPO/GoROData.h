@@ -13,8 +13,22 @@
 
 namespace llvm {
 
+struct GoRODataOptions {
+  bool Specialize;
+
+  GoRODataOptions(bool Specialize = false) :
+    Specialize(Specialize) {}
+
+};
+
 struct GoRODataPass : public PassInfoMixin<GoRODataPass> {
+  GoRODataOptions Options;
 public:
+
+  GoRODataPass() = default;
+
+  GoRODataPass(GoRODataOptions Options) : Options(Options) {}
+
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &);
 };
 }

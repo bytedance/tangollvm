@@ -584,6 +584,14 @@ static void rewriteMultiTarget(
   BasicBlock *CurBB = OrigBB;
   std::vector<std::pair<BasicBlock *, Value *>> Results;
 
+  FunctionType *FTy = CI->getFunctionType();
+  for (auto [GV, Target] : FirstN) {
+    // Inconsistent types: the precision of analysis is not good.
+    if (Target->getFunctionType() != FTy)
+      return;
+  }
+
+
   for (auto [GV, Target] : FirstN) {
     if (Target->hasFnAttribute(llvm::Attribute::NoInline)) {
       continue;

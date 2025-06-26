@@ -1603,10 +1603,13 @@ PassBuilder::buildPerModuleDefaultPipeline(OptimizationLevel Level,
   MPM.addPass(buildModuleSimplificationPipeline(Level, LTOPhase));
 
   if (TM->getTargetTriple().isGoEnvironment())
-    MPM.addPass(GoRODataPass());
+    MPM.addPass(GoRODataPass(GoRODataOptions(true)));
 
   // Now add the optimization pipeline.
   MPM.addPass(buildModuleOptimizationPipeline(Level, LTOPhase));
+
+  if (TM->getTargetTriple().isGoEnvironment())
+     MPM.addPass(GoRODataPass(GoRODataOptions(false)));
 
   if (PGOOpt && PGOOpt->PseudoProbeForProfiling &&
       PGOOpt->Action == PGOOptions::SampleUse)
@@ -1769,6 +1772,9 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
   // in the current module.
   MPM.addPass(CrossDSOCFIPass());
 
+  if (TM->getTargetTriple().isGoEnvironment())
+    MPM.addPass(GoRODataPass(GoRODataOptions(true)));
+
   if (Level == OptimizationLevel::O0) {
     // The WPD and LowerTypeTest passes need to run at -O0 to lower type
     // metadata and intrinsics.
@@ -1910,6 +1916,9 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
         InlineContext{ThinOrFullLTOPhase::FullLTOPostLink,
                       InlinePass::CGSCCInliner}));
   }
+
+  if (TM->getTargetTriple().isGoEnvironment())
+    MPM.addPass(GoRODataPass(GoRODataOptions(false)));
 
   // Perform context disambiguation after inlining, since that would reduce the
   // amount of additional cloning required to distinguish the allocation

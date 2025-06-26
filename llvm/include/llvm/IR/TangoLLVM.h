@@ -123,8 +123,9 @@ public:
     return false;
   }
 
-  static Value *resolveLoadROData(LoadInst *LI, const DataLayout &DL);
+  static Constant *resolveLoadROData(LoadInst *LI, const DataLayout &DL);
 
+  static Value *simplifyLoadGoROData(LoadInst *LI);
 };
 
 
