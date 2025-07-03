@@ -21,8 +21,10 @@
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instruction.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/TangoLLVM.h"
+#include "llvm/Support/Alignment.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 using namespace llvm;
@@ -48,6 +50,49 @@ static cl::opt<uint32_t> GoMaxSpecInlineSize("go-max-spec-inline-size", cl::Hidd
 
 static bool replaceLoadROData(Function &F);
 static bool runOnFunction(Function &F, bool specialize, bool useinline);
+
+static bool intrinsifyGoBuiltins(Function &F) {
+  SmallVector<CallInst*, 4> MemClrs;
+
+  for (Instruction &I : instructions(F)) {
+    CallInst *CI = dyn_cast<CallInst>(&I);
+    if (!CI)
+      continue;
+
+    Function *Callee = CI->getCalledFunction();
+    if (!Callee)
+      continue;
+
+    StringRef Name = Callee->getName();
+    if (Name == "runtime.memclrNoHeapPointers") {
+      assert(CI->arg_size() == 2 && "invariant");
+      if (auto * C = dyn_cast<ConstantInt>(CI->getArgOperand(1))) {
+        if (C->getZExtValue() < 128) { // TODO: hard coded threshold here
+          MemClrs.push_back(CI);
+        }
+      }
+    }
+  }
+
+  if (MemClrs.empty())
+    return false;
+
+
+  for (auto *CI : MemClrs) {
+    IRBuilder<> Builder(CI);
+    const Align ArgAlign(1);
+    Builder.CreateMemSet(
+        CI->getArgOperand(0),
+        ConstantInt::get(Type::getInt8Ty(CI->getContext()), 0, false),
+        cast<ConstantInt>(CI->getArgOperand(1))->getZExtValue(),
+        ArgAlign,
+        false);
+
+    CI->eraseFromParent();
+  }
+
+  return true;
+}
 
 static bool isSupportedArg(const Value *V) {
   if (isa<ConstantInt>(V) || isa<ConstantFP>(V))
@@ -166,6 +211,16 @@ static bool specializeGoBuiltins(Function &F, bool UseInline) {
     if (Callee->hasMetadata("go.specialized"))
       continue;
 
+    // hard coded heuristic
+    if (Callee->getName() == "runtime.heapBitsSetType") {
+      Value *ArgSize = CI->getArgOperand(1);
+      Value *ArgType = CI->getArgOperand(3);
+      if (isSupportedArg(ArgSize) && isSupportedArg(ArgType)) {
+        Targets.push_back(CI);
+      }
+      continue;
+    }
+
     // if (Callee->hasFnAttribute(Attribute::NoInline))
     //   continue;
     auto MD = Callee->getMetadata("go.spec.cond");
@@ -203,6 +258,7 @@ static bool specializeGoBuiltins(Function &F, bool UseInline) {
       InlineFunctionInfo FnInfo;
       auto InlineRes = InlineFunction(*CI, FnInfo);
       if (InlineRes.isSuccess()) {
+        Changed = true;
         LLVM_DEBUG(dbgs() << "GoROData: " << F.getName() << ": inline a  specialize function " << Callee->getName() << "\n");
         TangoLLVM::updateMetadataForInlining(Callee, &F);
       }
@@ -269,6 +325,7 @@ static bool runOnFunction(Function &F, bool Specialize, bool UseInline) {
   bool Changed = false;
   while (true) {
     bool IterChanged = replaceLoadROData(F);
+    IterChanged |= intrinsifyGoBuiltins(F);
     if (Specialize && specializeGoBuiltins(F, UseInline)) {
       IterChanged = true;
     }

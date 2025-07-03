@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-07-03.
 //===----------------------------------------------------------------------===//
 //
 // This pass tries to expand memcmp() calls into optimally-sized loads and
@@ -25,6 +27,7 @@
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/PatternMatch.h"
+#include "llvm/IR/TangoLLVM.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
@@ -830,7 +833,7 @@ Value *MemCmpExpansion::getMemCmpExpansion() {
 static bool expandMemCmp(CallInst *CI, const TargetTransformInfo *TTI,
                          const TargetLowering *TLI, const DataLayout *DL,
                          ProfileSummaryInfo *PSI, BlockFrequencyInfo *BFI,
-                         DomTreeUpdater *DTU, const bool IsBCmp) {
+                         DomTreeUpdater *DTU, const bool IsBCmp, const bool IsGo = false) {
   NumMemCmpCalls++;
 
   // Early exit from expansion if -Oz.
@@ -868,6 +871,9 @@ static bool expandMemCmp(CallInst *CI, const TargetTransformInfo *TTI,
   if (!OptForSize && MaxLoadsPerMemcmp.getNumOccurrences())
     Options.MaxNumLoads = MaxLoadsPerMemcmp;
 
+  if (IsGo && Options.MaxNumLoads == 0)
+    Options.MaxNumLoads = 4;
+
   MemCmpExpansion Expansion(CI, SizeVal, Options, IsUsedForZeroCmp, *DL, DTU);
 
   // Don't expand if this will require more loads than desired by the target.
@@ -879,9 +885,59 @@ static bool expandMemCmp(CallInst *CI, const TargetTransformInfo *TTI,
   NumMemCmpInlined++;
 
   if (Value *Res = Expansion.getMemCmpExpansion()) {
+    if (IsGo) {
+      PHINode *PhiRes = dyn_cast<PHINode>(Res);
+      if (PhiRes) {
+        assert(PhiRes->getNumIncomingValues() == 2 && "invariant");
+
+        ConstantInt *V0 = dyn_cast<ConstantInt>(PhiRes->getIncomingValue(0));
+        ConstantInt *V1 = dyn_cast<ConstantInt>(PhiRes->getIncomingValue(1));
+        assert(V0 != nullptr && V1 != nullptr && V0 != V1 && "invariant");
+
+        BasicBlock *B0 = PhiRes->getIncomingBlock(0);
+        BasicBlock *B1 = PhiRes->getIncomingBlock(1);
+
+        Type * I1Ty = Type::getInt1Ty(CI->getContext());
+        assert(I1Ty == CI->getType() && "invariant");
+        Value *Zero = ConstantInt::get(I1Ty, 0);
+        Value *One = ConstantInt::get(I1Ty, 1);
+
+        PHINode* NewPhiRes = PHINode::Create(I1Ty, 2, "memequal.replace");
+        if (V0->isZero() && V1->isOne()) {
+          NewPhiRes->addIncoming(One, B0);
+          NewPhiRes->addIncoming(Zero, B1);
+        } else if (V0->isOne() && V1->isZero()) {
+          NewPhiRes->addIncoming(Zero, B0);
+          NewPhiRes->addIncoming(One, B1);
+        } else {
+          report_fatal_error("TODO");
+        }
+
+        NewPhiRes->insertAfter(PhiRes);
+        assert(PhiRes->use_empty() && "not replaced yet");
+        // PhiRes->replaceAllUsesWith(NewPhiRes);
+        Res = NewPhiRes;
+      } else {
+        IRBuilder<> Builder(CI);
+        if (match(Res, m_ZExt(m_ICmp(m_Value(), m_Value())))) {
+          ZExtInst *ZExt = cast<ZExtInst>(Res);
+          ICmpInst *CMP = cast<ICmpInst>(ZExt->getOperand(0));
+          CMP->setPredicate(CMP->getInversePredicate());
+          if (ZExt->use_empty())
+            ZExt->eraseFromParent();
+          Res = CMP;
+        } else {
+          Res = Builder.CreateICmpEQ(Res, ConstantInt::get(Res->getType(), 0), "bcmp.i1");
+          CI->getParent()->getParent()->dump();
+        }
+      }
+    }
+
     // Replace call with result of expansion and erase call.
     CI->replaceAllUsesWith(Res);
     CI->eraseFromParent();
+  } else {
+    assert(!IsGo && "Go must have a res that we can cast to i1");
   }
 
   return true;
@@ -891,7 +947,7 @@ static bool expandMemCmp(CallInst *CI, const TargetTransformInfo *TTI,
 static bool runOnBlock(BasicBlock &BB, const TargetLibraryInfo *TLI,
                        const TargetTransformInfo *TTI, const TargetLowering *TL,
                        const DataLayout &DL, ProfileSummaryInfo *PSI,
-                       BlockFrequencyInfo *BFI, DomTreeUpdater *DTU);
+                       BlockFrequencyInfo *BFI, DomTreeUpdater *DTU, bool IsGo);
 
 static PreservedAnalyses runImpl(Function &F, const TargetLibraryInfo *TLI,
                                  const TargetTransformInfo *TTI,
@@ -946,18 +1002,39 @@ private:
 bool runOnBlock(BasicBlock &BB, const TargetLibraryInfo *TLI,
                 const TargetTransformInfo *TTI, const TargetLowering *TL,
                 const DataLayout &DL, ProfileSummaryInfo *PSI,
-                BlockFrequencyInfo *BFI, DomTreeUpdater *DTU) {
+                BlockFrequencyInfo *BFI, DomTreeUpdater *DTU, bool IsGo) {
+  std::function<bool(CallInst*)> runOnCall;
+  if (IsGo) {
+    runOnCall = [&](CallInst *CI) {
+      Function *Callee = CI->getCalledFunction();
+      if (Callee == nullptr)
+        return false;
+      // compare name is expansive than compare arg_size
+      if (Callee->arg_size() != 3)
+        return false;
+      if (Callee->getName() != "runtime.memequal")
+        return false;
+      return expandMemCmp(CI, TTI, TL, &DL, PSI, BFI, DTU, true, true);
+    };
+  } else {
+    runOnCall = [&](CallInst *CI) {
+      LibFunc Func;
+      if (TLI->getLibFunc(*CI, Func) &&
+          (Func == LibFunc_memcmp || Func == LibFunc_bcmp) &&
+          expandMemCmp(CI, TTI, TL, &DL, PSI, BFI, DTU, Func == LibFunc_bcmp)) {
+        return true;
+      }
+      return false;
+    };
+  }
+
   for (Instruction &I : BB) {
     CallInst *CI = dyn_cast<CallInst>(&I);
     if (!CI) {
       continue;
     }
-    LibFunc Func;
-    if (TLI->getLibFunc(*CI, Func) &&
-        (Func == LibFunc_memcmp || Func == LibFunc_bcmp) &&
-        expandMemCmp(CI, TTI, TL, &DL, PSI, BFI, DTU, Func == LibFunc_bcmp)) {
+    if (runOnCall(CI))
       return true;
-    }
   }
   return false;
 }
@@ -972,8 +1049,9 @@ PreservedAnalyses runImpl(Function &F, const TargetLibraryInfo *TLI,
 
   const DataLayout& DL = F.getDataLayout();
   bool MadeChanges = false;
+  bool IsGo = TangoLLVM::isGoABIInternal(F);
   for (auto BBIt = F.begin(); BBIt != F.end();) {
-    if (runOnBlock(*BBIt, TLI, TTI, TL, DL, PSI, BFI, DTU ? &*DTU : nullptr)) {
+    if (runOnBlock(*BBIt, TLI, TTI, TL, DL, PSI, BFI, DTU ? &*DTU : nullptr, IsGo)) {
       MadeChanges = true;
       // If changes were made, restart the function from the beginning, since
       // the structure of the function was changed.
