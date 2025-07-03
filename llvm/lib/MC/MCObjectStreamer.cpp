@@ -952,3 +952,26 @@ void MCObjectStreamer::emitGoFileTab(ArrayRef<MCGoFileEntry> FileEntries) {
 
   assert(Offset == Data.size() && "File tab data size mismatch");
 }
+
+void MCObjectStreamer::emitGoDwarfInfo(ArrayRef<MCGoDwarfEntry> Entries) {
+  MCDataFragment *DF = getOrCreateDataFragment();
+  SmallVectorImpl<char> &Data = DF->getContents();
+  size_t Offset = Data.size();
+  raw_svector_ostream OSE(Data);
+
+  support::endian::write(OSE, uint32_t(Entries.size()), endianness::little);
+  Offset += 4;
+
+  for (const MCGoDwarfEntry &E : Entries) {
+    support::endian::write(OSE, E.FileNum, endianness::little);
+    support::endian::write(OSE, E.Line, endianness::little);
+    Offset += 4 + 4;
+
+    support::endian::write(OSE, E.Column, endianness::little);
+    support::endian::write(OSE, E.Flags, endianness::little);
+    support::endian::write(OSE, uint8_t(0), endianness::little); // padding
+    Offset += 2 + 1 + 1;
+  }
+
+  assert(Offset == Data.size() && "dwarf entry emit invariant failed");
+}

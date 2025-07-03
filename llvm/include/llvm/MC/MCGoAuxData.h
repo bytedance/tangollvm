@@ -37,6 +37,18 @@ struct MCGoFileEntry {
   int32_t Index;
   MCGoFileEntry(StringRef D, StringRef F, int32_t I) : Dir(D.str()), File(F.str()), Index(I) {}
 };
+
+struct MCGoDwarfEntry {
+  uint32_t FileNum;
+  uint32_t Line;
+  uint16_t Column;
+  uint8_t Flags;
+
+  MCGoDwarfEntry(uint32_t file_num, uint32_t line,
+                 uint16_t column, uint8_t flags)
+      : FileNum(file_num), Line(line), Column(column), Flags(flags) {}
+};
+
 struct MCGoStackObjectRecord {
   int32_t FrameOffset;
   int32_t ObjectSize;

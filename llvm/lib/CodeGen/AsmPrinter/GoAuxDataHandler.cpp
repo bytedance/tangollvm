@@ -114,7 +114,6 @@ void MCGoAuxData::beginModule(Module *M) {
     }
   }
 
-
   // switch section after creating end symbol
   const TargetLoweringObjectFile &TLOF= Asm->getObjFileLowering();
   const DataLayout &DL = Asm->getDataLayout();
@@ -907,6 +906,19 @@ void MCGoAuxData::endFunctionImpl(const MachineFunction *MF) {
     Asm->OutStreamer->emitGoFuncInfo(FuncInfo);
   }
   {
+    appendPCData(PCIndex, LastPCIndex++, EndFunc);
+    std::string symbol = MF->getName().str();
+    symbol += "..pcindex";
+    emitPCData(PCIndex, symbol);
+  }
+  {
+    std::string symbol = MF->getName().str();
+    symbol += "..dwarflines";
+    MCSymbol *AddrSymbol = Asm->OutContext.getOrCreateSymbol(StringRef(symbol));
+    Asm->OutStreamer->emitLabel(AddrSymbol);
+    Asm->OutStreamer->emitGoDwarfInfo(DwarfTable);
+  }
+  {
     std::string symbol = MF->getName().str();
     symbol += "..endaux";
     MCSymbol *AddrSymbol = Asm->OutContext.getOrCreateSymbol(StringRef(symbol));
@@ -1041,6 +1053,18 @@ void MCGoAuxData::beginInstruction(const MachineInstr *MI) {
     }
   }
 
+  {
+    auto DwarfLoc = Asm->OutContext.getCurrentDwarfLoc();
+    DwarfTable.push_back(
+      MCGoDwarfEntry(
+        DwarfLoc.getFileNum(),
+        DwarfLoc.getLine(),
+        DwarfLoc.getColumn(),
+        DwarfLoc.getFlags()
+      )
+    );
+    appendPCData(PCIndex, LastPCIndex++, getOrCreatePrePCSymbol(MI));
+  }
   if (PrePC != nullptr) {
     Asm->OutStreamer->emitLabel(PrePC);
     PrePC = nullptr;

@@ -55,8 +55,10 @@ private:
 
   std::vector<PCData> PCUnsafePoint;
   std::vector<PCData> PCStackMapIndex;
+  std::vector<PCData> PCIndex;
 
   std::vector<MCGoFileEntry> FileTable;
+  std::vector<MCGoDwarfEntry> DwarfTable;
   bool FuncInfoHasStartLine;
 
   int32_t LastSPAdjust;
@@ -66,6 +68,7 @@ private:
   int32_t LastFileIndex;
   int32_t LastLineNumber;
   int32_t LastInlineTree;
+  int32_t LastPCIndex;
   bool    FileStarted;
   bool    LineStarted;
   bool    InlineTreeStarted;
@@ -116,6 +119,7 @@ private:
     LastLineNumber = -1;
     LastInlineTree = -1;
     LastStackMapIndex = -1;
+    LastPCIndex = -1;
     FileStarted = false;
     LineStarted = false;
     InlineTreeStarted = false;
@@ -127,14 +131,17 @@ private:
     PCLine.clear();
     PCInline.clear();
     PCStackMapIndex.clear();
+    PCIndex.clear();
 
     PCUnsafePoint.clear();
     PCStackMapIndex.clear();
 
     FuncInfo.clear();
+    DwarfTable.clear();
     // FunctionBeginID is the maximum ID seen in previous functions.
     // See GoGCPrinter.cpp
     FunctionBeginID = MaxStatepointID;
+
   }
 
   static unsigned ptrDataSize(const DataLayout&, Type*);

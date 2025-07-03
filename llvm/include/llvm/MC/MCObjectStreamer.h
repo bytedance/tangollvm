@@ -156,6 +156,7 @@ public:
   void emitGoFuncInfo(MCGoFuncInfo &FuncInfo) override;
   void emitGoPCDataEntry(int64_t ValueDelta, const MCExpr* PCDelta) override;
   void emitGoFileTab(ArrayRef<MCGoFileEntry> FileEntries) override;
+  void emitGoDwarfInfo(ArrayRef<MCGoDwarfEntry> Entries) override;
   void emitGoBytes(StringRef Data) override;
   void emitDwarfAdvanceFrameAddr(const MCSymbol *LastLabel,
                                  const MCSymbol *Label, SMLoc Loc);
