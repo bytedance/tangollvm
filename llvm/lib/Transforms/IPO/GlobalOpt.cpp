@@ -1318,7 +1318,7 @@ static bool
 deleteIfDead(GlobalValue &GV,
              SmallPtrSetImpl<const Comdat *> &NotDiscardableComdats,
              function_ref<void(Function &)> DeleteFnCallback = nullptr) {
-  if (GlobalVariable *G = dyn_cast<GlobalVariable>(&GV))
+  if (GlobalObject *G = dyn_cast<GlobalObject>(&GV))
     if (G->hasMetadata("go.global"))
       return false;
 

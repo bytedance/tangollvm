@@ -1609,7 +1609,7 @@ PassBuilder::buildPerModuleDefaultPipeline(OptimizationLevel Level,
   MPM.addPass(buildModuleOptimizationPipeline(Level, LTOPhase));
 
   if (TM->getTargetTriple().isGoEnvironment())
-     MPM.addPass(GoRODataPass(GoRODataOptions(false)));
+     MPM.addPass(GoRODataPass(GoRODataOptions(true)));
 
   if (PGOOpt && PGOOpt->PseudoProbeForProfiling &&
       PGOOpt->Action == PGOOptions::SampleUse)

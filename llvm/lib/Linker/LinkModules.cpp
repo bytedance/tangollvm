@@ -54,7 +54,7 @@ class ModuleLinker {
 
   bool shouldOverrideFromSrc() { return Flags & Linker::OverrideFromSrc; }
   bool shouldLinkOnlyNeeded() { return Flags & Linker::LinkOnlyNeeded; }
-  bool shouldSkipWhenLink() { return Flags & Linker::SkipWhenLink; }
+  bool isTangoLLVM() { return Flags & Linker::TangoLLVM; }
   bool shouldLinkFromSource(bool &LinkFromSrc, const GlobalValue &Dest,
                             const GlobalValue &Src);
 
@@ -239,6 +239,15 @@ bool ModuleLinker::getComdatResult(const Comdat *SrcC,
   return computeResultingSelectionKind(ComdatName, SSK, DSK, Result, From);
 }
 
+static int64_t compareMDs(const GlobalObject *LHS, const GlobalObject *RHS) {
+  SmallVector<std::pair<unsigned, MDNode *>, 4> LHSMDs;
+  SmallVector<std::pair<unsigned, MDNode *>, 4> RHSMDs;
+  LHS->getAllMetadata(LHSMDs);
+  RHS->getAllMetadata(RHSMDs);
+  return int64_t(LHSMDs.size()) - int64_t(RHSMDs.size());
+}
+
+
 bool ModuleLinker::shouldLinkFromSource(bool &LinkFromSrc,
                                         const GlobalValue &Dest,
                                         const GlobalValue &Src) {
@@ -319,9 +328,69 @@ bool ModuleLinker::shouldLinkFromSource(bool &LinkFromSrc,
     return false;
   }
 
-  if (shouldSkipWhenLink()) {
-    LinkFromSrc = true;
-    return false;
+  if (isTangoLLVM()) {
+    if (const Function *SrcFn = dyn_cast<Function>(&Src)) {
+      if (const Function *DestFn = dyn_cast<Function>(&Dest)) {
+        if (SrcFn->getType() != DestFn->getType()) {
+          return emitError("Mismatched type: " + Src.getName());
+        }
+
+        int64_t cmp = compareMDs(SrcFn, DestFn);
+        if (cmp == 0) {
+          // Large functions may be caused by more inlining.
+          LinkFromSrc = SrcFn->getInstructionCount() > DestFn->getInstructionCount();
+        } else {
+          // We need to pick one that have more metadata.
+          LinkFromSrc = cmp > 0;
+        }
+
+        return false;
+      } else if (const GlobalVariable *DestGV = dyn_cast<GlobalVariable>(&Dest)) {
+        // Use Function over Global because some Globals are created from
+        // obj.LSym directly, where no exact type is given.
+        LinkFromSrc = true;
+        (void)SrcFn;
+        (void)DestGV;
+        return false;
+      } else {
+        return emitError("Unknown global value: " + Dest.getName());
+      }
+    } else if (const GlobalVariable *SrcGV = dyn_cast<GlobalVariable>(&Src)) {
+      if (const Function *DestFn = dyn_cast<Function>(&Dest)) {
+        // Use Function over Global because some Globals are created from
+        // obj.LSym directly, where no exact type is given.
+        LinkFromSrc = false;
+        (void)SrcGV;
+        (void)DestFn;
+        return false;
+      } else if (const GlobalVariable *DestGV = dyn_cast<GlobalVariable>(&Dest)) {
+        // Two globals:
+        if (SrcGV->hasMetadata("go.rodata")) {
+          LinkFromSrc = true;
+        } else if (DestGV->hasMetadata("go.rodata")) {
+          LinkFromSrc = false;
+        } else {
+          // compare the ValueType
+          auto IsInt8Ty = [](Type *Ty) {
+            return Ty->isIntegerTy() && Ty->getIntegerBitWidth() == 8;
+          };
+          // Int8 is the default type when type is unknown.
+          if (IsInt8Ty(DestGV->getValueType())) {
+            LinkFromSrc = true;
+          } else if (IsInt8Ty(SrcGV->getValueType())) {
+            LinkFromSrc = false;
+          } else {
+            // Prefer the one with more metadata
+            LinkFromSrc = compareMDs(SrcGV, DestGV) > 0;
+          }
+        }
+        return false;
+      } else {
+        return emitError("Unknown global value: " + Dest.getName());
+      }
+    } else {
+      return emitError("Unknown global value: " + Src.getName());
+    }
   }
 
   assert(!Src.hasExternalWeakLinkage());
@@ -386,8 +455,108 @@ bool ModuleLinker::linkIfNeeded(GlobalValue &GV,
        GV.hasAvailableExternallyLinkage()))
     return false;
 
-  if (GV.isDeclaration())
+  if (GV.isDeclaration()) {
+    auto *SGVar = dyn_cast<GlobalVariable>(&GV);
+    if (DGV && isTangoLLVM()) {
+      auto *DGVar = dyn_cast<GlobalVariable>(DGV);
+      if (DGVar && SGVar) {
+        if (auto *SMD = SGVar->getMetadata("go.rodata")) {
+          if (auto *DMD = DGVar->getMetadata("go.rodata")) {
+            // compare DMD and SMD
+            std::function<int(MDNode*,MDNode*)> checkMDs;
+            checkMDs = [&](MDNode *LHS, MDNode *RHS) {
+              auto LN = LHS->getNumOperands();
+              auto RN = RHS->getNumOperands();
+              // The same RO data may miss symbol. For example,
+              // a type descriptor may not have a relocation on
+              // ptrToThis if the Ptr type of the type is not created.
+              if (LN > RN) {
+                return 1;
+              } else if (LN < RN) {
+                return -1;
+              }
+              for (unsigned I = 0; I < LN; ++I) {
+                // All metadata in go.rodata are constants.
+                auto &LMO = LHS->getOperand(I);
+                auto &RMO = RHS->getOperand(I);
+                if (!LMO || !RMO) {
+                  if (LMO) {
+                    return 1;
+                  }
+                  if (RMO) {
+                    return -1;
+                  }
+                  // both miss data
+                  continue;
+                }
+
+                {
+                  auto *L = dyn_cast<MDNode>(LHS->getOperand(I));
+                  auto *R = dyn_cast<MDNode>(RHS->getOperand(I));
+                  if (L) {
+                    if (!R)
+                      report_fatal_error("mismatched value");
+                    auto cmp = checkMDs(L, R);
+                    if (cmp != 0) {
+                      return cmp;
+                    }
+                    continue;
+                  } else if (R) {
+                    report_fatal_error("mismatched global value name");
+                  }
+                }
+
+                {
+                  auto L = dyn_cast<MDString>(LHS->getOperand(I));
+                  auto R = dyn_cast<MDString>(RHS->getOperand(I));
+                  if (L) {
+                    if (!R)
+                      report_fatal_error("mismatched value");
+                    if (L != R)
+                      report_fatal_error("mismatched string");
+                    continue;
+                  } else if (R) {
+                    report_fatal_error("mismatched global value name");
+                  }
+                }
+
+                {
+                  auto L = dyn_cast<ConstantAsMetadata>(LHS->getOperand(I));
+                  auto R = dyn_cast<ConstantAsMetadata>(RHS->getOperand(I));
+                  if (L == nullptr || R == nullptr)
+                    report_fatal_error("GlobalOpt and GlobalDCE should not remove Go globals");
+
+                  Value *LV = L->getValue();
+                  Value *RV = R->getValue();
+                  if (isa<GlobalValue>(LV)) {
+                    if (!isa<GlobalValue>(RV))
+                      report_fatal_error("mismatched value");
+
+                    if (LV->getName() != RV->getName())
+                      report_fatal_error("mismatched global value name");
+                  } else if (isa<GlobalValue>(RV)) {
+                    report_fatal_error("mismatched value type");
+                  } else {
+                    // both values are other constants
+                    if (LV != RV)
+                      report_fatal_error("mismatched constant values");
+                  }
+                }
+              }
+              return 0;
+            };
+            auto cmp = checkMDs(SMD, DMD);
+            if (cmp > 0) {
+              DGVar->setMetadata("go.rodata", SMD);
+            }
+          } else {
+            DGVar->setMetadata("go.rodata", SMD);
+          }
+        }
+      }
+    }
     return false;
+  }
 
   LinkFrom ComdatFrom = LinkFrom::Dst;
   if (const Comdat *SC = GV.getComdat()) {
@@ -539,6 +708,62 @@ bool ModuleLinker::run() {
     if (GA.hasLinkOnceLinkage())
       if (const Comdat *SC = GA.getComdat())
         LazyComdatMembers[SC].push_back(&GA);
+
+  if (isTangoLLVM()) {
+    // We keep all globals and functions declarations for TangoLLVM
+    for (GlobalVariable &GV : SrcM->globals()) {
+      if (!GV.hasMetadata("go.global")) {
+        continue;
+      }
+      assert(GV.isDeclaration() && "invariant");
+      assert(GV.getLinkage() == GlobalValue::ExternalLinkage && "invariant");
+      assert(GV.isConstant() == false && "invariant");
+      assert(GV.hasInitializer() == false && "invariant");
+      GlobalValue *DGV = DstM.getNamedValue(GV.getName());
+      if (!DGV) {
+        // copy the global variable declaration to DstM for GoROData
+        auto *NewVar = new GlobalVariable(DstM, GV.getValueType(),
+            false, GlobalValue::ExternalLinkage, nullptr, GV.getName());
+        NewVar->copyAttributesFrom(&GV);
+        NewVar->copyMetadata(&GV, 0);
+      }
+    }
+
+    for (Function &SF : *SrcM) {
+      // Copy declarations only here
+      if (!SF.isDeclaration())
+        continue;
+      if (!SF.hasMetadata("go.global"))
+        continue;
+
+      GlobalValue *DGV = DstM.getNamedValue(SF.getName());
+      if (DGV) {
+        if (isa<Function>(DGV)) {
+          continue;
+        }
+      }
+      // DGV is either nullptr or a GlobalVariable
+      GlobalVariable *DGVar = dyn_cast_or_null<GlobalVariable>(DGV);
+      // Create the new Function
+      if (DGVar) {
+        if (DGVar->hasMetadata("go.rodata"))
+          report_fatal_error("a placeholder global variable should not have go.rodata");
+        auto *NewF = Function::Create(SF.getFunctionType(), GlobalValue::ExternalLinkage, "", &DstM);
+        NewF->copyAttributesFrom(&SF);
+        NewF->copyMetadata(&SF, 0);
+        if (!DGVar->use_empty()) {
+          // should be empty because the global is just a placeholder
+          DGVar->replaceAllUsesWith(NewF);
+        }
+        DGVar->eraseFromParent();
+        NewF->takeName(DGVar);
+      } else {
+        auto *NewF = Function::Create(SF.getFunctionType(), GlobalValue::ExternalLinkage, SF.getName(), &DstM);
+        NewF->copyAttributesFrom(&SF);
+        NewF->copyMetadata(&SF, 0);
+      }
+    }
+  }
 
   // Insert all of the globals in src into the DstM module... without linking
   // initializers (which could refer to functions not yet mapped over).

@@ -95,8 +95,8 @@ static cl::opt<bool> OnlyNeeded("only-needed",
                                 cl::desc("Link only needed symbols"),
                                 cl::cat(LinkCategory));
 
-static cl::opt<bool> SkipWhenLink("skip-when-link",
-                                  cl::desc("skip when link."),
+static cl::opt<bool> TangoLLVM("tango",
+                                  cl::desc("TangoLLVM policy."),
                                   cl::cat(LinkCategory));
 
 static cl::opt<bool> Force("f", cl::desc("Enable binary output on terminals"),
@@ -522,8 +522,8 @@ int main(int argc, char **argv) {
   unsigned Flags = Linker::Flags::None;
   if (OnlyNeeded)
     Flags |= Linker::Flags::LinkOnlyNeeded;
-  if (SkipWhenLink)
-    Flags |= Linker::Flags::SkipWhenLink;
+  if (TangoLLVM)
+    Flags |= Linker::Flags::TangoLLVM;
   // First add all the regular input files
   if (!linkFiles(argv[0], Context, L, InputFilenames, Flags))
     return 1;

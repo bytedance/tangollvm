@@ -53,6 +53,7 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/Statepoint.h"
+#include "llvm/IR/TangoLLVM.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Value.h"
@@ -4085,7 +4086,7 @@ bool InstCombinerImpl::transformConstExprCastCall(CallBase &Call) {
 
   // TANGOLLVM
   // go.closurecall requires the bitcast to pass contextptr
-  if (Call.hasFnAttr("go.closurecall"))
+  if (TangoLLVM::isGoClosureCall(&Call))
     return false;
 
   // If this is a call to a thunk function, don't remove the cast. Thunks are

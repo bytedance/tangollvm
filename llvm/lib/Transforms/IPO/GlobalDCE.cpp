@@ -288,10 +288,10 @@ PreservedAnalyses GlobalDCEPass::run(Module &M, ModuleAnalysisManager &MAM) {
       if (!GO.isDiscardableIfUnused())
         MarkLive(GO);
     } else {
-      // All Go Globals are external declarations
-      if (GlobalVariable *G = dyn_cast<GlobalVariable>(&GO))
-        if (G->hasMetadata("go.global"))
-          MarkLive(GO);
+      // All Go Globals are external declarations.
+      // Also, a Go function could be referenced by itab.
+      if (GO.hasMetadata("go.global"))
+        MarkLive(GO);
     }
 
     UpdateGVDependencies(GO);

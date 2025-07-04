@@ -38,6 +38,10 @@ public:
   static bool isObsoleted(Function *Fn);
   static void markObsoleted(Function *Fn);
 
+  static bool isGoClosureCall(CallBase *CB) {
+    return CB->hasFnAttr("go.closurecall");
+  }
+
   // Note that all these symbols must be builtin symbols, which means they always
   // have prefix "runtime.", even we are building the runtime package.
   static bool isZeroArgRuntimeCall(StringRef FuncName) {

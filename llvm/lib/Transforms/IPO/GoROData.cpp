@@ -21,6 +21,7 @@
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instruction.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/TangoLLVM.h"
@@ -42,17 +43,18 @@ static cl::opt<bool> EnableGoROData("go-rodata", cl::Hidden,
 static cl::opt<bool> EnableGoSpecialization("go-specialization", cl::Hidden,
                                   cl::init(true));
 
+static cl::opt<bool> AggressiveSpecialization("go-aggressive-spec", cl::Hidden,
+                                  cl::init(false));
+
 static cl::opt<uint32_t> GoMaxSpecInlineSize("go-max-spec-inline-size", cl::Hidden,
                                   cl::init(2500));
-
-
-
 
 static bool replaceLoadROData(Function &F);
 static bool runOnFunction(Function &F, bool specialize, bool useinline);
 
 static bool intrinsifyGoBuiltins(Function &F) {
   SmallVector<CallInst*, 4> MemClrs;
+  SmallVector<CallInst*, 4> MemHashs;
 
   for (Instruction &I : instructions(F)) {
     CallInst *CI = dyn_cast<CallInst>(&I);
@@ -60,8 +62,11 @@ static bool intrinsifyGoBuiltins(Function &F) {
       continue;
 
     Function *Callee = CI->getCalledFunction();
-    if (!Callee)
-      continue;
+    if (!Callee) {
+      Callee = dyn_cast<Function>(CI->getCalledOperand()->stripPointerCasts());
+      if (!Callee)
+        continue;
+    }
 
     StringRef Name = Callee->getName();
     if (Name == "runtime.memclrNoHeapPointers") {
@@ -71,12 +76,12 @@ static bool intrinsifyGoBuiltins(Function &F) {
           MemClrs.push_back(CI);
         }
       }
+    } else if (Name == "runtime.memhash64" || Name == "runtime.memhash32") {
+      MemHashs.push_back(CI);
     }
   }
 
-  if (MemClrs.empty())
-    return false;
-
+  bool Changed = false;
 
   for (auto *CI : MemClrs) {
     IRBuilder<> Builder(CI);
@@ -89,13 +94,87 @@ static bool intrinsifyGoBuiltins(Function &F) {
         false);
 
     CI->eraseFromParent();
+    Changed = true;
   }
 
-  return true;
+  if (MemHashs.empty()) {
+    return Changed;
+  }
+
+  // TODO: Move to X86 specific files
+  Intrinsic::ID ID = Function::lookupIntrinsicID("llvm.x86.aesni.aesenc");
+  if (ID == 0)
+    return Changed;
+
+  LLVMContext &Context = F.getContext();
+  Type *i64 = Type::getInt64Ty(Context);
+  Type *i32 = Type::getInt32Ty(Context);
+  Type *i8 = Type::getInt8Ty(Context);
+  VectorType * v2i64 = FixedVectorType::get(i64, 2);
+
+  Module *M = F.getParent();
+  GlobalVariable *G = M->getGlobalVariable("runtime.aeskeysched");
+  if (G == nullptr) {
+    G = new GlobalVariable(*M, i8, false, GlobalValue::ExternalLinkage, nullptr, "runtime.aeskeysched");
+  }
+  Value *G16 = ConstantExpr::getGetElementPtr(i8, G, ConstantInt::get(i32, 16));
+  Value *G32 = ConstantExpr::getGetElementPtr(i8, G, ConstantInt::get(i32, 32));
+
+  Value *Zero = ConstantInt::get(i32, 0);
+  Value  *One = ConstantInt::get(i32, 1);
+
+  for (auto *CI : MemHashs) {
+    IRBuilder<> Builder(CI);
+
+    unsigned ArgBegin = 0;
+    // memhash32 and memhash64 have two parameters.
+    // However, they could used as the type->hasher via function pointer
+    if (CI->arg_size() == 2) {
+      ArgBegin = 0;
+    } else if (CI->arg_size() == 3) {
+      if (!TangoLLVM::isGoClosureCall(CI)) {
+        report_fatal_error("inconsistent arg size of memhash32 or memhash64");
+      }
+      ArgBegin = 1;
+    } else {
+      report_fatal_error("inconsistent arg size of memhash32 or memhash64");
+    }
+
+    Value *AX = CI->getArgOperand(ArgBegin + 0);
+    Value *BX = CI->getArgOperand(ArgBegin + 1);
+
+    Function *Callee = CI->getCalledFunction();
+    if (!Callee) {
+      Callee = dyn_cast<Function>(CI->getCalledOperand()->stripPointerCasts());
+    }
+
+    assert(Callee != nullptr && "invariant");
+
+    Value *X0 = UndefValue::get(v2i64);
+    X0 = Builder.CreateInsertElement(X0, BX, Zero);
+    if (Callee->getName() == "runtime.memhash32") {
+      X0 = Builder.CreateInsertElement(X0, Builder.CreateZExt(Builder.CreateLoad(i32, AX), i64), One);
+    } else if (Callee->getName() == "runtime.memhash64") {
+      X0 = Builder.CreateInsertElement(X0, Builder.CreateLoad(i64, AX), One);
+    } else {
+      report_fatal_error("hash intrinsics not implemented yet");
+    }
+
+    X0 = Builder.CreateIntrinsic(ID, {}, {X0, Builder.CreateLoad(v2i64, G)});
+    X0 = Builder.CreateIntrinsic(ID, {}, {X0, Builder.CreateLoad(v2i64, G16)});
+    X0 = Builder.CreateIntrinsic(ID, {}, {X0, Builder.CreateLoad(v2i64, G32)});
+    AX = Builder.CreateExtractElement(X0, Zero);
+
+    CI->replaceAllUsesWith(AX);
+    CI->eraseFromParent();
+    Changed = true;
+  }
+
+  return Changed;
 }
 
 static bool isSupportedArg(const Value *V) {
-  if (isa<ConstantInt>(V) || isa<ConstantFP>(V))
+  if (isa<ConstantInt>(V) || isa<ConstantFP>(V) || isa<ConstantPointerNull>(V))
     return true;
   if (auto *F = dyn_cast<Function>(V))
     return !F->isDeclaration();
@@ -105,24 +184,39 @@ static bool isSupportedArg(const Value *V) {
   return false;
 }
 
-static CallInst *specializeCall(Function &F, CallInst *CI) {
+const uint64_t AggressiveFlag = 1 << 31;
+
+static CallInst *specializeCall(Function &F, CallInst *CI, bool Aggressive) {
   Function* Callee = CI->getCalledFunction();
   if (Callee->hasMetadata("go.specialized"))
     return nullptr;
 
-  assert(Callee != nullptr && "invariant");
+  auto MD = Callee->getMetadata("go.spec.cond");
+  assert(MD != nullptr && "invariant");
+
+  uint64_t ArgPos = dyn_cast<ConstantAsMetadata>(MD->getOperand(0))
+    ->getValue()->getUniqueInteger().getZExtValue();
 
   // "CalleeName,,,{ArgNo,ArgVal},,,specialized"
   std::string SpecName;
   SpecName += Callee->getName();
   SpecName += ",,,";
 
+  auto TakeArg = [&](Value *Arg, unsigned Pos) {
+    if (Aggressive || ((ArgPos & AggressiveFlag) != 0))
+      return isSupportedArg(Arg);
+    if (ArgPos == 0)
+      return Pos == 0;
+    return (ArgPos & (1 << Pos)) != 0;
+  };
+
   // Copy necessary attributes
   for (unsigned I = 0, E = Callee->arg_size(); I < E; I++) {
     Value *Arg = CI->getArgOperand(I);
-    if (!isSupportedArg(Arg)) {
+    if (!TakeArg(Arg, I)) {
       continue;
     }
+    assert(isSupportedArg(Arg) && "invariant");
     SpecName += std::to_string(I);
     SpecName += ",";
 
@@ -134,6 +228,8 @@ static CallInst *specializeCall(Function &F, CallInst *CI) {
       SmallString<40> S;
       C->getValue().toString(S);
       SpecName += S;
+    } else if (isa<ConstantPointerNull>(Arg)) {
+      SpecName += "null";
     } else {
       SpecName += Arg->getName();
     }
@@ -156,7 +252,7 @@ static CallInst *specializeCall(Function &F, CallInst *CI) {
     ValueToValueMapTy VMap;
     for (unsigned I = 0, E = Callee->arg_size(); I < E; I++) {
       Value *Arg = CI->getArgOperand(I);
-      if (!isSupportedArg(Arg)) {
+      if (!TakeArg(Arg, I)) {
         VMap[Callee->getArg(I)] = NewCallee->getArg(I);
         continue;
       }
@@ -211,16 +307,6 @@ static bool specializeGoBuiltins(Function &F, bool UseInline) {
     if (Callee->hasMetadata("go.specialized"))
       continue;
 
-    // hard coded heuristic
-    if (Callee->getName() == "runtime.heapBitsSetType") {
-      Value *ArgSize = CI->getArgOperand(1);
-      Value *ArgType = CI->getArgOperand(3);
-      if (isSupportedArg(ArgSize) && isSupportedArg(ArgType)) {
-        Targets.push_back(CI);
-      }
-      continue;
-    }
-
     // if (Callee->hasFnAttribute(Attribute::NoInline))
     //   continue;
     auto MD = Callee->getMetadata("go.spec.cond");
@@ -232,14 +318,23 @@ static bool specializeGoBuiltins(Function &F, bool UseInline) {
       ->getValue()->getUniqueInteger().getZExtValue();
 
     if (ArgPos != 0) {
-      // See llvm.go
-      // All configured targets have the first args.
-      // ArgPos is a bitmap if we have more args in the future
-      continue;
+      bool Passed = true;
+      const unsigned E = CI->arg_size();
+      assert(E <= 64 && "no more args");
+      for (unsigned I = 0; I < E; I++) {
+        if ((ArgPos & (1 << I)) == 0)
+          continue;
+        if (!isSupportedArg(CI->getArgOperand(I))) {
+          Passed = false;
+          break;
+        }
+      }
+      if (!Passed)
+        continue;
+    } else {
+      if (!isSupportedArg(CI->getArgOperand(ArgPos)))
+        continue;
     }
-
-    if (!isSupportedArg(CI->getArgOperand(ArgPos)))
-      continue;
 
     Targets.push_back(CI);
   }
@@ -249,7 +344,9 @@ static bool specializeGoBuiltins(Function &F, bool UseInline) {
 
   bool Changed = false;
   for (CallInst *CI : Targets) {
-    LLVM_DEBUG(dbgs() << "GoROData: " << F.getName() << ": try to specialize a call " << *CI << "\n");
+    LLVM_DEBUG(dbgs() << "GoROData: " << F.getName() << ": try to specialize a call " << *CI
+        << ", UseInline=" << UseInline << ", InsnCount=" << F.getInstructionCount()
+        << "\n");
 
     Function *Callee = CI->getCalledFunction();
     bool DoInline = UseInline && !Callee->hasFnAttribute(Attribute::NoInline)
@@ -259,18 +356,18 @@ static bool specializeGoBuiltins(Function &F, bool UseInline) {
       auto InlineRes = InlineFunction(*CI, FnInfo);
       if (InlineRes.isSuccess()) {
         Changed = true;
-        LLVM_DEBUG(dbgs() << "GoROData: " << F.getName() << ": inline a  specialize function " << Callee->getName() << "\n");
+        LLVM_DEBUG(dbgs() << "GoROData: " << F.getName() << ": inline a specialize function " << Callee->getName() << "\n");
         TangoLLVM::updateMetadataForInlining(Callee, &F);
       }
     } else {
-      CallInst *NewCI = specializeCall(F, CI);
+      CallInst *NewCI = specializeCall(F, CI, AggressiveSpecialization);
       if (NewCI != nullptr) {
         Changed = true;
         NewCI->insertBefore(CI);
         CI->replaceAllUsesWith(NewCI);
         CI->eraseFromParent();
         ++NumSpecializedCall;
-        LLVM_DEBUG(dbgs() << "GoROData: " << F.getName() << ": create a specialize a call " << *NewCI << "\n");
+        LLVM_DEBUG(dbgs() << "GoROData: " << F.getName() << ": create a specialize call " << *NewCI << "\n");
       }
     }
   }
@@ -301,10 +398,10 @@ static bool replaceLoadROData(Function &F) {
           dbgs() << "\n");
 
       for (auto &U : LI->uses()) {
-        LoadInst *NewLI = dyn_cast<LoadInst>(U.getUser());
-        if (NewLI == nullptr)
+        if (LoadInst *NewLI = dyn_cast<LoadInst>(U.getUser())) {
+          Worklist.insert(NewLI);
           continue;
-        Worklist.insert(NewLI);
+        }
       }
 
       LI->replaceAllUsesWith(NewValue);
@@ -429,6 +526,8 @@ Constant *TangoLLVM::resolveLoadROData(LoadInst *LI, const DataLayout &DL) {
     return nullptr;
   }
 
+  Module *M = LI->getParent()->getParent()->getParent();
+
   if (ROData->getNumOperands() == 2) {
     MDNode *Reloc = cast<MDNode>(ROData->getOperand(1));
 
@@ -471,8 +570,12 @@ Constant *TangoLLVM::resolveLoadROData(LoadInst *LI, const DataLayout &DL) {
       if (Reloc->getOperand(i + 4) == nullptr)
         return nullptr; // constant symbol is dead and removed by GlobalOpt
 
-      Value *Ptr = dyn_cast<ConstantAsMetadata>(Reloc->getOperand(i + 4))->getValue();
-      if (!(isa<GlobalVariable>(Ptr) || isa<Function>(Ptr)))
+      Value *Ptr = nullptr;
+      StringRef PtrName = dyn_cast<MDString>(Reloc->getOperand(i + 4))->getString();
+      Ptr = M->getGlobalVariable(PtrName);
+      if (Ptr == nullptr)
+        Ptr = M->getFunction(PtrName);
+      if (Ptr == nullptr)
         return nullptr; // other constants are not supported yet
 
       assert(Ptr->getType()->isPointerTy() && "must be a global");
