@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-07-07.
 //===----------------------------------------------------------------------===//
 //
 // This file describes common object file formats.
@@ -215,6 +217,8 @@ protected:
   MCSection *ThreadLocalPointerSection = nullptr;
   MCSection *AddrSigSection = nullptr;
 
+  MCSection *GoAuxDataSection = nullptr;
+
   /// COFF specific sections.
   MCSection *DrectveSection = nullptr;
   MCSection *PDataSection = nullptr;
@@ -266,6 +270,7 @@ public:
   virtual unsigned getTextSectionAlignment() const { return 4; }
   MCSection *getTextSection() const { return TextSection; }
   MCSection *getDataSection() const { return DataSection; }
+  MCSection *getGoAuxDataSection() const { return GoAuxDataSection; }
   MCSection *getBSSSection() const { return BSSSection; }
   MCSection *getReadOnlySection() const { return ReadOnlySection; }
   MCSection *getLSDASection() const { return LSDASection; }

@@ -402,30 +402,14 @@ PreservedAnalyses GoStatepoints::run(Module &M,
 
 
 // Utils
-static bool hasPointer(Type *T) {
-  switch (T->getTypeID()) {
-  case Type::PointerTyID:
-    return true;
-  case Type::ArrayTyID:
-    return T->getArrayNumElements() > 0 && hasPointer(T->getArrayElementType());
-  case Type::FixedVectorTyID:
-  case Type::ScalableVectorTyID:
-    return hasPointer(T->getScalarType());
-  case Type::StructTyID: {
-    for (unsigned i = 0, e = T->getStructNumElements(); i < e; ++i)
-      if (hasPointer(T->getStructElementType(i)))
-        return true;
-    return false;
-  }
-  default:
-    return false;
-  }
+static bool hasPointerTy(Type *T) {
+  return TangoLLVM::hasPointerTy(T);
 }
 
 
 static void
 getPtrBitmapForTypeHelper(Type *T, const DataLayout &DL, uint64_t BaseOffset, BitVector &BV) {
-  if (!hasPointer(T))
+  if (!hasPointerTy(T))
     return;
 
   const unsigned PtrSize = DL.getPointerSize();
@@ -460,7 +444,7 @@ getPtrBitmapForTypeHelper(Type *T, const DataLayout &DL, uint64_t BaseOffset, Bi
   case Type::StructTyID: {
     for (unsigned i = 0, n = T->getStructNumElements(); i < n; ++i) {
       Type *ET = T->getStructElementType(i);
-      if (!hasPointer(ET))
+      if (!hasPointerTy(ET))
         continue;
       Value *ivals[2] = { ConstantInt::get(Int32Ty, 0),
                           ConstantInt::get(Int32Ty, i) };
@@ -709,7 +693,7 @@ static bool isHandledGCPointerType(Type *T) {
       return true;
   // FCA is supported.
   if (T->isStructTy() || T->isArrayTy())
-    return hasPointer(T);
+    return hasPointerTy(T);
   return false;
 }
 
@@ -1293,7 +1277,7 @@ extractPointerFromFCA(Value *V, IRBuilder<> &Builder,
         Value *Field = Builder.CreateExtractValue(V, {i});
         PtrFields.push_back(Field);
       } else
-        assert(!hasPointer(ElemT) && "nested FCA is not supported");
+        assert(!hasPointerTy(ElemT) && "nested FCA is not supported");
     }
   } else if (T->isArrayTy()) {
     Type *ElemT = T->getArrayElementType();
@@ -1370,8 +1354,8 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
     if (isa<AllocaInst>(V)) {
       Type *T = cast<AllocaInst>(V)->getAllocatedType();
       // avoid [0 x type] in `stack-map`
-      assert((!hasPointer(T) || DL.getTypeSizeInBits(T) > 0) && "pointer types must be non-zero");
-      if (hasPointer(T) && DL.getTypeSizeInBits(T) > 0) {
+      assert((!hasPointerTy(T) || DL.getTypeSizeInBits(T) > 0) && "pointer types must be non-zero");
+      if (hasPointerTy(T) && DL.getTypeSizeInBits(T) > 0) {
         PtrFields.push_back(V);
         getPtrBitmapForType(T, DL, PtrFields);
       }
@@ -1381,8 +1365,8 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
       Type* T = getValueElementType(V);
       assert(T != nullptr && "must have a Go type");
       // assert(isa<PointerType>(T) && "only go.preallocated has goType");
-      assert((!hasPointer(T) || DL.getTypeSizeInBits(T) > 0) && "pointer types must be non-zero");
-      if (hasPointer(T) && DL.getTypeSizeInBits(T) > 0) {
+      assert((!hasPointerTy(T) || DL.getTypeSizeInBits(T) > 0) && "pointer types must be non-zero");
+      if (hasPointerTy(T) && DL.getTypeSizeInBits(T) > 0) {
         // This is the same as Alloca. Since stack pointers are always live, we have no need to spill it to stack.
         // We only need to record the pointers inside an alloca.
         PtrFields.push_back(V);
@@ -1601,7 +1585,7 @@ static void findLiveReferences(
   SetVector<Value *> AllAllocas;
   if (ClobberNonLive)
     for (Instruction &I : F.getEntryBlock())
-      if (isa<AllocaInst>(I) && hasPointer(getValueElementType(&I)))
+      if (isa<AllocaInst>(I) && hasPointerTy(getValueElementType(&I)))
         AllAllocas.insert(&I);
 
   computeLiveInValues(DT, LI, F, OriginalLivenessData,
@@ -2471,10 +2455,10 @@ static Value*
 isTrackedAlloca(Value *V, DefiningValueMapTy &DVCache) {
   Value *Base = isAlloca(V, DVCache);
   if (Base &&
-      hasPointer(getValueElementType(Base)))
+      hasPointerTy(getValueElementType(Base)))
     return Base;
   Base = isGoPreAllocated(V, DVCache);
-  if (Base && isGoPreAllocatedParamOut(Base) && hasPointer(getValueElementType(Base)))
+  if (Base && isGoPreAllocatedParamOut(Base) && hasPointerTy(getValueElementType(Base)))
     return Base;
   return nullptr;
 }
@@ -3949,7 +3933,7 @@ static void computeLiveInValues(DominatorTree &DT, LoopInfo &LI, Function &F,
       if (!AI)
         continue;
 
-      if (!hasPointer(AI->getAllocatedType()))
+      if (!hasPointerTy(AI->getAllocatedType()))
         continue;
 
       if (AI->hasMetadata("go.stackobject.gcdata"))

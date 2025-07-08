@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-07-07.
 //===----------------------------------------------------------------------===//
 
 #include "llvm/MC/MCObjectFileInfo.h"
@@ -141,6 +143,9 @@ void MCObjectFileInfo::initMachOMCObjectFileInfo(const Triple &T) {
 
   ReadOnlySection  // .const
     = Ctx->getMachOSection("__TEXT", "__const", 0,
+                           SectionKind::getReadOnly());
+
+  GoAuxDataSection = Ctx->getMachOSection("__TEXT", "__goaux", 0,
                            SectionKind::getReadOnly());
 
   // If the target is not powerpc, map the coal sections to the non-coal
@@ -395,6 +400,8 @@ void MCObjectFileInfo::initELFMCObjectFileInfo(const Triple &T, bool Large) {
 
   DataSection = Ctx->getELFSection(".data", ELF::SHT_PROGBITS,
                                    ELF::SHF_WRITE | ELF::SHF_ALLOC);
+
+  GoAuxDataSection = Ctx->getELFSection(".goaux", ELF::SHT_PROGBITS, ELF::SHF_ALLOC);
 
   ReadOnlySection =
       Ctx->getELFSection(".rodata", ELF::SHT_PROGBITS, ELF::SHF_ALLOC);

@@ -3395,9 +3395,11 @@ void X86FrameLowering::adjustForSegmentedStacks(
               leaf = false;
               goto leafSearchDone;
             }
-          } else if (MO.isSymbol() && !TangoLLVM::isZeroArgRuntimeCall(MO.getSymbolName())) {
-            leaf = false;
-            goto leafSearchDone;
+          } else if (MO.isSymbol()) {
+            if (!TangoLLVM::isZeroArgRuntimeCall(MO.getSymbolName())) {
+              leaf = false;
+              goto leafSearchDone;
+            }
           } else {
             leaf = false;
             goto leafSearchDone;

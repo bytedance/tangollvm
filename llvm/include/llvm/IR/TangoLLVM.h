@@ -53,7 +53,7 @@ public:
     if (FuncName.starts_with(StringRef("gcWriteBarrier"))) {
       return true;
     }
-  if (FuncName == (StringRef("duffzero")) || FuncName == (StringRef("duffcopy"))) {
+    if (FuncName == (StringRef("duffzero")) || FuncName == (StringRef("duffcopy"))) {
       return true;
     }
     return false;
@@ -65,6 +65,27 @@ public:
     }
     return false;
   }
+
+  static bool hasPointerTy(Type *T) {
+    switch (T->getTypeID()) {
+    case Type::PointerTyID:
+      return true;
+    case Type::ArrayTyID:
+      return T->getArrayNumElements() > 0 && hasPointerTy(T->getArrayElementType());
+    case Type::FixedVectorTyID:
+    case Type::ScalableVectorTyID:
+      return hasPointerTy(T->getScalarType());
+    case Type::StructTyID: {
+      for (unsigned i = 0, e = T->getStructNumElements(); i < e; ++i)
+        if (hasPointerTy(T->getStructElementType(i)))
+          return true;
+      return false;
+    }
+    default:
+      return false;
+    }
+  }
+
 
   static StringRef getMoreStackSymbol(const Function &F) {
     // TODO: we allow frontend to use internal name mangling

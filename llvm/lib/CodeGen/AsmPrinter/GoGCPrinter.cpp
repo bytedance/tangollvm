@@ -16,6 +16,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "GoAuxDataHandler.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/CodeGen/AsmPrinter.h"
@@ -234,207 +235,6 @@ computeBitVector(Function * Fn, uint64_t StackSize, bool requireFP,
   convertBitVectorToBytesVector(LocalsSize, LocalsBV, LocalsMap);
 }
 
-static void convertToLocalBytesVector(uint32_t MaxMapSize, uint32_t MaxByteSize, std::vector<uint8_t> &Map) {
-  std::vector<uint8_t> New(MaxByteSize, 0);
-  for (uint32_t i = 0; i < MaxMapSize; i++) {
-    uint32_t ByteIndex = i / 8;
-    if (ByteIndex >= Map.size()) {
-      break;
-    }
-    uint32_t BitIndex = i % 8;
-    if ((Map[ByteIndex] & (1 << BitIndex)) != 0) {
-      uint32_t NI = MaxMapSize - i - 1;
-      ByteIndex = NI / 8;
-      BitIndex = NI % 8;
-      uint8_t B = New[ByteIndex];
-      B = B | (1 << BitIndex);
-      New[ByteIndex] = B;
-    }
-  }
-  Map = New;
-}
-
-static void
-emitStackMaps(uint32_t MaxMapSize, std::vector<std::vector<uint8_t>> MapTable, MCStreamer &OS, bool isLocal) {
-  const int PtrSize = 8; // TODO: get from target info
-  OS.emitIntValue(MapTable.size(), 4); // number of maps
-  OS.emitIntValue(MaxMapSize, 4); // number of bits in each map
-  uint32_t MaxBytes = (MaxMapSize + (PtrSize - 1)) / PtrSize;
-#if 0
-  dbgs() << "Before TableSize: " << MapTable.size() << "\n";
-  dbgs() << "Before MaxMapSize: " << MaxMapSize << "\n";
-  dbgs() << "Before MaxBytes: " << MaxBytes << "\n";
-  for (auto &Map : MapTable) {
-    uint32_t Index = 0;
-    for (uint8_t Byte : Map) {
-      Index++;
-      dbgs() << int(Byte) << " ";
-    }
-    for (; Index < MaxBytes; Index++) {
-      dbgs() << 0 << " ";
-    }
-    dbgs() << "\n";
-  }
-#endif
-  for (auto &Map : MapTable) {
-    uint32_t Index = 0;
-    if (isLocal) {
-      convertToLocalBytesVector(MaxMapSize, MaxBytes, Map);
-    }
-    for (uint8_t Byte : Map) {
-      Index++;
-      OS.emitIntValue(Byte, 1);
-    }
-    for (; Index < MaxBytes; Index++) {
-      OS.emitIntValue(0, 1); // fill with zero bytes
-    }
-  }
-#if 0
-  dbgs() << "After MaxMapSize: " << MaxMapSize << "\n";
-  dbgs() << "After MaxBytes: " << MaxBytes << "\n";
-  for (auto &Map : MapTable) {
-    uint32_t Index = 0;
-    for (uint8_t Byte : Map) {
-      Index++;
-      dbgs() << int(Byte) << " ";
-    }
-    for (; Index < MaxBytes; Index++) {
-      dbgs() << 0 << " ";
-    }
-    dbgs() << "\n";
-  }
-#endif
-}
-
-static bool hasPointer(Type *T) {
-  switch (T->getTypeID()) {
-  case Type::PointerTyID:
-    return true;
-  case Type::ArrayTyID:
-    return hasPointer(T->getArrayElementType());
-  case Type::FixedVectorTyID:
-  case Type::ScalableVectorTyID:
-    return hasPointer(T->getScalarType());
-  case Type::StructTyID: {
-    for (unsigned i = 0, e = T->getStructNumElements(); i < e; ++i)
-      if (hasPointer(T->getStructElementType(i)))
-        return true;
-    return false;
-  }
-  default:
-    return false;
-  }
-}
-
-template <typename F>
-static void
-visitPointers(Type *T, const DataLayout &DL, int64_t BaseOffset, const F& Func) {
-  if (!hasPointer(T))
-    return;
-
-  Type *Int32Ty = Type::getInt32Ty(T->getContext());
-  switch (T->getTypeID()) {
-  case Type::PointerTyID:
-    Func(BaseOffset);
-    break;;
-  case Type::ArrayTyID: {
-    Type *ET = T->getArrayElementType();
-    for (unsigned i = 0, n = T->getArrayNumElements(); i < n; ++i) {
-      Value *ivals[2] = { ConstantInt::get(Int32Ty, 0),
-                          ConstantInt::get(Int32Ty, i) };
-      ArrayRef<Value*> Idx = ArrayRef(ivals, 2);
-      uint64_t Offset = DL.getIndexedOffsetInType(T, Idx);
-      visitPointers(ET, DL, BaseOffset+Offset, Func);
-    }
-    break;
-  }
-  case Type::FixedVectorTyID: {
-    auto *VT = llvm::cast<llvm::FixedVectorType>(T);
-    Type *ET = T->getScalarType();
-    for (unsigned i = 0, n = VT->getNumElements(); i < n; ++i) {
-      Value *ivals[2] = { ConstantInt::get(Int32Ty, 0),
-                          ConstantInt::get(Int32Ty, i) };
-      ArrayRef<Value*> Idx = ArrayRef(ivals, 2);
-      uint64_t Offset = DL.getIndexedOffsetInType(T, Idx);
-      visitPointers(ET, DL, BaseOffset+Offset, Func);
-    }
-    break;
-  }
-  case Type::StructTyID: {
-    for (unsigned i = 0, n = T->getStructNumElements(); i < n; ++i) {
-      Type *ET = T->getStructElementType(i);
-      if (!hasPointer(ET))
-        continue;
-      Value *ivals[2] = { ConstantInt::get(Int32Ty, 0),
-                          ConstantInt::get(Int32Ty, i) };
-      ArrayRef<Value*> Idx = ArrayRef(ivals, 2);
-      uint64_t Offset = DL.getIndexedOffsetInType(T, Idx);
-      visitPointers(ET, DL, BaseOffset+Offset, Func);
-    }
-    break;
-  }
-  case Type::ScalableVectorTyID:
-    assert(false && "not expecting ScalableVectorTyID");
-  default:
-    break;
-  }
-}
-
-static void emitEntryStackMap(Function *Fn, AsmPrinter &AP, uint32_t &MaxSize, std::vector<uint8_t> &Map) {
-  int64_t MaxIndex = -1;
-  const DataLayout &DL = AP.getDataLayout();
-  const unsigned PtrSize = DL.getPointerSize();
-  auto consumeOffset = [&](int64_t Offset){
-    int64_t Index = Offset /= PtrSize;
-    if (Index > MaxIndex)
-      MaxIndex = Index;
-    int64_t ByteIndex = Index / PtrSize;
-    int64_t BitIndex = Index % PtrSize;
-    if (ByteIndex >= (int64_t)Map.size()) {
-      Map.resize(ByteIndex + 1, 0);
-    }
-    Map[ByteIndex] = Map[ByteIndex] | (1 << BitIndex);
-  };
-
-  if (auto n = Fn->getMetadata("go.stack.param")) {
-    unsigned numOp = n->getNumOperands();
-    if (numOp > 0) {
-      assert((numOp % 2 == 0) && "invariant");
-      for (unsigned i = 0; i < numOp; i += 2) {
-        // (type, offset)
-        Type *Ty = dyn_cast<ConstantAsMetadata>(n->getOperand(i + 0))->getValue()->getType();
-        assert(Ty != nullptr);
-        int64_t Offset = dyn_cast<ConstantAsMetadata>(n->getOperand(i + 1))->getValue()->getUniqueInteger().getSExtValue();
-
-        visitPointers(Ty, DL, Offset, consumeOffset);
-      }
-    }
-  }
-
-  if (auto n = Fn->getMetadata("go.caller.args.area")) {
-    unsigned numOp = n->getNumOperands();
-    if (numOp > 2) {
-      assert(((numOp - 2) % 4 == 0) && "must be 4 quadruple array");
-      for (unsigned i = 2; i < numOp; i += 4) {
-        // (regidx, offset, size, ptr)
-        int64_t IsPtr = dyn_cast<ConstantAsMetadata>(n->getOperand(i + 3))->getValue() ->getUniqueInteger().getSExtValue();
-        if (IsPtr == 0) {
-          continue;
-        }
-        int64_t Offset = dyn_cast<ConstantAsMetadata>(n->getOperand(i + 1))->getValue()->getUniqueInteger().getSExtValue();
-        int64_t Size = dyn_cast<ConstantAsMetadata>(n->getOperand(i + 2))->getValue()->getUniqueInteger().getSExtValue();
-        assert(Size == 8 && "amd64 must be 8 bytes ptr");
-        assert(Offset >= 0 && Offset % 8 == 0 && "must be 8 byte aligned");
-        Offset -= 8; // Offset is relative to FP. We need to subtract slot for PC. See llvm.go
-        consumeOffset(Offset);
-      }
-    }
-  }
-
-  if (MaxIndex + 1 > MaxSize)
-    MaxSize = MaxIndex + 1;
-}
-
 static void
 emitCallsiteEntries(StackMaps &SM, AsmPrinter &AP) {
   auto &CSInfos = SM.getCSInfos();
@@ -442,7 +242,6 @@ emitCallsiteEntries(StackMaps &SM, AsmPrinter &AP) {
     return;
 
   MCStreamer &OS = *AP.OutStreamer;
-  MCContext &OutContext = OS.getContext();
 
   const Module * M = AP.MMI->getModule();
   const DataLayout &DL = AP.getDataLayout();
@@ -515,32 +314,14 @@ emitCallsiteEntries(StackMaps &SM, AsmPrinter &AP) {
       dbgs() << "\n";
 #endif
     }
-    {
-      std::string symbol = FR.first->getName().str();
-      symbol += "..argspointermaps";
-      MCSymbol *AddrSymbol = OutContext.getOrCreateSymbol(StringRef(symbol));
-      OS.emitLabel(AddrSymbol);
-      std::vector<uint8_t> &EntryMap = ArgsTable[0];
-      emitEntryStackMap(Fn, AP, MaxArgsSize, EntryMap);
-      emitStackMaps(MaxArgsSize, ArgsTable, OS, false);
-    }
-    {
-      std::string symbol = FR.first->getName().str();
-      symbol += "..localspointermaps";
-      MCSymbol *AddrSymbol = OutContext.getOrCreateSymbol(StringRef(symbol));
-      OS.emitLabel(AddrSymbol);
-      emitStackMaps(MaxLocalsSize, LocalsTable, OS, true);
-    }
+    MCGoAuxData::emitFunctionStackMaps(Fn, &AP, ArgsTable, LocalsTable, MaxArgsSize, MaxLocalsSize);
   }
 }
 
 bool
 GoGCPrinter::emitStackMaps(StackMaps &SM, AsmPrinter &AP) {
   const TargetLoweringObjectFile &TLOF= AP.getObjFileLowering();
-  const DataLayout &DL = AP.getDataLayout();
-  Align Alignment(1); // variant length encoding
-  MCSection *ReadOnlySection = TLOF.getSectionForConstant(
-      DL, SectionKind::getReadOnly(), /*C=*/nullptr, Alignment);
+  MCSection *ReadOnlySection = TLOF.getGoAuxDataSection();
   AP.OutStreamer->pushSection();
   AP.OutStreamer->switchSection(ReadOnlySection);
 
