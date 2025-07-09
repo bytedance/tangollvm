@@ -157,7 +157,7 @@ private:
 
   void computeFunctionSP(const MachineFunction *MF);
   void computeFuncInfo(const MachineFunction *MF);
-  MCGoInlTreeNode* addInlNode(DILocation* M, DISubprogram *Called);
+  MCGoInlTreeNode* addInlNode(DILocation* M, DIScope *Called);
 
   int32_t getFileIndex(DIFile* F);
   int32_t getInlineTreeNodeIndex(DILocation* DL);

@@ -8,25 +8,24 @@
 
 #include "GoAuxDataHandler.h"
 #include "GoGCProgWriter.h"
-#include "llvm/IR/Module.h"
-#include "llvm/IR/DebugLoc.h"
-#include "llvm/IR/DebugInfo.h"
-#include "llvm/IR/Instructions.h"
 #include "llvm/ADT/BreadthFirstIterator.h"
 #include "llvm/ADT/DepthFirstIterator.h"
-#include "llvm/ADT/SmallVector.h"
-#include "llvm/Target/TargetLoweringObjectFile.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/StackMaps.h"
 #include "llvm/CodeGen/TangoLLVM.h"
 #include "llvm/CodeGen/TargetFrameLowering.h"
-#include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
+#include "llvm/CodeGen/TargetSubtargetInfo.h"
+#include "llvm/IR/DebugInfo.h"
+#include "llvm/IR/DebugLoc.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
 #include "llvm/MC/MCContext.h"
-#include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCObjectFileInfo.h"
+#include "llvm/MC/MCStreamer.h"
 #include "llvm/Support/Alignment.h"
 #include "llvm/Support/EndianStream.h"
+#include "llvm/Target/TargetLoweringObjectFile.h"
 
 using namespace llvm;
 
@@ -158,10 +157,20 @@ void MCGoAuxData::beginModule(Module *M) {
   Asm->OutStreamer->popSection();
 }
 
+// AddDiscriminatorsPass will add new DI scope to handle discriminator.
+static const DISubprogram *findSubprogramFromScope(const DIScope *Scope) {
+  while (Scope) {
+    if (auto *SP = dyn_cast<DISubprogram>(Scope))
+      return SP;
+
+    Scope = Scope->getScope();
+  }
+  return nullptr;
+}
 
 // TODO: the inlined tree is not used for deoptimization and only used for symbol lookup.
 // We can pick any PC that can represent the caller of the inlined call.
-MCGoInlTreeNode* MCGoAuxData::addInlNode(DILocation *L, DISubprogram *Called) {
+MCGoInlTreeNode* MCGoAuxData::addInlNode(DILocation *L, DIScope *Called) {
   auto D = FuncInfo.LocToInlNode.find(L);
   if (D != FuncInfo.LocToInlNode.end()) {
     return D->second;
@@ -169,7 +178,7 @@ MCGoInlTreeNode* MCGoAuxData::addInlNode(DILocation *L, DISubprogram *Called) {
 
   MCGoInlTreeNode *Parent = nullptr;
   if (L->getInlinedAt() != nullptr) {
-    Parent = addInlNode(L->getInlinedAt(), dyn_cast<DISubprogram>(L->getScope()));
+    Parent = addInlNode(L->getInlinedAt(), L->getScope());
   }
 
   MCGoInlTreeNode *Node = new MCGoInlTreeNode();
@@ -185,7 +194,11 @@ MCGoInlTreeNode* MCGoAuxData::addInlNode(DILocation *L, DISubprogram *Called) {
   if (Called != nullptr) {
     // TODO: Func symbol should be PLT??
     MCSymbolRefExpr::VariantKind Variant = MCSymbolRefExpr::VK_GOT;
-    Node->Func = MCSymbolRefExpr::create(Called->getName(), Variant, Asm->OutContext);
+    auto *Subprogram = findSubprogramFromScope(Called);
+    if (Subprogram == nullptr) {
+      report_fatal_error("cannot search subprogram of an inlined at location.");
+    }
+    Node->Func = MCSymbolRefExpr::create(Subprogram->getName(), Variant, Asm->OutContext);
   } else {
     report_fatal_error("scope is not a subprogram of an inlined at location.");
   }
@@ -205,7 +218,6 @@ static void sortLocation(std::vector<DILocation*> &locations) {
       return LHS->getLine() < RHS->getLine();
   });
 }
-
 
 void MCGoAuxData::computeFuncInfo(const MachineFunction *MF) {
   auto *FIM = MF->getFunction().getMetadata("go.funcinfo");
@@ -237,7 +249,7 @@ void MCGoAuxData::computeFuncInfo(const MachineFunction *MF) {
       const DebugLoc &DL = MI.getDebugLoc();
       if (DL) {
         if (DL.getInlinedAt() != nullptr) {
-          addInlNode(DL.getInlinedAt(), dyn_cast<DISubprogram>(DL.getScope()))->addIncluded(DL.get());
+          addInlNode(DL.getInlinedAt(), dyn_cast<DIScope>(DL.getScope()))->addIncluded(DL.get());
         } else {
           FuncInfo.addIncluded(DL.get());
         }
@@ -1059,7 +1071,8 @@ void MCGoAuxData::beginInstruction(const MachineInstr *MI) {
         DwarfLoc.getFileNum(),
         DwarfLoc.getLine(),
         DwarfLoc.getColumn(),
-        DwarfLoc.getFlags()
+        DwarfLoc.getFlags(),
+        DwarfLoc.getDiscriminator()
       )
     );
     appendPCData(PCIndex, LastPCIndex++, getOrCreatePrePCSymbol(MI));

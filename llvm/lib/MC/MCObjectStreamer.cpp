@@ -971,6 +971,8 @@ void MCObjectStreamer::emitGoDwarfInfo(ArrayRef<MCGoDwarfEntry> Entries) {
     support::endian::write(OSE, E.Flags, endianness::little);
     support::endian::write(OSE, uint8_t(0), endianness::little); // padding
     Offset += 2 + 1 + 1;
+    support::endian::write(OSE, E.Discriminator, endianness::little);
+    Offset += 4;
   }
 
   assert(Offset == Data.size() && "dwarf entry emit invariant failed");
