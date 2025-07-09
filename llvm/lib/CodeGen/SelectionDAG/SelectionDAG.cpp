@@ -8293,6 +8293,7 @@ SDValue SelectionDAG::getMemcpy(
   }
 
   if (TangoLLVM::isGoABIInternal(getMachineFunction().getFunction())) {
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
     dbgs() << "==========> Seeing a bad memcpy intrinsic: \n";
     dbgs() << "=====> Dst: ";
     Dst.dump();
@@ -8300,6 +8301,7 @@ SDValue SelectionDAG::getMemcpy(
     Src.dump();
     dbgs() << "=====> Size: ";
     Size.dump();
+#endif
     llvm_unreachable("Can't generate a runtime stub call for memcpy intrinsic.");
   }
 
@@ -8565,6 +8567,7 @@ SDValue SelectionDAG::getMemset(SDValue Chain, const SDLoc &dl, SDValue Dst,
   }
 
   if (TangoLLVM::isGoABIInternal(getMachineFunction().getFunction())) {
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
     dbgs() << "==========> Seeing a bad memset intrinsic: \n";
     dbgs() << "=====> Dst: ";
     Dst.dump();
@@ -8572,6 +8575,7 @@ SDValue SelectionDAG::getMemset(SDValue Chain, const SDLoc &dl, SDValue Dst,
     Src.dump();
     dbgs() << "=====> Size: ";
     Size.dump();
+#endif
     llvm_unreachable("Can't generate a runtime stub call for memset intrinsic.");
   }
 

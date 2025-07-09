@@ -3332,7 +3332,6 @@ void X86FrameLowering::adjustForSegmentedStacks(
   if (TangoLLVM::isGoABIInternal(MF.getFunction())) {
     StackSize = MFI.getStackSize();
 
-    bool HasFP = hasFP(MF);
     bool RequireFP = [&MF](){
       auto &F = MF.getFunction();
       if (F.hasFnAttribute("go-no-frame-checked")) {
@@ -3346,7 +3345,7 @@ void X86FrameLowering::adjustForSegmentedStacks(
       return true;
     }();
 
-    assert(HasFP && "all Go functions are compiled with FP");
+    assert(hasFP(MF) && "all Go functions are compiled with FP");
 
     if (!RequireFP) {
       // no push rbp

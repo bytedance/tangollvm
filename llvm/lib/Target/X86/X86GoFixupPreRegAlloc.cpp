@@ -267,8 +267,10 @@ bool X86GoFixupPreRegAllocPass::optimizeOpSP() {
               case X86::INC64r:
                 break;
               default:
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
                 dbgs() << "cannot handle MI: " << MI << "\n";
                 MF->dump();
+#endif
                 report_fatal_error("TODO: do not know how to handle two address");
             }
 

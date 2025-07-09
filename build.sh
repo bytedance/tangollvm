@@ -13,9 +13,12 @@ mkdir -p ${DIR}/llvm-build-release
 
 pushd ${DIR}/llvm-build-release &> /dev/null
 
+# Disable assertion for better compilation performance
+ASSERTION=OFF
+
 cmake -G Ninja \
      -DCMAKE_BUILD_TYPE=Release \
-     -DLLVM_ENABLE_ASSERTIONS=ON \
+     -DLLVM_ENABLE_ASSERTIONS=$ASSERTION \
      -DLLVM_TARGETS_TO_BUILD=X86 \
      -DLLVM_BUILD_LLVM_DYLIB=ON \
      -DLLVM_LINK_LLVM_DYLIB=ON \

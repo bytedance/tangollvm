@@ -886,50 +886,16 @@ static bool expandMemCmp(CallInst *CI, const TargetTransformInfo *TTI,
 
   if (Value *Res = Expansion.getMemCmpExpansion()) {
     if (IsGo) {
-      PHINode *PhiRes = dyn_cast<PHINode>(Res);
-      if (PhiRes) {
-        assert(PhiRes->getNumIncomingValues() == 2 && "invariant");
-
-        ConstantInt *V0 = dyn_cast<ConstantInt>(PhiRes->getIncomingValue(0));
-        ConstantInt *V1 = dyn_cast<ConstantInt>(PhiRes->getIncomingValue(1));
-        assert(V0 != nullptr && V1 != nullptr && V0 != V1 && "invariant");
-
-        BasicBlock *B0 = PhiRes->getIncomingBlock(0);
-        BasicBlock *B1 = PhiRes->getIncomingBlock(1);
-
-        Type * I1Ty = Type::getInt1Ty(CI->getContext());
-        assert(I1Ty == CI->getType() && "invariant");
-        Value *Zero = ConstantInt::get(I1Ty, 0);
-        Value *One = ConstantInt::get(I1Ty, 1);
-
-        PHINode* NewPhiRes = PHINode::Create(I1Ty, 2, "memequal.replace");
-        if (V0->isZero() && V1->isOne()) {
-          NewPhiRes->addIncoming(One, B0);
-          NewPhiRes->addIncoming(Zero, B1);
-        } else if (V0->isOne() && V1->isZero()) {
-          NewPhiRes->addIncoming(Zero, B0);
-          NewPhiRes->addIncoming(One, B1);
-        } else {
-          report_fatal_error("TODO");
-        }
-
-        NewPhiRes->insertAfter(PhiRes);
-        assert(PhiRes->use_empty() && "not replaced yet");
-        // PhiRes->replaceAllUsesWith(NewPhiRes);
-        Res = NewPhiRes;
+      IRBuilder<> Builder(CI);
+      if (match(Res, m_ZExt(m_ICmp(m_Value(), m_Value())))) {
+        ZExtInst *ZExt = cast<ZExtInst>(Res);
+        ICmpInst *CMP = cast<ICmpInst>(ZExt->getOperand(0));
+        CMP->setPredicate(CMP->getInversePredicate());
+        if (ZExt->use_empty())
+          ZExt->eraseFromParent();
+        Res = CMP;
       } else {
-        IRBuilder<> Builder(CI);
-        if (match(Res, m_ZExt(m_ICmp(m_Value(), m_Value())))) {
-          ZExtInst *ZExt = cast<ZExtInst>(Res);
-          ICmpInst *CMP = cast<ICmpInst>(ZExt->getOperand(0));
-          CMP->setPredicate(CMP->getInversePredicate());
-          if (ZExt->use_empty())
-            ZExt->eraseFromParent();
-          Res = CMP;
-        } else {
-          Res = Builder.CreateICmpEQ(Res, ConstantInt::get(Res->getType(), 0), "bcmp.i1");
-          CI->getParent()->getParent()->dump();
-        }
+        Res = Builder.CreateICmpEQ(Res, ConstantInt::get(Res->getType(), 0), "bcmp.i1");
       }
     }
 

@@ -288,6 +288,7 @@ bool DAGTypeLegalizer::run() {
 #if !defined(NDEBUG)
         assert(FirstDeoptArgPos < NumOperands && "invariant");
         assert(FirstGCPointerArgPos < NumOperands && "invariant");
+#endif
 
         unsigned NNewDeoptArgs = 0;
         unsigned i;
@@ -299,7 +300,9 @@ bool DAGTypeLegalizer::run() {
             continue;
           }
 
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
           LLVM_DEBUG(dbgs() << "Analyzing operand: "; Op.dump(&DAG));
+#endif
           EVT OpVT = Op.getValueType();
           switch (getTypeAction(OpVT)) {
             case TargetLowering::TypeLegal:
@@ -319,15 +322,19 @@ bool DAGTypeLegalizer::run() {
               NNewDeoptArgs ++;
               break;
             default:
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
               dbgs() << "Lowering Action: " << (int)getTypeAction(OpVT) << "\n";
               DAG.getMachineFunction().dump();
               N->dumpr();
+#endif
               report_fatal_error("legalization action is not supported.");
           }
         }
 
         if (i == NumOperands) {
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
           LLVM_DEBUG(dbgs() << "Legally typed node: "; N->dump(&DAG));
+#endif
         }
 
         if (NNewDeoptArgs > 0) {

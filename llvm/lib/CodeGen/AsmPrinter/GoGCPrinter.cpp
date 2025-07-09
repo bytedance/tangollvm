@@ -241,8 +241,6 @@ emitCallsiteEntries(StackMaps &SM, AsmPrinter &AP) {
   if (CSInfos.empty())
     return;
 
-  MCStreamer &OS = *AP.OutStreamer;
-
   const Module * M = AP.MMI->getModule();
   const DataLayout &DL = AP.getDataLayout();
 

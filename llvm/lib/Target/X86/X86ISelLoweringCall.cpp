@@ -2020,15 +2020,16 @@ static void passArgsForGoAdHocABI(MachineFunction &MF,
     llvm_unreachable("impossible");
     break;
   case GoAdHocABI::GoWriteBarrier: {
+#ifndef NDEBUG
     assert(ArgLocs.size() == 2 && "write barrier takes two inputs");
-
     CCValAssign &DstVA = ArgLocs[0];
     assert(DstVA.getLocInfo() == CCValAssign::Full);
-    // EVT DstRegVT = DstVA.getLocVT();
-    SDValue DstArg = OutVals[0];
-
     CCValAssign &SrcVA = ArgLocs[1];
     assert(SrcVA.getLocInfo() == CCValAssign::Full);
+#endif
+
+    // EVT DstRegVT = DstVA.getLocVT();
+    SDValue DstArg = OutVals[0];
     // EVT SrcRegVT = SrcVA.getLocVT();
     SDValue SrcArg = OutVals[1];
 
@@ -2047,14 +2048,15 @@ static void passArgsForGoAdHocABI(MachineFunction &MF,
     break;
   }
   case GoAdHocABI::DuffCopy:{
+#ifndef NDEBUG
     assert(ArgLocs.size() == 2 && "duffcopy takes two inputs");
-
     CCValAssign &FirstVA = ArgLocs[0];
     assert(FirstVA.getLocInfo() == CCValAssign::Full);
-    SDValue FirstArg = OutVals[0];
-
     CCValAssign &SecondVA = ArgLocs[1];
     assert(SecondVA.getLocInfo() == CCValAssign::Full);
+#endif
+
+    SDValue FirstArg = OutVals[0];
     SDValue SecondArg = OutVals[1];
 
     Register FirstReg = X86::RDI;
@@ -2065,12 +2067,13 @@ static void passArgsForGoAdHocABI(MachineFunction &MF,
     break;
   }
   case GoAdHocABI::DuffZero: {
+#ifndef NDEBUG
     assert(ArgLocs.size() == 1 && "duffzero takes one input");
-
     CCValAssign &FirstVA = ArgLocs[0];
     assert(FirstVA.getLocInfo() == CCValAssign::Full);
-    SDValue FirstArg = OutVals[0];
+#endif
 
+    SDValue FirstArg = OutVals[0];
     Register FirstReg = X86::RDI;
 
     RegsToPass.push_back(std::make_pair(FirstReg, FirstArg));
@@ -2079,14 +2082,15 @@ static void passArgsForGoAdHocABI(MachineFunction &MF,
   case GoAdHocABI::PanicBoundsA:
   case GoAdHocABI::PanicBoundsB:
   case GoAdHocABI::PanicBoundsC: {
+#ifndef NDEBUG
     assert(ArgLocs.size() == 2 && "panic bounds takes two inputs");
-
     CCValAssign &FirstVA = ArgLocs[0];
     assert(FirstVA.getLocInfo() == CCValAssign::Full);
-    SDValue FirstArg = OutVals[0];
-
     CCValAssign &SecondVA = ArgLocs[1];
     assert(SecondVA.getLocInfo() == CCValAssign::Full);
+#endif
+
+    SDValue FirstArg = OutVals[0];
     SDValue SecondArg = OutVals[1];
 
     Register FirstReg, SecondReg;

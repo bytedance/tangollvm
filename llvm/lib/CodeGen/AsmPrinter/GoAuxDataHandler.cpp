@@ -23,7 +23,6 @@
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCObjectFileInfo.h"
 #include "llvm/MC/MCStreamer.h"
-#include "llvm/Support/Alignment.h"
 #include "llvm/Support/EndianStream.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
 
@@ -102,6 +101,7 @@ void MCGoAuxData::beginModule(Module *M) {
 
   NamedMDNode *FileTabMeta = M->getNamedMetadata("go.local.filetab");
   MDNodeToFileTab(FileTable, FileTabMeta);
+  FileTableMap.reserve(FileTable.size());
 
   if (NamedMDNode *CUNodes = M->getNamedMetadata("go.version")) {
     StringRef GoVersion = cast<MDString>(CUNodes->getOperand(0)->getOperand(0))->getString();
@@ -115,8 +115,6 @@ void MCGoAuxData::beginModule(Module *M) {
 
   // switch section after creating end symbol
   const TargetLoweringObjectFile &TLOF= Asm->getObjFileLowering();
-  const DataLayout &DL = Asm->getDataLayout();
-  Align Alignment(1); // variant length encoding
   MCSection *ReadOnlySection = TLOF.getGoAuxDataSection();
   Asm->OutStreamer->pushSection();
   Asm->OutStreamer->switchSection(ReadOnlySection);
@@ -664,7 +662,6 @@ void MCGoAuxData::endFunctionImpl(const MachineFunction *MF) {
   // switch section after creating end symbol
   const TargetLoweringObjectFile &TLOF= Asm->getObjFileLowering();
   const DataLayout &DL = Asm->getDataLayout();
-  Align Alignment(1); // variant length encoding
   MCSection *ReadOnlySection = TLOF.getGoAuxDataSection();
   Asm->OutStreamer->pushSection();
   Asm->OutStreamer->switchSection(ReadOnlySection);
@@ -727,6 +724,7 @@ void MCGoAuxData::endFunctionImpl(const MachineFunction *MF) {
         Offset += NameLen;
       }
 
+      (void)Offset;
       assert(Offset == s.size() && "invariant");
 
       Asm->OutStreamer->emitBinaryData(s);
@@ -934,15 +932,25 @@ void MCGoAuxData::endFunctionImpl(const MachineFunction *MF) {
   Asm->OutStreamer->popSection();
 }
 
+
 int32_t MCGoAuxData::getFileIndex(DIFile* DF) {
   if (FileTable.empty()) {
     return -1;
   }
+  auto It = FileTableMap.find(DF);
+  if (It != FileTableMap.end()) {
+    auto Index = It->second;
+    FuncInfo.recordUsedFile(Index);
+    return Index;
+  }
+
   StringRef Dir = DF->getDirectory();
   StringRef File = DF->getFilename();
+
   for (auto &F : FileTable) {
     if (F.Dir == Dir && F.File == File) {
       FuncInfo.recordUsedFile(F.Index);
+      FileTableMap[DF] = F.Index;
       return F.Index;
     }
   }
@@ -1174,6 +1182,7 @@ visitPointers(Type *T, const DataLayout &DL, int64_t BaseOffset, const F& Func) 
   }
   case Type::ScalableVectorTyID:
     assert(false && "not expecting ScalableVectorTyID");
+    break;
   default:
     break;
   }
@@ -1220,9 +1229,11 @@ static void emitEntryStackMap(const Function *Fn, const DataLayout &DL, uint32_t
           continue;
         }
         int64_t Offset = dyn_cast<ConstantAsMetadata>(n->getOperand(i + 1))->getValue()->getUniqueInteger().getSExtValue();
+#if !defined(NDEBUG)
         int64_t Size = dyn_cast<ConstantAsMetadata>(n->getOperand(i + 2))->getValue()->getUniqueInteger().getSExtValue();
         assert(Size == 8 && "amd64 must be 8 bytes ptr");
         assert(Offset >= 0 && Offset % 8 == 0 && "must be 8 byte aligned");
+#endif
         Offset -= 8; // Offset is relative to FP. We need to subtract slot for PC. See llvm.go
         consumeOffset(Offset);
       }

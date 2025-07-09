@@ -456,6 +456,7 @@ getPtrBitmapForTypeHelper(Type *T, const DataLayout &DL, uint64_t BaseOffset, Bi
   }
   case Type::ScalableVectorTyID:
     assert(false && "not expecting ScalableVectorTyID");
+    break;
   default:
     break;
   }
@@ -1280,8 +1281,10 @@ extractPointerFromFCA(Value *V, IRBuilder<> &Builder,
         assert(!hasPointerTy(ElemT) && "nested FCA is not supported");
     }
   } else if (T->isArrayTy()) {
+#if !defined(NDEBUG)
     Type *ElemT = T->getArrayElementType();
     assert(ElemT->isPointerTy() && "nested FCA is not supported");
+#endif
     for (unsigned i = 0, e = T->getArrayNumElements(); i < e; ++i) {
       Value *Elem = Builder.CreateExtractValue(V, {i});
       PtrFields.push_back(Elem);
@@ -1300,7 +1303,9 @@ extractPointerFromFCA(Value *V, IRBuilder<> &Builder,
   }
 }
 
+#if !defined(NDEBUG)
 static Value *phiHasConstantValue(PHINode *Phi0);
+#endif
 
 static void
 makeStatepointExplicitImpl(CallBase *Call, /* to replace */
@@ -1316,8 +1321,7 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
   // be replacing a terminator.
   const DataLayout &DL = Call->getModule()->getDataLayout();
   Type *PtrIntTy = Type::getInt64Ty(Call->getContext());
-  const unsigned PtrSize = DL.getPointerSize();
-  assert(PtrSize == 8 && "invariant");
+  assert(DL.getPointerSize() == 8 && "invariant");
   IRBuilder<> Builder(Call);
 
   unique_unsorted(BasePtrs);
@@ -1349,8 +1353,10 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
 
   // Step 1: Add all base pointers
   for (Value *V : BasePtrs) {
+#if !defined(NDEBUG)
     if (auto *Phi = dyn_cast<PHINode>(V))
       assert(!phiHasConstantValue(Phi) && "constant phi should not be in liveset");
+#endif
     if (isa<AllocaInst>(V)) {
       Type *T = cast<AllocaInst>(V)->getAllocatedType();
       // avoid [0 x type] in `stack-map`
@@ -1449,7 +1455,7 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
       if (I->hasMetadata("go.pointerlike.illformed")) {
         IllFormedPtr.push_back(V);
       } else if (I->hasMetadata("go.maybe.outofbounds")) {
-        Function *F = Call->getParent()->getParent();
+        // Function *F = Call->getParent()->getParent();
         // dbgs() << "Maybe out of bounds: " << *I << " in " << F->getName() << "\n";
         IllFormedPtr.push_back(V);
       }
@@ -1465,7 +1471,9 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
         dbgs() << F->getName() << ": mark function obsolete due to ill-formed pointer\n";
         for(Value *V : IllFormedPtr)
           dbgs() << "    " << *V << "\n";
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
         F->dump();
+#endif
       }
       TangoLLVM::markObsoleted(F);
     }
@@ -1632,17 +1640,13 @@ zeroAmbiguouslyLiveSlots(Function &F, DenseMap<Value *, ToZeroInfo> &ToZero) {
       Pos = It.second.Pos->getFirstNonPHI();
     }
     BitVector &State = It.second.State;
-    BasicBlock *BB = SO->getParent();
-    assert(BB == &F.getEntryBlock() && "all stack objects are allocated in entry block in Go");
-
-
+    assert(SO->getParent() == &F.getEntryBlock() && "all stack objects are allocated in entry block in Go");
 
     IRBuilder<> Builder(Pos);
     Value *Dst = SO;
     Type *ElemTyp = getValueElementType(SO);
     assert(ElemTyp != nullptr && "ElemType cannot be null");
 
-    //
     size_t BitsSet = State.count();
     size_t BitsAll = State.size();
 
@@ -1685,8 +1689,10 @@ zeroAmbiguouslyLiveSlots(Function &F, DenseMap<Value *, ToZeroInfo> &ToZero) {
     ToZero.erase(SO);
   }
 
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
   if (PrintToZero)
     F.dump();
+#endif
   assert(ToZero.empty());
 }
 
@@ -1695,6 +1701,7 @@ zeroAmbiguouslyLiveSlots(Function &F, DenseMap<Value *, ToZeroInfo> &ToZero) {
 //   a = phi(null, b)
 // (in a different block)
 //   b = phi(a, null)
+#if !defined(NDEBUG)
 static Value *
 phiHasConstantValue(PHINode *Phi0) {
   Value *V = Phi0->hasConstantValue();
@@ -1728,8 +1735,7 @@ phiHasConstantValue(PHINode *Phi0) {
 
   return V;
 }
-
-
+#endif
 
 static bool insertParsePoints(Function &F, DominatorTree &DT, LoopInfo &LI,
                               TargetTransformInfo &TTI,
@@ -2156,10 +2162,10 @@ struct UpdateUse {
 
 
 static bool legalizeAlloca(Function &F) {
-  const DataLayout &DL = F.getParent()->getDataLayout();
   for (Instruction &I : instructions(F)) {
     if (AllocaInst *AI = dyn_cast<AllocaInst>(&I)) {
-      assert(AI->getAlign() <= DL.getStackAlignment() && "invariant");
+      (void)AI;
+      assert(AI->getAlign() <= F.getParent()->getDataLayout().getStackAlignment() && "invariant");
     }
   }
   return false;
@@ -2370,8 +2376,6 @@ bool GoStatepoints::runOnFunction(Function &F, DominatorTree &DT,
 
     if (Modified)
       DTU.getDomTree();
-
-    // F.dump();
   }
 
   // Before we start introducing relocations, we want to tweak the IR a bit to
@@ -2730,8 +2734,10 @@ bool CheckIllFormedPointerForward(Instruction *Parent, Instruction *Child) {
     return Mark(Parent);
   }
 
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
   dbgs() << "find an unsupported pointer like value: " << *Parent << "\n";
   Parent->getParent()->getParent()->dump();
+#endif
   report_fatal_error("unsupported pointer like value");
   return MarkIllFormed(Parent, "unsupported parent");
 }
@@ -3046,9 +3052,7 @@ static void checkForward(Function &F, Instruction *Start, const Type *PtrIntTy) 
 }
 
 static void checkGoPointerLikeValues(Function &F) {
-  const DataLayout &DL = F.getParent()->getDataLayout();
-  const unsigned PtrSize = DL.getPointerSize();
-  assert(PtrSize == 8 && "only 64bit");
+  assert(F.getParent()->getDataLayout().getPointerSize() == 8 && "only 64bit");
   const Type *PtrIntTy = Type::getInt64Ty(F.getContext());
 
   for (Instruction &I : instructions(F)) {
@@ -3087,7 +3091,9 @@ static void checkGoPointerLikeValues(Function &F) {
         // report error:
         if (PrintObsoleted) {
           dbgs() << F.getName() << ": a PtrToInt depends on a non-zero constant: " << *Src << "\n";
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
           F.dump();
+#endif
         }
         MarkAllIllFormed(PTI);
       } else if (IntToPtrInst *ITP = dyn_cast<IntToPtrInst>(Src)) {
@@ -3095,7 +3101,9 @@ static void checkGoPointerLikeValues(Function &F) {
           if (I->hasMetadata("go.pointerlike.illformed")) {
             if (PrintObsoleted) {
               dbgs() << F.getName() << ": a PtrToInt depends on an ill-formed IntToPtr: " << *ITP << "\n";
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
               F.dump();
+#endif
             }
             MarkAllIllFormed(PTI);
           }
@@ -3788,7 +3796,9 @@ static void computeAllocaDefState(DominatorTree &DT, LoopInfo &LI, Function &F,
       if (isa<AllocaInst>(&I) || isGoPreAllocated(&I)) {
         if (&BB != &Entry) {
           // Remove the sanity check if we allocate stack objects in other basic blocks.
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
           F.dump();
+#endif
           dbgs() << "stack objects must be declared in entry block: " << I << "\n";
           report_fatal_error("stack objects must be declared in entry block");
         }
@@ -3798,7 +3808,9 @@ static void computeAllocaDefState(DominatorTree &DT, LoopInfo &LI, Function &F,
           auto TypePtrMap = GetTypePtrMap(getValueElementType(It->first));
           if (!AllBitsUnset(TypePtrMap, S)) {
             if (!ToZero.count(It->first) && GetAllocaDomUse(It->first) != nullptr) {
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
               F.dump();
+#endif
               dbgs() << "must be added to ToZero: " << *It->first << "\n";
               report_fatal_error("must be added to ToZero");
             }
@@ -4036,6 +4048,7 @@ static void computeLiveInValues(DominatorTree &DT, LoopInfo &LI, Function &F,
 
       if (BranchInst *BI = dyn_cast<BranchInst>(I)) {
         // must be conditional
+        (void)BI;
         assert(BI->isConditional() && "invariant");
         // TODO: a CmpInst of Ptr does not read from or write to the Ptr.
         // TODO: If CmpInst is a null-check, we can conclude that the Ptr is non-null in one branch.

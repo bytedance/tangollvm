@@ -31,6 +31,7 @@ namespace llvm {
 class AsmPrinter;
 class MCSymbol;
 class DILocation;
+class DIFile;
 
 class MCGoAuxData : public DebugHandlerBase {
 public:
@@ -58,6 +59,7 @@ private:
   std::vector<PCData> PCIndex;
 
   std::vector<MCGoFileEntry> FileTable;
+  DenseMap<DIFile*, int32_t> FileTableMap;
   std::vector<MCGoDwarfEntry> DwarfTable;
   bool FuncInfoHasStartLine;
 
@@ -109,6 +111,7 @@ private:
     resetFunction();
 
     FileTable.clear();
+    FileTableMap.clear();
     FuncInfoHasStartLine = false;
     MaxStatepointID = 0;
   }
