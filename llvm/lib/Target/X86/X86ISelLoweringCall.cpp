@@ -2111,6 +2111,21 @@ static void passArgsForGoAdHocABI(MachineFunction &MF,
     RegsToPass.push_back(std::make_pair(SecondReg, SecondArg));
     break;
   }
+  case GoAdHocABI::KeepAlive: {
+#ifndef NDEBUG
+    assert(ArgLocs.size() == 2 && "panic bounds takes two inputs");
+    CCValAssign &FirstVA = ArgLocs[0];
+    assert(FirstVA.getLocInfo() == CCValAssign::Full);
+    CCValAssign &SecondVA = ArgLocs[1];
+    assert(SecondVA.getLocInfo() == CCValAssign::Full);
+#endif
+
+    SDValue SecondArg = OutVals[1];
+    Register SecondReg = X86::R14;
+    // TODO: x86-64 only
+    RegsToPass.push_back(std::make_pair(SecondReg, SecondArg));
+    break;
+  }
   }
 }
 
@@ -2182,6 +2197,8 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
           // AX, CX
           goAdHocABI = GoAdHocABI::PanicBoundsC;
         }
+      } else if (CalleeName == "KeepAlive") {
+        goAdHocABI = GoAdHocABI::KeepAlive;
       }
     }
   }
@@ -2324,7 +2341,7 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   // TANGOLLVM
   if (goAdHocABI != GoAdHocABI::None)
     passArgsForGoAdHocABI(MF, ArgLocs, OutVals, RegsToPass, goAdHocABI);
-  else // Leave this intent purposely for better diff
+  else // Leave this indent purposely for better diff
   for (unsigned I = 0, OutIndex = 0, E = ArgLocs.size(); I != E;
        ++I, ++OutIndex) {
     assert(OutIndex < Outs.size() && "Invalid Out index");

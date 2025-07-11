@@ -25,7 +25,8 @@ enum class GoAdHocABI {
   DuffZero,
   PanicBoundsA,
   PanicBoundsB,
-  PanicBoundsC
+  PanicBoundsC,
+  KeepAlive
 };
 
 class TangoLLVM {

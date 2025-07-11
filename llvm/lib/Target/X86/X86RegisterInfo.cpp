@@ -567,6 +567,8 @@ const uint32_t *X86RegisterInfo::getGoAdHocCallPreservedMask(
       // AVX will zero XMM and YMM
       return CSR_64_AllRegs_NoDI_NoSSE_RegMask;
     return CSR_64_AllRegs_NoDI_RegMask;
+  case GoAdHocABI::KeepAlive:
+    return CSR_64_AllRegs_RegMask;
   }
 
   llvm_unreachable("impossible");

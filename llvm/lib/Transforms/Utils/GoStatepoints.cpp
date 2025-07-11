@@ -2078,7 +2078,8 @@ static bool hasStackMap(const CallBase *Call) {
     if (Name == "runtime.typedmemclr"
         || Name == "runtime.typedmemmove"
         || Name == "runtime.wbZero"
-        || Name == "runtime.wbMove") {
+        || Name == "runtime.wbMove"
+        || Name == "runtime.KeepAlive") {
       return false;
     }
   }

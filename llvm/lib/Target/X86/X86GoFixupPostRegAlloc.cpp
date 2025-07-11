@@ -94,6 +94,11 @@ bool X86GoFixupPostRegAllocPass::runOnMachineFunction(MachineFunction &fn) {
 
 bool X86GoFixupPostRegAllocPass::rewriteGCWriteBarrier() {
   bool Changed = false;
+  SmallVector<MachineInstr*, 8> ToBeRemoved;
+  const X86InstrInfo *TII = MF->getSubtarget<X86Subtarget>().getInstrInfo();
+  // Need to remove call setup of KeepAlive
+  unsigned FrameSetupOpcode = TII->getCallFrameSetupOpcode();
+  unsigned FrameDestroyOpcode = TII->getCallFrameDestroyOpcode();
   for (auto &MBB : *MF)
     for (auto &MI : MBB) {
       if (!MI.isCall())
@@ -109,6 +114,60 @@ bool X86GoFixupPostRegAllocPass::rewriteGCWriteBarrier() {
 
       const Function *F = dyn_cast<Function>(Callee.getGlobal());
       assert(F != nullptr);
+
+      if (F->getName() == "runtime.KeepAlive") {
+        // We must do it after RegAlloc because RegAlloc may not
+        // spill a dead VirtReg.
+        ToBeRemoved.push_back(&MI);
+        // We must remove three instructions
+        // 1. CallFrameSetup
+        // 2. CallFrameDestory
+        // 3. PassArg to RBX
+        // RAX is a undef value
+        // TODO: we still waste RBX here
+        auto It = MI.getIterator();
+        bool SetupFound = false;
+        bool DestoryFound = false;
+        // We use R14 to avoid spill of RBX
+        bool ArgDefFound = false;
+        do {
+          It = std::prev(It);
+          if (!SetupFound && It->getOpcode() == FrameSetupOpcode) {
+            ToBeRemoved.push_back(&*It);
+            SetupFound = true;
+            if (ArgDefFound)
+              break;
+          }
+          if (!ArgDefFound && It->definesRegister(X86::R14, nullptr)) {
+            ArgDefFound = true;
+            if (!It->isInlineAsm()) {
+              // The only valid define of R14 is InlineAsm for calling ABI0
+              ToBeRemoved.push_back(&*It);
+            }
+            if (SetupFound)
+              break;
+          }
+          // Optimization may move arg pass before FrameSetup.
+          // e.g., os.(*rawConn).Read
+          // Try our best and search in the same basic block.
+        } while (It != MBB.begin());
+
+        It = std::next(MI.getIterator());
+        while (It != MBB.end()) {
+          if (It->getOpcode() == FrameDestroyOpcode) {
+            DestoryFound = true;
+            ToBeRemoved.push_back(&*It);
+            break;
+          }
+          It = std::next(It);
+        }
+        if (!SetupFound || !DestoryFound) {
+          // dbgs() << "Search results: " << ArgDefFound << " " << SetupFound << " " << DestoryFound << "\n";
+          // MF->dump();
+          report_fatal_error("incorrect cleanup of phantom call to runtime.KeepAlive");
+        }
+        continue;
+      }
 
       if (F->getName() != StringRef("runtime.gcWriteBarrier"))
         continue;
@@ -165,6 +224,12 @@ bool X86GoFixupPostRegAllocPass::rewriteGCWriteBarrier() {
         Changed = true;
       }
     }
+
+  if (!ToBeRemoved.empty()) {
+    Changed = true;
+    for (auto *MI : ToBeRemoved)
+      MI->eraseFromParent();
+  }
 
   return Changed;
 }
