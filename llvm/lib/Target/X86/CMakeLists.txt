@@ -42,6 +42,7 @@ set(sources
   X86ExpandPseudo.cpp
   X86FastISel.cpp
   X86FixupBWInsts.cpp
+  X86GoFixupStackSplit.cpp
   X86FixupLEAs.cpp
   X86FixupInstTuning.cpp
   X86FixupVectorConstants.cpp

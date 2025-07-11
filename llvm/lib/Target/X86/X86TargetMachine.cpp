@@ -620,6 +620,10 @@ void X86PassConfig::addPreEmitPass() {
     addPass(createX86FixupInstTuning());
     addPass(createX86FixupVectorConstants());
   }
+  const Triple &TT = TM->getTargetTriple();
+  if (TT.isGoEnvironment()) {
+    addPass(createX86GoFixupStackSplitPass());
+  }
   addPass(createX86CompressEVEXPass());
   addPass(createX86DiscriminateMemOpsPass());
   addPass(createX86InsertPrefetchPass());

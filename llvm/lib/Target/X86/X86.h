@@ -16,6 +16,7 @@
 #ifndef LLVM_LIB_TARGET_X86_X86_H
 #define LLVM_LIB_TARGET_X86_X86_H
 
+#include "llvm/PassRegistry.h"
 #include "llvm/Support/CodeGen.h"
 
 namespace llvm {
@@ -139,6 +140,8 @@ FunctionPass *createX86CmovConverterPass();
 /// the upper portions of registers, and to save code size.
 FunctionPass *createX86FixupBWInsts();
 
+FunctionPass *createX86GoFixupStackSplitPass();
+
 /// Return a Machine IR pass that reassigns instruction chains from one domain
 /// to another, when profitable.
 FunctionPass *createX86DomainReassignmentPass();
@@ -182,6 +185,7 @@ FunctionPass *createX86ArgumentStackSlotPass();
 void initializeCompressEVEXPassPass(PassRegistry &);
 void initializeFPSPass(PassRegistry &);
 void initializeFixupBWInstPassPass(PassRegistry &);
+void initializeGoFixupStackSplitPassPass(PassRegistry &);
 void initializeFixupLEAPassPass(PassRegistry &);
 void initializeX86ArgumentStackSlotPassPass(PassRegistry &);
 void initializeX86FixupInstTuningPassPass(PassRegistry &);
