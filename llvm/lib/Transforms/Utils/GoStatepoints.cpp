@@ -2163,13 +2163,65 @@ struct UpdateUse {
 
 
 static bool legalizeAlloca(Function &F) {
+  DenseMap<AllocaInst*, CallInst*> PreAllocated;
   for (Instruction &I : instructions(F)) {
     if (AllocaInst *AI = dyn_cast<AllocaInst>(&I)) {
       (void)AI;
       assert(AI->getAlign() <= F.getParent()->getDataLayout().getStackAlignment() && "invariant");
+    } else if (CallInst *CI = dyn_cast<CallInst>(&I)) {
+      if (CI->getIntrinsicID() == Intrinsic::go_preallocated) {
+        Value *Arg = CI->getArgOperand(0);
+        if (AllocaInst *AI = dyn_cast<AllocaInst>(Arg)) {
+          auto It = PreAllocated.find(AI);
+          if (It == PreAllocated.end()) {
+            PreAllocated[AI] = CI;
+          } else {
+            CallInst *OtherCI = It->second;
+            // they should have the same arguments
+            for (unsigned I = 0; I < CI->arg_size(); ++I) {
+              if (CI->getArgOperand(I) != OtherCI->getArgOperand(I))
+                report_fatal_error("inconsistent preallcoated");
+            }
+          }
+        }
+      }
     }
   }
-  return false;
+  if (PreAllocated.empty()) {
+    return false;
+  }
+  bool Changed = false;
+  for (auto I : PreAllocated) {
+    AllocaInst *AI = I.first;
+    CallInst *CI = I.second;
+    if (CI->getParent() == nullptr) {
+      report_fatal_error("bad state");
+    }
+    Value *Null = ConstantPointerNull::get(cast<PointerType>(AI->getType()));
+    // Cut usage
+    CI->setArgOperand(0, Null);
+    CI->moveBefore(AI);
+    if (CI->paramHasAttr(0, Attribute::NonNull)) {
+      CI->removeParamAttr(0, Attribute::NonNull);
+    }
+    SmallVector<Instruction*> OtherIntrinsics;
+    for (auto &U : AI->uses()) {
+      Instruction *I = dyn_cast<Instruction>(U.getUser());
+      if (I == CI) {
+        report_fatal_error("bad state");
+      } else if (isGoPreAllocated(I)) {
+        OtherIntrinsics.push_back(I);
+      }
+    }
+    for (Instruction* I : OtherIntrinsics) {
+      I->replaceAllUsesWith(CI);
+      I->eraseFromParent();
+    }
+    AI->replaceAllUsesWith(CI);
+    AI->eraseFromParent();
+    Changed = true;
+  }
+  return Changed;
 }
 
 /**
@@ -2314,6 +2366,9 @@ bool GoStatepoints::runOnFunction(Function &F, DominatorTree &DT,
   // statepoints surviving this pass.  This makes testing easier and the
   // resulting IR less confusing to human readers.
   bool MadeChange = removeUnreachableBlocks(F, &DTU);
+  // Legalize all alloca and go preallocated.
+  // TODO: move to a standalone pass
+  MadeChange |= legalizeAlloca(F);
 
   // Rewrite all the calls that need statepoints to invokes, so we can
   // attach a stack map through its landing pad.
@@ -2410,7 +2465,6 @@ bool GoStatepoints::runOnFunction(Function &F, DominatorTree &DT,
       }
   }
 
-  MadeChange |= legalizeAlloca(F);
   MadeChange |= moveITPToDefAndPTIToUse(F);
   MadeChange |= insertParsePoints(F, DT, LI, TTI, ParsePointNeeded);
   MadeChange |= replaceUndefPointerWithNullPointer(F);

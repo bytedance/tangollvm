@@ -129,7 +129,7 @@ public:
     if (CallInst *Call = dyn_cast<CallInst>(V)) {
       if (Function *Fn = Call->getCalledFunction()) {
         if (Fn->getIntrinsicID() == Intrinsic::go_preallocated) {
-          return Call->getArgOperand(2)->getType();
+          return Call->getArgOperand(3)->getType();
         }
       }
     }
@@ -140,7 +140,7 @@ public:
     if (CallInst *Call = dyn_cast<CallInst>(V)) {
       if (Function *Fn = Call->getCalledFunction()) {
         if (Fn->getIntrinsicID() == Intrinsic::go_preallocated) {
-          ConstantInt *ParamOut = dyn_cast<ConstantInt>(Call->getArgOperand(3));
+          ConstantInt *ParamOut = dyn_cast<ConstantInt>(Call->getArgOperand(4));
           assert(ParamOut != nullptr && "sanity check");
           return !ParamOut->isZero();
         }

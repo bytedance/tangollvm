@@ -55,7 +55,7 @@ static bool runOnFunction(Function &F, bool specialize, bool useinline);
 static bool intrinsifyGoBuiltins(Function &F) {
   SmallVector<CallInst*, 4> MemClrs;
   SmallVector<CallInst*, 4> MemHashs;
-
+  SmallVector<CallInst*, 4> StrHashs;
   for (Instruction &I : instructions(F)) {
     CallInst *CI = dyn_cast<CallInst>(&I);
     if (!CI)
@@ -78,6 +78,8 @@ static bool intrinsifyGoBuiltins(Function &F) {
       }
     } else if (Name == "runtime.memhash64" || Name == "runtime.memhash32") {
       MemHashs.push_back(CI);
+    } else if (Name == "runtime.strhash") {
+      StrHashs.push_back(CI);
     }
   }
 
@@ -97,6 +99,52 @@ static bool intrinsifyGoBuiltins(Function &F) {
     Changed = true;
   }
 
+  Module *M = F.getParent();
+  LLVMContext &Context = F.getContext();
+  Type *i64 = Type::getInt64Ty(Context);
+  Type *i8 = Type::getInt8Ty(Context);
+  Type *i8ptr = i8->getPointerTo();
+  if (!StrHashs.empty()) {
+    // TODO: we do not create memhash if it does not exist.
+    // This is because strhash should only be used by runtime internally.
+    Function *MemHashFn = M->getFunction("runtime.memhash");
+    Type *PtrType = PointerType::get(Context, 0);
+    if (MemHashFn != nullptr) {
+      assert(MemHashFn->arg_size() == 3 && "intrinsic invariant");
+      for (auto *CI : StrHashs) {
+        IRBuilder<> Builder(CI);
+
+        unsigned ArgBegin = 0;
+        // memhash32 and memhash64 have two parameters.
+        // However, they could used as the type->hasher via function pointer
+        if (CI->arg_size() == 2) {
+          ArgBegin = 0;
+        } else if (CI->arg_size() == 3) {
+          if (!TangoLLVM::isGoClosureCall(CI)) {
+            report_fatal_error("inconsistent arg size of strhash");
+          }
+          ArgBegin = 1;
+        } else {
+          report_fatal_error("inconsistent arg size of strhash");
+        }
+
+        Value *AX = CI->getArgOperand(ArgBegin + 0);
+        Value *BX = CI->getArgOperand(ArgBegin + 1);
+
+        Value *Ptr = Builder.CreateLoad(PtrType, AX);
+        Value *Len = Builder.CreateLoad(i64, Builder.CreateConstGEP1_32(i8,
+              Builder.CreateBitCast(AX, i8ptr), 8));
+
+        auto *NewCI = Builder.CreateCall(MemHashFn, {Ptr, BX, Len});
+        NewCI->setCallingConv(CI->getCallingConv());
+        assert(CI->getType() == NewCI->getType() && "strhash should have the same return value as memhash");
+        CI->replaceAllUsesWith(NewCI);
+        CI->eraseFromParent();
+        Changed = true;
+      }
+    }
+  }
+
   if (MemHashs.empty()) {
     return Changed;
   }
@@ -106,13 +154,9 @@ static bool intrinsifyGoBuiltins(Function &F) {
   if (ID == 0)
     return Changed;
 
-  LLVMContext &Context = F.getContext();
-  Type *i64 = Type::getInt64Ty(Context);
   Type *i32 = Type::getInt32Ty(Context);
-  Type *i8 = Type::getInt8Ty(Context);
   VectorType * v2i64 = FixedVectorType::get(i64, 2);
 
-  Module *M = F.getParent();
   GlobalVariable *G = M->getGlobalVariable("runtime.aeskeysched");
   if (G == nullptr) {
     G = new GlobalVariable(*M, i8, false, GlobalValue::ExternalLinkage, nullptr, "runtime.aeskeysched");

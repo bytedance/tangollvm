@@ -2743,8 +2743,10 @@ def int_ptrauth_sign_generic :
   DefaultAttrsIntrinsic<[llvm_i64_ty], [llvm_i64_ty, llvm_i64_ty], [IntrNoMem]>;
 
 // TANGOLLVM
-def int_go_preallocated : DefaultAttrsIntrinsic<[llvm_anyptr_ty], [llvm_i64_ty, llvm_i64_ty, llvm_any_ty, llvm_i1_ty],
-                                 [IntrNoMem, ImmArg<ArgIndex<0>>, ImmArg<ArgIndex<1>>, ImmArg<ArgIndex<3>>]>;
+def int_go_preallocated : DefaultAttrsIntrinsic<[llvm_anyptr_ty], [llvm_anyptr_ty, llvm_i64_ty, llvm_i64_ty, llvm_any_ty, llvm_i1_ty],
+      [IntrWillReturn, IntrNoFree, IntrNoCallback,
+       NoCapture<ArgIndex<0>>, NoAlias<ArgIndex<0>>, WriteOnly<ArgIndex<0>>,
+        ImmArg<ArgIndex<1>>, ImmArg<ArgIndex<2>>, ImmArg<ArgIndex<4>>]>;
 
 def int_go_stackaddress : DefaultAttrsIntrinsic<[llvm_anyptr_ty], [llvm_i64_ty],
                                  [IntrNoMem, ImmArg<ArgIndex<0>>]>;

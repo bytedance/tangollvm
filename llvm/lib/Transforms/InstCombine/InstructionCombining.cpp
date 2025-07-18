@@ -3184,6 +3184,7 @@ static bool isAllocSiteRemovable(Instruction *AI,
               return false;
             [[fallthrough]];
           }
+          case Intrinsic::go_preallocated:
           case Intrinsic::assume:
           case Intrinsic::invariant_start:
           case Intrinsic::invariant_end:

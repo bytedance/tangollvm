@@ -6666,8 +6666,11 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
   }
   case Intrinsic::go_preallocated: {
     auto getOrCreateFixedObject = [&](const CallInst &I) {
-      int64_t Offset = cast<ConstantInt>(I.getArgOperand(0))->getSExtValue();
-      int64_t  Size = cast<ConstantInt>(I.getArgOperand(1))->getSExtValue();
+      if (!isa<ConstantPointerNull>(I.getArgOperand(0))) {
+        report_fatal_error("all associated alloca must be eliminated before gc-statepoints");
+      }
+      int64_t Offset = cast<ConstantInt>(I.getArgOperand(1))->getSExtValue();
+      int64_t  Size = cast<ConstantInt>(I.getArgOperand(2))->getSExtValue();
       if (Size == 0) {
         // In Go, stack object size can be 0. However, in LLVM, stack
         // object size cannot be 0. Note that preallocated area is aligned

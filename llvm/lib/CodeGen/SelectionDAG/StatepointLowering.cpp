@@ -97,8 +97,8 @@ static SDValue getSDValue(const Value *V, SelectionDAGBuilder &Builder) {
   if (const CallInst *Call = dyn_cast<CallInst>(V)) {
     if (auto Fn = Call->getCalledFunction()) {
       if (Fn->getIntrinsicID() == Intrinsic::go_preallocated) {
-        int64_t Offset = cast<ConstantInt>(Call->getArgOperand(0))->getZExtValue();
-        uint64_t Size = cast<ConstantInt>(Call->getArgOperand(1))->getSExtValue();
+        int64_t Offset = cast<ConstantInt>(Call->getArgOperand(1))->getZExtValue();
+        uint64_t Size = cast<ConstantInt>(Call->getArgOperand(2))->getSExtValue();
         bool Aliased = Call->hasMetadata("go.stackobject.gcdata");
         MachineFunction &MF = Builder.DAG.getMachineFunction();
         MachineFrameInfo &MFI = MF.getFrameInfo();
