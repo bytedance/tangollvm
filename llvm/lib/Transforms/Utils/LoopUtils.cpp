@@ -40,7 +40,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/ProfDataUtils.h"
-#include "llvm/IR/TangoLLVM.h"
+#include "llvm/TangoLLVM/TangoLLVM.h"
 #include "llvm/IR/ValueHandle.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"

@@ -87,7 +87,7 @@
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/PseudoProbe.h"
 #include "llvm/IR/Type.h"
-#include "llvm/IR/TangoLLVM.h"
+#include "llvm/TangoLLVM/TangoLLVM.h"
 #include "llvm/IR/Value.h"
 #include "llvm/IR/ValueHandle.h"
 #include "llvm/MC/MCAsmInfo.h"

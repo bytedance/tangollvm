@@ -16,7 +16,7 @@
 #define LLVM_LIB_TARGET_X86_X86REGISTERINFO_H
 
 #include "llvm/CodeGen/TargetRegisterInfo.h"
-#include "llvm/IR/TangoLLVM.h"
+#include "llvm/TangoLLVM/TangoLLVM.h"
 
 #define GET_REGINFO_HEADER
 #include "X86GenRegisterInfo.inc"

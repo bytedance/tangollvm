@@ -72,4 +72,6 @@ pythonenv*
 /lldb/docs/python_api/
 llvm-bin-release/
 llvm-build-release/
+llvm-bin-debug/
+llvm-build-debug/
 !build.sh

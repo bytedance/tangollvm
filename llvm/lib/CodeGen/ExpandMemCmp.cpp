@@ -27,7 +27,7 @@
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/PatternMatch.h"
-#include "llvm/IR/TangoLLVM.h"
+#include "llvm/TangoLLVM/TangoLLVM.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"

@@ -29,7 +29,7 @@
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
-#include "llvm/IR/TangoLLVM.h"
+#include "llvm/TangoLLVM/TangoLLVM.h"
 
 #define DEBUG_TYPE "x86-isel"
 

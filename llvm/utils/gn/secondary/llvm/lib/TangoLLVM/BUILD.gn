@@ -1,0 +1,17 @@
+static_library("TangoLLVM") {
+  output_name = "LLVMTangoLLVM"
+  deps = [
+    "//llvm/lib/Support",
+    "//llvm/libCore",
+    "//llvm/libBitWriter",
+    "//llvm/libBitReader",
+    "//llvm/libAnalysis",
+    "//llvm/libCodeGen",
+    "//llvm/libTarget",
+    "//llvm/libTargetParser",
+    "//llvm/libAsmPrinter",
+  ]
+  sources = [
+    "TangoLLVM.cpp",
+  ]
+}

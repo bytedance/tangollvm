@@ -74,7 +74,7 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/IR/PredIteratorCache.h"
-#include "llvm/IR/TangoLLVM.h"
+#include "llvm/TangoLLVM/TangoLLVM.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"

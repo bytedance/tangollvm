@@ -9,7 +9,7 @@
 #ifndef LLVM_CODEGEN_TANGOLLVM_H_
 #define LLVM_CODEGEN_TANGOLLVM_H_
 
-#include <llvm/IR/TangoLLVM.h>
+#include <llvm/TangoLLVM/TangoLLVM.h>
 #include <llvm/CodeGen/MachineInstr.h>
 
 
