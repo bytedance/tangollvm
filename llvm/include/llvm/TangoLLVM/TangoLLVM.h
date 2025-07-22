@@ -152,6 +152,13 @@ public:
   static Constant *resolveLoadROData(LoadInst *LI, const DataLayout &DL);
 
   static Value *simplifyLoadGoROData(LoadInst *LI);
+
+  // The front-end of Go may create some globals for function as the placeholder
+  // in go.rodata
+  static Function *createGoFunction(FunctionType *Ty, GlobalValue::LinkageTypes Linkage,
+      StringRef N, Module *M);
+  static GlobalVariable *createGoGlobalVariable(Type *ValueType, GlobalValue::LinkageTypes Linkage,
+      StringRef N, Module *M);
 };
 
 

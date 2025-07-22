@@ -85,21 +85,69 @@ void TangoLLVM::markObsoleted(Function *Fn) {
   // files and ignore the function during patching.
 
   StringRef Name = Fn->getName();
-  std::string OldName = Name.str();
+  Module *M = Fn->getParent();
 
-  // 1). Rename the function
+  // 0). Create a new function with empty name
+  Function *NewFn = Function::Create(Fn->getFunctionType(), Fn->getLinkage(), "", M);
+
+  // 1). Replace the old function by the new function
+  Fn->replaceAllUsesWith(NewFn);
+  NewFn->setCallingConv(Fn->getCallingConv());
+  NewFn->copyMetadata(Fn, 0);
+  NewFn->setMetadata(LLVMContext::MD_dbg, nullptr);
+  NewFn->setAttributes(Fn->getAttributes());
+  NewFn->takeName(Fn);
+
+  // 2). Update the name of the old function
   std::string NewName = Name.str();
   NewName += "..obsolete";
   Fn->setName(StringRef(NewName));
-
-  // 2). Add a new function declaration with the same name
-  Module *M = Fn->getParent();
-  Function *NewFn = Function::Create(Fn->getFunctionType(), Fn->getLinkage(), StringRef(OldName), M);
-
-  // 3). Replace the old function by the new function
-  Fn->replaceAllUsesWith(NewFn);
   Fn->addFnAttr("go.obsolete");
+
+  assert(NewFn->getName() == Name && "no renaming");
 }
+
+Function *TangoLLVM::createGoFunction(FunctionType *Ty, GlobalValue::LinkageTypes Linkage,
+      StringRef N, Module *M) {
+  GlobalValue *GV = M->getNamedValue(N);
+  if (GV) {
+    if (isa<Function>(GV))
+      report_fatal_error("check existing function before creating a new one");
+
+    if (!isa<GlobalVariable>(GV))
+      report_fatal_error("only global variable can be replaced");
+  }
+
+  Function *NewFn = Function::Create(Ty, Linkage, N, M);
+  NewFn->setMetadata("go.global", MDNode::get(M->getContext(), {}));
+
+  if (GV) {
+    Value *NewGV = NewFn;
+    if (GV->getType() != NewFn->getType()) {
+      NewGV = ConstantExpr::getBitCast(NewFn, GV->getType());
+    }
+    GV->replaceAllUsesWith(NewGV);
+    NewFn->takeName(GV);
+    GV->eraseFromParent();
+  }
+
+  assert(NewFn->getName() == N && "no renaming");
+  return NewFn;
+}
+
+GlobalVariable *TangoLLVM::createGoGlobalVariable(Type *Ty, GlobalValue::LinkageTypes Linkage,
+      StringRef N, Module *M) {
+  GlobalValue *GV = M->getNamedValue(N);
+  if (GV) {
+    report_fatal_error("check existing global variable before creating a new one");
+    return nullptr;
+  }
+
+  GlobalVariable *G = new GlobalVariable(*M, Ty, /*IsConstant*/ false, Linkage, nullptr, N);
+  G->setMetadata("go.global", MDNode::get(M->getContext(), {}));
+  return G;
+}
+
 
 } // namespace llvm
 

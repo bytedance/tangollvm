@@ -712,10 +712,10 @@ bool ModuleLinker::run() {
   if (isTangoLLVM()) {
     // We keep all globals and functions declarations for TangoLLVM
     for (GlobalVariable &GV : SrcM->globals()) {
-      if (!GV.hasMetadata("go.global")) {
-        continue;
-      }
       assert(GV.isDeclaration() && "invariant");
+      if (!GV.hasMetadata("go.global"))
+        continue;
+
       assert(GV.getLinkage() == GlobalValue::ExternalLinkage && "invariant");
       assert(GV.isConstant() == false && "invariant");
       assert(GV.hasInitializer() == false && "invariant");
@@ -733,8 +733,10 @@ bool ModuleLinker::run() {
       // Copy declarations only here
       if (!SF.isDeclaration())
         continue;
-      if (!SF.hasMetadata("go.global"))
-        continue;
+      if (!SF.hasMetadata("go.global")) {
+        assert(SF.getIntrinsicID() != 0 && "invariant");
+        continue; // Ignore intrinsics and other stubs
+      }
 
       GlobalValue *DGV = DstM.getNamedValue(SF.getName());
       if (DGV) {

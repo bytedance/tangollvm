@@ -159,7 +159,7 @@ static bool intrinsifyGoBuiltins(Function &F) {
 
   GlobalVariable *G = M->getGlobalVariable("runtime.aeskeysched");
   if (G == nullptr) {
-    G = new GlobalVariable(*M, i8, false, GlobalValue::ExternalLinkage, nullptr, "runtime.aeskeysched");
+    G = TangoLLVM::createGoGlobalVariable(i8, GlobalValue::ExternalLinkage, "runtime.aeskeysched", M);
   }
   Value *G16 = ConstantExpr::getGetElementPtr(i8, G, ConstantInt::get(i32, 16));
   Value *G32 = ConstantExpr::getGetElementPtr(i8, G, ConstantInt::get(i32, 32));

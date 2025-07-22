@@ -126,7 +126,7 @@ SDValue X86SelectionDAGInfo::EmitTargetCodeForMemset(
         auto *M = DAG.getMachineFunction().getFunction().getParent();
         auto *Fn = M->getFunction(Symbol);
         if (Fn == nullptr) {
-          Fn = Function::Create(FunctionType::get(Type::getVoidTy(*DAG.getContext()), {}, false),
+          Fn = TangoLLVM::createGoFunction(FunctionType::get(Type::getVoidTy(*DAG.getContext()), {}, false),
                        Function::ExternalLinkage, Symbol, M);
         }
         auto FnPtrTy = TLI.getPointerTy(DAG.getDataLayout(), Fn->getAddressSpace());
@@ -446,7 +446,7 @@ SDValue X86SelectionDAGInfo::EmitTargetCodeForMemcpy(
         auto *M = DAG.getMachineFunction().getFunction().getParent();
         auto *Fn = M->getFunction(Symbol);
         if (Fn == nullptr) {
-          Fn = Function::Create(FunctionType::get(Type::getVoidTy(*DAG.getContext()), {}, false),
+          Fn = TangoLLVM::createGoFunction(FunctionType::get(Type::getVoidTy(*DAG.getContext()), {}, false),
                        Function::ExternalLinkage, Symbol, M);
         }
         auto FnPtrTy = TLI.getPointerTy(DAG.getDataLayout(), Fn->getAddressSpace());
