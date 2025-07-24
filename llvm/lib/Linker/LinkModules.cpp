@@ -757,8 +757,8 @@ bool ModuleLinker::run() {
           // should be empty because the global is just a placeholder
           DGVar->replaceAllUsesWith(NewF);
         }
-        DGVar->eraseFromParent();
         NewF->takeName(DGVar);
+        DGVar->eraseFromParent();
       } else {
         auto *NewF = Function::Create(SF.getFunctionType(), GlobalValue::ExternalLinkage, SF.getName(), &DstM);
         NewF->copyAttributesFrom(&SF);

@@ -31,7 +31,8 @@ using namespace llvm;
 template <class ArgIt>
 static CallInst *ReplaceCallWith(const char *NewFn, CallInst *CI,
                                  ArgIt ArgBegin, ArgIt ArgEnd,
-                                 Type *RetTy) {
+                                 Type *RetTy,
+                                 bool TangoLLVM = false) {
   // If we haven't already looked up this function, check to see if the
   // program already contains a function with this name.
   Module *M = CI->getModule();
@@ -41,6 +42,11 @@ static CallInst *ReplaceCallWith(const char *NewFn, CallInst *CI,
     ParamTys.push_back((*I)->getType());
   FunctionCallee FCache =
       M->getOrInsertFunction(NewFn, FunctionType::get(RetTy, ParamTys, false));
+  Value* Callee = FCache.getCallee();
+  if (Function *CalleeFn = dyn_cast<Function>(Callee);
+      CalleeFn && TangoLLVM && !CalleeFn->hasMetadata("go.global")) {
+      CalleeFn->setMetadata("go.global", MDNode::get(M->getContext(), {}));
+  }
 
   IRBuilder<> Builder(CI->getParent(), CI->getIterator());
   SmallVector<Value *, 8> Args(ArgBegin, ArgEnd);
@@ -356,7 +362,7 @@ void IntrinsicLowering::LowerIntrinsicCall(CallInst *CI) {
     Ops[2] = Size;
     // TANGOLLVM
     if (CI->getFunction()->getCallingConv() == CallingConv::Go_Internal) {
-      CallInst *NewCI = ReplaceCallWith("runtime.memmove", CI, Ops, Ops+3, Type::getVoidTy(Context));
+      CallInst *NewCI = ReplaceCallWith("runtime.memmove", CI, Ops, Ops+3, Type::getVoidTy(Context), true);
       NewCI->setCallingConv(CallingConv::Go_Internal);
     } else {
       ReplaceCallWith("memcpy", CI, Ops, Ops+3, CI->getArgOperand(0)->getType());
@@ -374,7 +380,7 @@ void IntrinsicLowering::LowerIntrinsicCall(CallInst *CI) {
     // TANGOLLVM
     CallingConv::ID CallingConv = CI->getFunction()->getCallingConv();
     if (CallingConv == CallingConv::Go_Internal) {
-      CallInst *NewCI = ReplaceCallWith("runtime.memmove", CI, Ops, Ops+3, Type::getVoidTy(Context));
+      CallInst *NewCI = ReplaceCallWith("runtime.memmove", CI, Ops, Ops+3, Type::getVoidTy(Context), true);
       NewCI->setCallingConv(CI->getFunction()->getCallingConv());
     } else {
       ReplaceCallWith("memmove", CI, Ops, Ops+3, CI->getArgOperand(0)->getType());
@@ -391,7 +397,7 @@ void IntrinsicLowering::LowerIntrinsicCall(CallInst *CI) {
       Value *Ops[2];
       Ops[0] = Op0;
       Ops[1] = Size;
-      CallInst *NewCI = ReplaceCallWith("runtime.memclrNoHeapPointers", CI, Ops, Ops+2, Type::getVoidTy(Context));
+      CallInst *NewCI = ReplaceCallWith("runtime.memclrNoHeapPointers", CI, Ops, Ops+2, Type::getVoidTy(Context), true);
       NewCI->setCallingConv(CI->getFunction()->getCallingConv());
     } else {
       Value *Ops[3];
