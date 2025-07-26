@@ -2743,13 +2743,23 @@ def int_ptrauth_sign_generic :
   DefaultAttrsIntrinsic<[llvm_i64_ty], [llvm_i64_ty, llvm_i64_ty], [IntrNoMem]>;
 
 // TANGOLLVM
-def int_go_preallocated : DefaultAttrsIntrinsic<[llvm_anyptr_ty], [llvm_anyptr_ty, llvm_i64_ty, llvm_i64_ty, llvm_any_ty, llvm_i1_ty],
-      [IntrWillReturn, IntrNoFree, IntrNoCallback,
-       NoCapture<ArgIndex<0>>, NoAlias<ArgIndex<0>>, WriteOnly<ArgIndex<0>>,
-        ImmArg<ArgIndex<1>>, ImmArg<ArgIndex<2>>, ImmArg<ArgIndex<4>>]>;
+def int_go_preallocated : DefaultAttrsIntrinsic<[llvm_anyptr_ty], [llvm_anyptr_ty,
+                            llvm_i64_ty, llvm_i64_ty, llvm_any_ty, llvm_i1_ty],
+                            [IntrWillReturn, IntrNoFree, IntrNoCallback, IntrNoDuplicate, IntrNoMerge,
+                            NoCapture<ArgIndex<0>>, NoAlias<ArgIndex<0>>, WriteOnly<ArgIndex<0>>,
+                            ImmArg<ArgIndex<1>>, ImmArg<ArgIndex<2>>, ImmArg<ArgIndex<4>>]>;
 
 def int_go_stackaddress : DefaultAttrsIntrinsic<[llvm_anyptr_ty], [llvm_i64_ty],
                                  [IntrNoMem, ImmArg<ArgIndex<0>>]>;
+
+def int_go_panicreturn : DefaultAttrsIntrinsic<[llvm_any_ty], [],
+                                [IntrWriteMem, IntrCold, IntrInaccessibleMemOnly,
+                                IntrNoMerge]>;
+
+// Mark metadata to an LLVM IR value.
+def int_go_metadata : DefaultAttrsIntrinsic<[], [llvm_any_ty, llvm_i64_ty, llvm_metadata_ty],
+                                 [IntrNoMem, IntrSpeculatable, IntrWillReturn,
+                                 ImmArg<ArgIndex<1>>]>;
 
 //===----------------------------------------------------------------------===//
 //===------- Convergence Intrinsics ---------------------------------------===//

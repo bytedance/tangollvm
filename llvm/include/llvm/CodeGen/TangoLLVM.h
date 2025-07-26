@@ -34,6 +34,19 @@ public:
     return true;
   }
 
+  static bool isDeferReturnCall(const MachineInstr &MI) {
+    if (!MI.isCall())
+      return false;
+    // see X86FrameLowering.cpp
+    // must be a call
+    // callee must be the first operand
+    const MachineOperand &MO = MI.getOperand(0);
+    if (!MO.isSymbol() || strcmp(MO.getSymbolName(), "runtime.deferreturn") != 0)
+      return false;
+
+    return true;
+  }
+
 };
 
 

@@ -1130,6 +1130,7 @@ public:
   virtual void emitGoFileTab(ArrayRef<MCGoFileEntry> FileEntries) {};
   virtual void emitGoDwarfInfo(ArrayRef<MCGoDwarfEntry> Entries) {}
   virtual void emitGoBytes(StringRef Data) {}
+  virtual void emitGoOpenDefer(int64_t TempBitsOffset, ArrayRef<int64_t> Defers) {}
 
   /// If targets does not support representing debug line section by .loc/.file
   /// directives in assembly output, we need to populate debug line section with

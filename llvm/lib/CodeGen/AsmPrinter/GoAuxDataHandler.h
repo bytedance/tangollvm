@@ -76,7 +76,8 @@ private:
   bool    InlineTreeStarted;
 
   int32_t LastStackMapIndex;
-  bool    RequireEntryMap;
+  bool    HasStatepoint;
+  bool    RequireDeferReturnMap;
 
   uint64_t MaxStatepointID;
   uint64_t FunctionBeginID;
@@ -103,8 +104,9 @@ public:
 
   static bool hasPointerTy(Type*);
 
-  static void emitFunctionStackMaps(const Function *Fn, AsmPrinter *Asm, std::vector<std::vector<uint8_t>> &ArgsTable,
-    std::vector<std::vector<uint8_t>> LocalsTable, uint32_t MaxArgsSize, uint32_t MaxLocalsSize);
+  static void emitFunctionStackMaps(const Function *Fn, AsmPrinter *Asm,
+      std::vector<std::vector<uint8_t>> &ArgsTable, std::vector<std::vector<uint8_t>> &LocalsTable,
+      uint32_t MaxArgsSize, uint32_t MaxLocalsSize);
 private:
 
   void resetModule() {
@@ -125,7 +127,8 @@ private:
     LastFileIndex = -1;
     LastLineNumber = -1;
     LastInlineTree = -1;
-    RequireEntryMap = false;
+    HasStatepoint = false;
+    RequireDeferReturnMap = false;
     LastStackMapIndex = -1;
     LastPCIndex = -1;
     FileStarted = false;

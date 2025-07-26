@@ -86,7 +86,7 @@ convertBitVectorToBytesVector(uint32_t &Size, BitVector &BV, std::vector<uint8_t
 // Returns the bitmap (in a vector of bytes) encoding live
 // locations.
 static void
-computeBitVector(Function * Fn, uint64_t StackSize, bool requireFP,
+computeBitVector(const Function * Fn, uint64_t StackSize, bool requireFP,
                  const StackMaps::LocationVec &CSLocs,
                  uint32_t &ArgsSize, std::vector<uint8_t> &ArgsMap,
                  uint32_t &LocalsSize, std::vector<uint8_t> &LocalsMap) {
@@ -241,7 +241,7 @@ emitCallsiteEntries(StackMaps &SM, AsmPrinter &AP) {
   if (CSInfos.empty())
     return;
 
-  const Module * M = AP.MMI->getModule();
+  const Module *M = AP.MMI->getModule();
   const DataLayout &DL = AP.getDataLayout();
 
   auto CSI = CSInfos.begin();
@@ -261,7 +261,7 @@ emitCallsiteEntries(StackMaps &SM, AsmPrinter &AP) {
     if (FuncName[0] == DL.getGlobalPrefix()) {
       FuncName = FuncName.substr(1);
     }
-    Function *Fn = M->getFunction(FuncName);
+    const Function *Fn = M->getFunction(FuncName);
     assert(Fn != nullptr && "a compiled function cannot be null");
 
     bool requireFP = true;

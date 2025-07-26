@@ -10,6 +10,7 @@
 #include "GoGCProgWriter.h"
 #include "llvm/ADT/BreadthFirstIterator.h"
 #include "llvm/ADT/DepthFirstIterator.h"
+#include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/StackMaps.h"
 #include "llvm/CodeGen/TangoLLVM.h"
@@ -19,6 +20,7 @@
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/DebugLoc.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCObjectFileInfo.h"
@@ -30,6 +32,9 @@ using namespace llvm;
 
 static cl::opt<bool> TangoLLVMLTO("tangollvm-lto", cl::Hidden, cl::init(false));
 static cl::opt<std::string> LTOFileTable("tangollvm-lto-index", cl::init(""), cl::desc("file index"));
+
+// Any negative value would be OK because no index should be negative.
+const int32_t DeferReturnStackMapIndexPlaceholder = -1000;
 
 // copied from MCObjectStreamer.cpp
 static const MCExpr *buildSymbolDiff(MCContext &Context, const MCSymbol *A,
@@ -272,9 +277,46 @@ using SPFlow = std::pair<int32_t, int32_t>;
 void MCGoAuxData::computeFunctionSP(const MachineFunction *MF) {
   DenseMap<const MachineBasicBlock*, SPFlow> PreBBSP;
   DenseMap<const MachineBasicBlock*, SPFlow> PostBBSP;
-  assert(MF->front().isEntryBlock() && "front is not entry??");
+  const MachineBasicBlock *Entry = &MF->front();
+  assert(Entry->isEntryBlock() && "front is not entry??");
   int32_t step = 0;
-  PreBBSP[&MF->front()] = SPFlow(0, step);
+  PreBBSP[Entry] = SPFlow(0, step);
+
+  const MachineFrameInfo &MFI = MF->getFrameInfo();
+  const MachineBasicBlock *DeferMBB = nullptr;
+  // DeferReturn
+  for (const auto &MBB : *MF) {
+    if (MBB.isEntryBlock())
+      continue;
+    if (MBB.pred_empty()) {
+      // TODO: currently the only possible case is OPEN-CODED deferreturn
+      assert(!MBB.empty() && "invariant");
+      assert(MF->getFunction().hasMetadata("go.opendefer") && "must be opencoded defer");
+      auto It = MBB.getFirstNonDebugInstr();
+      while (It != MBB.end()) {
+        if (!It->isMetaInstruction())
+          break;
+        ++It;
+      }
+      if (It == MBB.end())
+        report_fatal_error("bad MBB");
+      const MachineInstr &MI = *It;
+      if (!TangoLLVMCodeGen::isDeferReturnCall(MI)) {
+        report_fatal_error("must be defer return");
+      }
+      PreBBSP[&MBB] = SPFlow(MFI.getStackSize(), 0);
+      if (DeferMBB != nullptr) {
+        report_fatal_error("should have only one deferreturn");
+      }
+      DeferMBB = &MBB;
+    }
+  }
+
+  ReversePostOrderTraversal<const MachineFunction*> RPOT(MF);
+  if (MF->size() != (llvm::size(RPOT) + PreBBSP.size() - 1)) {
+    report_fatal_error("dangling machine basic block");
+  }
+
   const TargetInstrInfo &TII = *Asm->MF->getSubtarget().getInstrInfo();
   int iteration = 0;
   while (true) {
@@ -285,9 +327,8 @@ void MCGoAuxData::computeFunctionSP(const MachineFunction *MF) {
       break;
     }
     bool cont = false;
-    // 1. The algorithm assumes that all predecessors have the same SP.
-    // 2. SP is non-negative in a function.
-    for (auto *MBB: depth_first(MF)) {
+
+    auto ProcessMBB = [&](const MachineBasicBlock *MBB) {
       SPFlow PredFlow(-1, -1);
       step ++; // make progress
       for (auto *Pred : MBB->predecessors()) {
@@ -310,10 +351,10 @@ void MCGoAuxData::computeFunctionSP(const MachineFunction *MF) {
           cont = true;
         }
       }
-      if (!MBB->isEntryBlock() && PredFlow.first == -1) {
+      if (!MBB->isEntryBlock() && MBB != DeferMBB && PredFlow.first == -1) {
         dbgs() << "Error: " << *MBB << " has no pred data";
         report_fatal_error("missing predecessor SP");
-        break;
+        return;
       }
       {
         // find SP at the beginning of the BB
@@ -326,15 +367,15 @@ void MCGoAuxData::computeFunctionSP(const MachineFunction *MF) {
           if (Flow.first == PredFlow.first) {
             // the BB has pred and both itself and pred have been visited
             // and there are no changes.
-            continue;
+            return;
           }
 
           if (Flow.second < PredFlow.second) {
             Flow = PredFlow;
-          } else if (!MBB->isEntryBlock()) {
+          } else if (!MBB->isEntryBlock() && MBB != DeferMBB) {
             dbgs() << "Error: Oops:" << Flow.second << ", pred=" << PredFlow.second << "\n";
             report_fatal_error("missing fresh predecessor SP!");
-            break;
+            return;
           } // else { }
         } else {
           // PredFlow must be a valid flow
@@ -352,7 +393,17 @@ void MCGoAuxData::computeFunctionSP(const MachineFunction *MF) {
         }
         PostBBSP[MBB] = SPFlow(lastSP, step);
       }
+    };
+
+    // 1. The algorithm assumes that all predecessors have the same SP.
+    // 2. SP is non-negative in a function.
+    for (auto *MBB: RPOT) {
+      ProcessMBB(MBB);
     }
+    // DeferMBB is a dangling MBB that is not reachable from the entry.
+    if (DeferMBB != nullptr)
+      ProcessMBB(DeferMBB);
+
     if (!cont) {
       break;
     }
@@ -855,12 +906,41 @@ void MCGoAuxData::endFunctionImpl(const MachineFunction *MF) {
     if (LastStackMapIndex != -1) {
       appendPCData(PCStackMapIndex, LastStackMapIndex, EndFunc);
 
+      if (RequireDeferReturnMap) {
+        // Lets do a full scan of the PCStackMapIndex
+        PCData *DeferReturnEntry = nullptr;
+        int32_t MaxIndex = -2; // -1 is the first entry, other entries should be greater than -1
+
+        for (auto &E : PCStackMapIndex) {
+          if (E.Value > MaxIndex)
+            MaxIndex = E.Value;
+          if (E.Value == DeferReturnStackMapIndexPlaceholder) {
+            if (DeferReturnEntry == nullptr)
+              DeferReturnEntry = &E;
+            else
+              report_fatal_error("two deferreturn entries in PCStackMapIndex");
+          }
+        }
+        assert(DeferReturnEntry != nullptr && "invariant");
+        assert(MaxIndex > -2 && "invariant");
+        // Various corner cases:
+        // 1). PCStackMapIndex has a single entry for the runtime.deferreturn, MaxIndex should be -1
+        // 2). PCStackMapIndex has two entries, for morestack and deferreturn, MaxIndex should be 0
+        // 3). Other cases, MaxIndex should be the largest index in the stack map table.
+        int DeferReturnIndex = MaxIndex + 1;
+        // We cannot use 0 as 0 is reserved for the entry map, even sometimes we may not need the entry stack map
+        // if the function is nosplit.
+        if (DeferReturnIndex == 0)
+          DeferReturnIndex = 1;
+        DeferReturnEntry->Value = DeferReturnIndex;
+      }
+
       std::string symbol = MF->getName().str();
       symbol += "..pcstackmapindex";
       emitPCData(PCStackMapIndex, symbol);
       //..argspointermaps and ..localspointermaps are emitted in GoGCPrinter.cpp
       // Here we only need to check whether we need an empty EntryMap
-      if (RequireEntryMap) {
+      if (!HasStatepoint) {
         std::vector<std::vector<uint8_t>> ArgsTable(1);
         std::vector<std::vector<uint8_t>> LocalsTable(1);
         uint32_t MaxArgsSize = 0, MaxLocalsSize = 0;
@@ -901,6 +981,92 @@ void MCGoAuxData::endFunctionImpl(const MachineFunction *MF) {
         Node->ParentPC = nullptr; // will emit 0
       }
     }
+  }
+
+  if (auto *MD = MF->getFunction().getMetadata("go.opendefer")) {
+    assert(RequireDeferReturnMap && "opendefer requires deferreturn map");
+    DenseMap<const AllocaInst*, int64_t> AllocaToIdx;
+    for (auto &I : instructions(MF->getFunction())) {
+      const IntrinsicInst *II = dyn_cast<const IntrinsicInst>(&I);
+      if (!II || II->getIntrinsicID() != Intrinsic::go_metadata)
+        continue;
+
+      GoMetadata ID = GoMetadata(cast<ConstantInt>(II->getArgOperand(1))->getZExtValue());
+      if (ID != GoMetadata::OpenDefer)
+        continue;
+
+      const AllocaInst *AI = dyn_cast<const AllocaInst>(II->getArgOperand(0)->stripPointerCasts());
+      if (AI == nullptr)
+        continue;
+
+      int64_t Idx = cast<const ConstantAsMetadata>(cast<const MetadataAsValue>(II->getOperand(2))->getMetadata())->getValue()->getUniqueInteger().getSExtValue();
+
+      auto It = AllocaToIdx.find(AI);
+      if (It == AllocaToIdx.end())
+        AllocaToIdx[AI] = Idx;
+      else if (It->second != Idx)
+        report_fatal_error("mismatched idx");
+    }
+    const unsigned MaxBits = 8;
+    // from 0 to 7
+    uint64_t TotalInfo = dyn_cast<ConstantAsMetadata>(MD->getOperand(0))->getValue()->getUniqueInteger().getZExtValue();
+    int Closures[MaxBits];
+    unsigned Bits = 0;
+    const MachineFrameInfo &MFI = MF->getFrameInfo();
+    int DeferBitsTemp = MFI.getObjectIndexEnd();
+    for (int I = MFI.getObjectIndexBegin(), E = MFI.getObjectIndexEnd(); I != E; ++I) {
+      if (MFI.isDeadObjectIndex(I))
+        continue;
+
+      const AllocaInst* Alloc = MFI.getObjectAllocation(I);
+      if (Alloc == nullptr)
+        continue;
+
+      auto It = AllocaToIdx.find(Alloc);
+      if (It == AllocaToIdx.end())
+        continue;
+
+      int64_t Idx = It->second;
+      if (Idx >= MaxBits || Idx < -1)
+        report_fatal_error("opendefer index is too big");
+
+      if (Idx == -1) {
+        if (DeferBitsTemp == MFI.getObjectIndexEnd()) {
+          DeferBitsTemp = I;
+        } else {
+          report_fatal_error("multiple deferbitstemp");
+        }
+        continue;
+      }
+
+      if ((Bits & (1 << Idx)) == 0) {
+        Bits |= 1 << Idx;
+      } else {
+        report_fatal_error("duplicate opendefer info");
+      }
+      Closures[Idx] = I;
+    }
+
+    if (DeferBitsTemp == MFI.getObjectIndexEnd()) {
+      report_fatal_error("no deferbitstemp");
+    }
+
+    SmallVector<int64_t, 8> ObjectOffsets(TotalInfo);
+    for (unsigned I = 0; I < TotalInfo; ++I) {
+      if ((Bits & (1 << I)) == 0) {
+        report_fatal_error("missing opendefer info");
+      }
+      int Idx = Closures[I];
+      int64_t Offset = MFI.getObjectOffset(Idx) + 16;
+      ObjectOffsets[I] = Offset;
+    }
+
+    std::string symbol = MF->getName().str();
+    symbol += "..opendefer";
+    MCSymbol *AddrSymbol = Asm->OutContext.getOrCreateSymbol(StringRef(symbol));
+    Asm->OutStreamer->emitLabel(AddrSymbol);
+    int64_t DeferBitsTempOffset = MFI.getObjectOffset(DeferBitsTemp) + 16;
+    Asm->OutStreamer->emitGoOpenDefer(DeferBitsTempOffset, ObjectOffsets);
   }
   {
     std::string symbol = MF->getName().str();
@@ -1024,13 +1190,12 @@ void MCGoAuxData::beginInstruction(const MachineInstr *MI) {
       assert(MO.isImm());
       uint64_t ID = MO.getImm();
       if (ID >= MaxStatepointID) MaxStatepointID = ID + 1;
-      int CurrentStackMapIndex = ID - FunctionBeginID + 1; // Index 0 is reserved for entry stack map.
+      int32_t CurrentStackMapIndex = ID - FunctionBeginID + 1; // Index 0 is reserved for entry stack map.
       if (LastStackMapIndex != CurrentStackMapIndex) {
         appendPCData(PCStackMapIndex, LastStackMapIndex, getOrCreatePrePCSymbol(MI));
       }
       LastStackMapIndex = CurrentStackMapIndex;
-      // We will emit the entry map in GoGCPrinter.cpp
-      RequireEntryMap = false;
+      HasStatepoint = true;
     } else if (MI->isCall()) {
       // A call is very rare. Most function only have zero or one call. Other call are converted into Statepoint.
       // A call inst may be a call to morestack, which is a Go target and may trigger GC and copystack.
@@ -1039,9 +1204,17 @@ void MCGoAuxData::beginInstruction(const MachineInstr *MI) {
       bool isMoreStackCall = TangoLLVMCodeGen::isMoreStackCall(*MI);
 
       if (isMoreStackCall) {
-        if (LastStackMapIndex == -1)
-          RequireEntryMap = true; // require an entry map if no other statepoint.
-        int CurrentStackMapIndex = 0; // 0 is reserved for the entry map
+        int32_t CurrentStackMapIndex = 0; // 0 is reserved for the entry map
+        if (LastStackMapIndex != CurrentStackMapIndex) {
+          appendPCData(PCStackMapIndex, LastStackMapIndex, getOrCreatePrePCSymbol(MI));
+        }
+        LastStackMapIndex = CurrentStackMapIndex;
+      } else if (TangoLLVMCodeGen::isDeferReturnCall(*MI)) {
+        // only for opendefer
+        // Any other call to runtime.defereturn should be a STATEPOINT.
+        assert(MI->getParent()->getParent()->getFunction().hasMetadata("go.opendefer") && "invariant");
+        RequireDeferReturnMap = true;
+        int32_t CurrentStackMapIndex = DeferReturnStackMapIndexPlaceholder;
         if (LastStackMapIndex != CurrentStackMapIndex) {
           appendPCData(PCStackMapIndex, LastStackMapIndex, getOrCreatePrePCSymbol(MI));
         }
@@ -1188,19 +1361,80 @@ visitPointers(Type *T, const DataLayout &DL, int64_t BaseOffset, const F& Func) 
   }
 }
 
+static void setBitAtOffset(int64_t Offset, std::vector<uint8_t> &Map, int64_t &MaxIndex) {
+  assert(Offset >= 0 && "invariant");
+  // 8 is PtrSize
+  int64_t Index = Offset / 8;
+  if (Index > MaxIndex)
+    MaxIndex = Index;
+  int64_t ByteIndex = Index / 8;
+  int64_t BitIndex = Index % 8;
+  if (ByteIndex >= (int64_t)Map.size()) {
+    Map.resize(ByteIndex + 1, 0);
+  }
+  Map[ByteIndex] = Map[ByteIndex] | (1 << BitIndex);
+}
+
+static void emitDeferStackMap(const Function *Fn, AsmPrinter *Asm, std::vector<std::vector<uint8_t>> &ArgsTable,
+    std::vector<std::vector<uint8_t>> &LocalsTable, uint32_t &MaxArgsSize, uint32_t &MaxLocalsSize) {
+  const DataLayout &DL = Asm->getDataLayout();
+
+  std::vector<uint8_t> &DeferArgsMap = ArgsTable[ArgsTable.size() - 1];
+  std::vector<uint8_t> &DeferLocalsMap = LocalsTable[LocalsTable.size() - 1];
+
+  int64_t MaxLocalIndex = -1;
+  int64_t MaxArgIndex = -1;
+  auto consumeLocalOffset = [&](int64_t Offset){
+    setBitAtOffset(Offset, DeferLocalsMap, MaxLocalIndex);
+  };
+  auto consumeArgOffset = [&](int64_t Offset){
+    setBitAtOffset(Offset, DeferArgsMap, MaxArgIndex);
+  };
+
+  // Fn should be immutable during GC printer.
+  // We should not call harvestGoMetadata to collect metadata.
+  // Collect all such Alloca into the AlwaysLive.
+  SmallSetVector<const AllocaInst*, 8> AlwaysLive;
+  for (auto &I : instructions(*Fn)) {
+    const IntrinsicInst *II = dyn_cast<const IntrinsicInst>(&I);
+    if (!II || II->getIntrinsicID() != Intrinsic::go_metadata)
+      continue;
+
+    GoMetadata ID = GoMetadata(cast<const ConstantInt>(II->getArgOperand(1))->getZExtValue());
+    if (ID != GoMetadata::AlwaysLive)
+      continue;
+
+    if (const AllocaInst *AI = dyn_cast<const AllocaInst>(II->getArgOperand(0)->stripPointerCasts())) {
+      int64_t Offset = cast<ConstantInt>(cast<ConstantAsMetadata>(cast<const MetadataAsValue>(II->getArgOperand(2))->getMetadata())->getValue())->getSExtValue();
+      assert(Offset <= 0 && "stack grows down");
+      Offset = -Offset - 16 - 8;
+      Type* Ty = AI->getAllocatedType();
+      visitPointers(Ty, DL, Offset, consumeLocalOffset);
+    } else if (const IntrinsicInst *PII = dyn_cast<const IntrinsicInst>(II->getArgOperand(0)->stripPointerCasts())) {
+      int64_t Offset = cast<ConstantInt>(PII->getArgOperand(1))->getSExtValue();
+      Type *Ty = PII->getArgOperand(3)->getType();
+      visitPointers(Ty, DL, Offset, consumeArgOffset);
+    } else {
+      report_fatal_error("unknown type");
+    }
+  }
+
+  if (MaxLocalIndex + 1 > MaxLocalsSize)
+    MaxLocalsSize = MaxLocalIndex + 1;
+
+  if (MaxArgIndex + 1 > MaxArgsSize)
+    MaxArgsSize = MaxArgIndex + 1;
+}
+
 static void emitEntryStackMap(const Function *Fn, const DataLayout &DL, uint32_t &MaxSize, std::vector<uint8_t> &Map) {
   int64_t MaxIndex = -1;
   const unsigned PtrSize = DL.getPointerSize();
+  if (PtrSize != 8)
+    report_fatal_error("ptr size must be 8");
+
+  // Use constant PtrSize for better performance
   auto consumeOffset = [&](int64_t Offset){
-    int64_t Index = Offset /= PtrSize;
-    if (Index > MaxIndex)
-      MaxIndex = Index;
-    int64_t ByteIndex = Index / PtrSize;
-    int64_t BitIndex = Index % PtrSize;
-    if (ByteIndex >= (int64_t)Map.size()) {
-      Map.resize(ByteIndex + 1, 0);
-    }
-    Map[ByteIndex] = Map[ByteIndex] | (1 << BitIndex);
+    setBitAtOffset(Offset, Map, MaxIndex);
   };
 
   if (auto n = Fn->getMetadata("go.stack.param")) {
@@ -1254,8 +1488,11 @@ emitStackMaps(uint32_t MaxMapSize, std::vector<std::vector<uint8_t>> MapTable, M
   dbgs() << "Before TableSize: " << MapTable.size() << "\n";
   dbgs() << "Before MaxMapSize: " << MaxMapSize << "\n";
   dbgs() << "Before MaxBytes: " << MaxBytes << "\n";
+  int I = 0;
   for (auto &Map : MapTable) {
     uint32_t Index = 0;
+    dbgs() << I << " ";
+    I++;
     for (uint8_t Byte : Map) {
       Index++;
       dbgs() << int(Byte) << " ";
@@ -1297,7 +1534,15 @@ emitStackMaps(uint32_t MaxMapSize, std::vector<std::vector<uint8_t>> MapTable, M
 }
 
 void MCGoAuxData::emitFunctionStackMaps(const Function *Fn, AsmPrinter *Asm, std::vector<std::vector<uint8_t>> &ArgsTable,
-    std::vector<std::vector<uint8_t>> LocalsTable, uint32_t MaxArgsSize, uint32_t MaxLocalsSize) {
+    std::vector<std::vector<uint8_t>> &LocalsTable, uint32_t MaxArgsSize, uint32_t MaxLocalsSize) {
+  if (Fn->hasMetadata("go.opendefer")) {
+    // We need to add one more entry to the ArgsTable and LocalsTable
+    int Size = ArgsTable.size();
+    assert(Size >= 1 && "must not be empty");
+    ArgsTable.resize(Size + 1);
+    LocalsTable.resize(Size + 1);
+    emitDeferStackMap(Fn, Asm, ArgsTable, LocalsTable, MaxArgsSize, MaxLocalsSize);
+  }
   {
     std::string symbol = Fn->getName().str();
     symbol += "..argspointermaps";

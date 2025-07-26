@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-07-25.
 //===----------------------------------------------------------------------===//
 //
 // This file defines simple local analyses for load instructions.
@@ -23,6 +25,7 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
+#include "llvm/TangoLLVM/TangoLLVM.h"
 
 using namespace llvm;
 
@@ -602,7 +605,7 @@ Value *llvm::findAvailablePtrLoadStore(
     // We must ignore debug info directives when counting (otherwise they
     // would affect codegen).
     Instruction *Inst = &*--ScanFrom;
-    if (Inst->isDebugOrPseudoInst())
+    if (Inst->isDebugOrPseudoInst() || TangoLLVM::isGoPseudoIntrinsic(*Inst))
       continue;
 
     // Restore ScanFrom to expected value in case next test succeeds
@@ -690,7 +693,7 @@ Value *llvm::FindAvailableLoadedValue(LoadInst *Load, BatchAAResults &AA,
   SmallVector<Instruction *> MustNotAliasInsts;
   for (Instruction &Inst : make_range(++Load->getReverseIterator(),
                                       ScanBB->rend())) {
-    if (Inst.isDebugOrPseudoInst())
+    if (Inst.isDebugOrPseudoInst() || TangoLLVM::isGoPseudoIntrinsic(Inst))
       continue;
 
     if (MaxInstsToScan-- == 0)

@@ -22,6 +22,8 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instruction.h"
+#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/InstIterator.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
@@ -29,6 +31,184 @@
 #include "llvm/Support/CBindingWrapping.h"
 
 namespace llvm {
+
+void TangoLLVM::prepareFixGoPanicReturn(BasicBlock *BB) {
+  Instruction *T = BB->getTerminator();
+  assert(T != nullptr && "invariant");
+
+  // T may be a return or a br
+  if (BranchInst *Br = dyn_cast<BranchInst>(T)) {
+    if (!Br->isUnconditional()) {
+      report_fatal_error("must be return or unconditional branch");
+    }
+    // PHI is not a use of BB!!!
+    // Manually remove all PHINode
+    for (BasicBlock *Succ : successors(BB)) {
+      auto I = Succ->begin();
+      while (I != Succ->end() && isa<PHINode>(I)) {
+        auto PN = cast<PHINode>(I);
+        int Num = PN->getBasicBlockIndex(BB);
+        if (Num != -1) {
+          // manually remove PH and update iterator accordingly
+          PN->removeIncomingValue(Num, false);
+        }
+        if (PN->getNumOperands() == 0) {
+          I = PN->eraseFromParent();
+          continue;
+        }
+        ++I;
+      }
+    }
+  } else if (!isa<ReturnInst>(T)) {
+    report_fatal_error("must be return or unconditional branch");
+  }
+
+  // BB can only be a successor of its predecessors
+  for (auto *U : BB->users()) {
+    if (isa<BranchInst>(U))
+      continue;
+    if (isa<SwitchInst>(U))
+      continue;
+    report_fatal_error("no values except panicreturn can be live after panic");
+  }
+}
+
+bool TangoLLVM::fixGoPanicReturn(Function &F, Function::iterator Begin, SmallVectorImpl<ReturnInst*> &Returns) {
+  SmallVector<IntrinsicInst*, 8> PanicReturns;
+  Type *RetType = F.getReturnType();
+
+  for (Function::iterator BB = Begin, E = F.end(); BB != E;
+      ++BB) {
+    for (auto &I : *BB) {
+      if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(&I)) {
+        if (II->getIntrinsicID() != Intrinsic::go_panicreturn)
+          continue;
+
+        PanicReturns.push_back(II);
+      }
+    }
+  }
+
+  if (PanicReturns.empty())
+    return false;
+
+  auto EraseFromReturns = [&](Value *V) {
+    if (ReturnInst *R = dyn_cast<ReturnInst>(V)) {
+      llvm::erase_if(Returns, [&](ReturnInst *RI) {
+            return R == RI;
+          });
+    }
+  };
+
+  // In LLVM, we cannot inline a callee that has defer/recover.
+  // Any panic inlined from the callee can be safely converted into a return.
+  for (IntrinsicInst *II : PanicReturns) {
+    auto RemoveBr = [&]() {
+      BasicBlock *BB = II->getParent();
+      TangoLLVM::prepareFixGoPanicReturn(BB);
+
+      Instruction* T = BB->getTerminator();
+      EraseFromReturns(T);
+      T->eraseFromParent();
+
+      IRBuilder<> Builder(BB);
+      if (RetType->isVoidTy()) {
+        // We need a panicreturn to turn the RetVoid to unreachable
+        Builder.CreateIntrinsic(Intrinsic::go_panicreturn, {RetType}, {});
+        Builder.CreateRetVoid();
+      } else {
+        Value *RetVal = Builder.CreateIntrinsic(Intrinsic::go_panicreturn, {RetType}, {});
+        Builder.CreateRet(RetVal);
+      }
+    };
+
+    if (II->use_empty()) {
+      RemoveBr();
+    } else {
+      Value *NullValue = Constant::getNullValue(II->getType());
+      while (!II->use_empty()) {
+        auto &U = *II->use_begin();
+        if (PHINode *PN = dyn_cast<PHINode>(U.getUser())) {
+          unsigned Num = PHINode::getIncomingValueNumForOperand(U.getOperandNo());
+          BasicBlock *Pred = PN->getIncomingBlock(Num);
+
+          if (Pred == II->getParent()) {
+            PN->removeIncomingValue(Num);
+          } else {
+            PN->setIncomingValue(Num, NullValue);
+          }
+        } else {
+          // User may be a Return.
+          // II->getParent() must dominate the User
+          U.getUser()->setOperand(U.getOperandNo(), NullValue);
+        }
+      }
+
+      RemoveBr();
+      if (!II->use_empty()) {
+        // Check use_empty because the only user may be a return that
+        // has been removed in RemoveBr.
+        II->replaceAllUsesWith(NullValue);
+      }
+    }
+
+    assert(II->use_empty() && "must be use empty");
+    II->eraseFromParent();
+  }
+
+  return true;
+}
+
+void TangoLLVM::harvestGoMetadata(Function &F, ArrayRef<GoMetadata> WL) {
+  auto doHarvest = [&](GoMetadata ID) {
+    if (WL.empty())
+      return true;
+
+    for (auto U : WL)
+      if (U == ID)
+        return true;
+
+    return false;
+  };
+
+  SmallVector<IntrinsicInst*, 16> Results;
+  for (auto &I : instructions(F)) {
+    if (IntrinsicInst* II = dyn_cast<IntrinsicInst>(&I)) {
+      if (II->getIntrinsicID() == Intrinsic::go_metadata) {
+        auto ID = cast<ConstantInt>(II->getArgOperand(1))->getZExtValue();
+        if (ID >= uint64_t(GoMetadata::MaxMetadata)) {
+          report_fatal_error("malformed metadata");
+        }
+        if (doHarvest(GoMetadata(ID))) {
+          Results.push_back(II);
+        }
+      }
+    }
+  }
+
+  if (Results.empty())
+    return;
+
+  for (IntrinsicInst *II : Results) {
+    auto ID = cast<ConstantInt>(II->getArgOperand(1))->getZExtValue();
+    Instruction *I = dyn_cast<Instruction>(II->getArgOperand(0));
+    if (I == nullptr)
+      continue; // Arg1 may be replaced by a constant
+
+    MDNode *M = nullptr;
+    if (auto *MV = dyn_cast<MetadataAsValue>(II->getArgOperand(2))) {
+      M = dyn_cast<MDNode>(MV->getMetadata());
+      if (M == nullptr) {
+        // TODO: at the frondend, we create a MDNode for every metadata.
+        // Here, we may get a ConstantAsMetadata.
+        M = MDNode::get(F.getContext(), {MV->getMetadata()});
+      }
+    }
+
+    const char * MDName = TangoLLVM::getGoMetadataName(GoMetadata(ID));
+    I->setMetadata(MDName, M);
+  }
+}
 
 // TANGOLLVM
 static int64_t getArgAreaSize(Function *F) {
@@ -45,6 +225,9 @@ static int64_t getArgAreaSize(Function *F) {
 
 // update go.callee.args.area metadata when inlining
 void TangoLLVM::updateMetadataForInlining(Function *Callee, Function *Caller) {
+  if (Callee->hasMetadata("go.opendefer")) {
+    report_fatal_error("cannot inline opendefer");
+  }
   if (auto CalleeMarker = Callee->getMetadata("go.marker.reloc")) {
     if (auto CallerMarker = Caller->getMetadata("go.marker.reloc")) {
       SmallVector<Metadata*, 32> MDs(CallerMarker->op_begin(), CallerMarker->op_end());

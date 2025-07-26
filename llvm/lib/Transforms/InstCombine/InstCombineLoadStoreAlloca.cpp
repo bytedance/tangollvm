@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-07-25.
 //===----------------------------------------------------------------------===//
 //
 // This file implements the visit functions for load, store and alloca.
@@ -23,6 +25,7 @@
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/Transforms/InstCombine/InstCombiner.h"
 #include "llvm/Transforms/Utils/Local.h"
+#include "llvm/TangoLLVM/TangoLLVM.h"
 using namespace llvm;
 using namespace PatternMatch;
 
@@ -1408,7 +1411,7 @@ Instruction *InstCombinerImpl::visitStoreInst(StoreInst &SI) {
     --BBI;
     // Don't count debug info directives, lest they affect codegen,
     // and we skip pointer-to-pointer bitcasts, which are NOPs.
-    if (BBI->isDebugOrPseudoInst()) {
+    if (BBI->isDebugOrPseudoInst() || TangoLLVM::isGoPseudoIntrinsic(*BBI)) {
       ScanInsts++;
       continue;
     }

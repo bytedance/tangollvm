@@ -163,11 +163,6 @@ performBlockTailMerging(Function &F, ArrayRef<BasicBlock *> BBs,
 
 static bool tailMergeBlocksWithSimilarFunctionTerminators(Function &F,
                                                           DomTreeUpdater *DTU) {
-  // We do not merge return block because of Go's special calling convention.
-  if (TangoLLVM::isGoABIInternal(F)) {
-    return false;
-  }
-
   SmallMapVector<unsigned /*TerminatorOpcode*/, SmallVector<BasicBlock *, 2>, 4>
       Structure;
 
@@ -215,6 +210,12 @@ static bool tailMergeBlocksWithSimilarFunctionTerminators(Function &F,
 
     // Canonical blocks are uniqued based on the terminator type (opcode).
     Structure[Term->getOpcode()].emplace_back(&BB);
+  }
+
+  // We do not merge return block because of Go's special calling convention.
+  if (TangoLLVM::isGoABIInternal(F)) {
+    if (Structure.size() <= 4)
+      return false;
   }
 
   bool Changed = false;

@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-07-25.
 //===----------------------------------------------------------------------===//
 //
 // This family of functions perform various local transformations to the
@@ -411,6 +413,7 @@ bool llvm::wouldInstructionBeTriviallyDeadOnUnusedPaths(
   if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(I))
     if (II->getIntrinsicID() == Intrinsic::stacksave ||
         II->getIntrinsicID() == Intrinsic::launder_invariant_group ||
+        II->getIntrinsicID() == Intrinsic::go_metadata ||
         II->isLifetimeStartOrEnd())
       return false;
   return wouldInstructionBeTriviallyDead(I, TLI);
@@ -461,6 +464,12 @@ bool llvm::wouldInstructionBeTriviallyDead(const Instruction *I,
     case Intrinsic::ptrauth_resign:
       return true;
     default:
+      return false;
+    }
+  }
+
+  if (const IntrinsicInst *II = dyn_cast<IntrinsicInst>(I)) {
+    if (II->getIntrinsicID() == Intrinsic::go_metadata) {
       return false;
     }
   }

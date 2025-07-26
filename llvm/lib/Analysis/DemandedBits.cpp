@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-07-25.
 //===----------------------------------------------------------------------===//
 //
 // This pass implements a demanded bits analysis. A demanded bit is one that
@@ -47,6 +49,11 @@ using namespace llvm::PatternMatch;
 #define DEBUG_TYPE "demanded-bits"
 
 static bool isAlwaysLive(Instruction *I) {
+  if (const IntrinsicInst *II = dyn_cast<IntrinsicInst>(I)) {
+    if (II->getIntrinsicID() == Intrinsic::go_metadata) {
+      return true;
+    }
+  }
   return I->isTerminator() || isa<DbgInfoIntrinsic>(I) || I->isEHPad() ||
          I->mayHaveSideEffects();
 }

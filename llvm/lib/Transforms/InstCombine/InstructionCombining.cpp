@@ -3176,6 +3176,13 @@ static bool isAllocSiteRemovable(Instruction *AI,
           default:
             return false;
 
+          case Intrinsic::go_metadata: {
+            auto Type = GoMetadata(cast<ConstantInt>(II->getArgOperand(1))->getZExtValue());
+            if (Type == GoMetadata::OpenDeferReturn || Type == GoMetadata::AlwaysLive)
+              return false; // DeferReturn is used by emitOpenDeferExit
+            Users.emplace_back(I);
+            continue;
+          }
           case Intrinsic::memmove:
           case Intrinsic::memcpy:
           case Intrinsic::memset: {

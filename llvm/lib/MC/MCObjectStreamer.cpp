@@ -837,6 +837,56 @@ void MCObjectStreamer::emitGoBytes(StringRef Data) {
   DF->getContents().append(Data.begin(), Data.end());
 }
 
+static inline size_t dvarint(int64_t Value, raw_ostream &OS) {
+  size_t Count = 0;
+
+  if (Value < 0 || Value > 1e9) {
+    report_fatal_error("dvarint: bad offset for funcdata");
+  }
+  if (Value < 1<<7) {
+    OS << uint8_t(Value);
+    ++Count;
+    return Count;
+  }
+  OS << uint8_t((Value&127)|128);
+  ++Count;
+  if (Value < 1<<14) {
+    OS << uint8_t(Value>>7);
+    ++Count;
+    return Count;
+  }
+  OS << uint8_t(((Value>>7)&127)|128);
+  ++Count;
+  if (Value < 1<<21) {
+    OS << uint8_t(Value>>14);
+    ++Count;
+    return Count;
+  }
+  OS << uint8_t(((Value>>14)&127)|128);
+  ++Count;
+  if (Value < 1<<28) {
+    OS << uint8_t(Value>>21);
+    ++Count;
+    return Count;
+  }
+  OS << uint8_t(((Value>>21)&127)|128);
+  ++Count;
+  OS << uint8_t(Value>>28);
+  ++Count;
+  return Count;
+}
+
+void MCObjectStreamer::emitGoOpenDefer(int64_t TempBitsOffset, ArrayRef<int64_t> Defers) {
+  MCDataFragment *DF = getOrCreateDataFragment();
+  SmallVectorImpl<char> &Data = DF->getContents();
+  raw_svector_ostream OSE(Data);
+
+  dvarint(-TempBitsOffset, OSE);
+  dvarint(int64_t(Defers.size()), OSE);
+  for (auto Offset : llvm::reverse(Defers)) {
+    dvarint(-Offset, OSE);
+  }
+}
 
 void MCObjectStreamer::emitGoStackObjects(ArrayRef<MCGoStackObjectRecord> StackObjects) {
   MCDataFragment *DF = getOrCreateDataFragment();

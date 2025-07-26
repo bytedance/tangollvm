@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-07-25.
 //===----------------------------------------------------------------------===//
 //
 // Loops should be simplified before this analysis.
@@ -41,6 +43,7 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TangoLLVM/TangoLLVM.h"
 #include <cassert>
 #include <cstdint>
 #include <iterator>
@@ -782,7 +785,7 @@ BranchProbabilityInfo::getInitialEstimatedBlockWeight(const BasicBlock *BB) {
       // @llvm.experimental.deoptimize then treat it like an unreachable
       // since it is expected to practically never execute.
       // TODO: Should we actually treat as never returning call?
-      BB->getTerminatingDeoptimizeCall())
+      BB->getTerminatingDeoptimizeCall() || TangoLLVM::hasGoPanicReturn(BB))
     return hasNoReturn(BB)
                ? static_cast<uint32_t>(BlockExecWeight::NORETURN)
                : static_cast<uint32_t>(BlockExecWeight::UNREACHABLE);

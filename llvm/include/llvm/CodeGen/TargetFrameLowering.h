@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-07-25.
 //===----------------------------------------------------------------------===//
 //
 // Interface to describe the layout of a stack frame on the target machine.
@@ -246,6 +248,8 @@ public:
   /// by adding a check even before the "normal" function prologue.
   virtual void adjustForSegmentedStacks(MachineFunction &MF,
                                         MachineBasicBlock &PrologueMBB) const {}
+
+  virtual void insertGoDeferReturn(MachineFunction &MF) const {}
 
   /// Adjust the prologue to add Erlang Run-Time System (ERTS) specific code in
   /// the assembly prologue to explicitly handle the stack.

@@ -11,11 +11,29 @@
 
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/CodeGen/MachineInstr.h>
 
 
 namespace llvm {
+
+enum class GoMetadata {
+  // The stack object is used for open defer return values.
+  OpenDeferReturn,
+  OpenDefer,
+  // The Stack object must be always live during liveness analysis.
+  AlwaysLive,
+  // Used to generate FUNCDATA_StackObjects
+  StackObjectGCData,
+  // Pointer created by the front-end, which is a valid GC pointer
+  PointerValue,
+  // uintptr created by the front-end, which can be converted into a pointer.
+  PointerLikeValue,
+
+  // Count of metadata
+  MaxMetadata
+};
 
 enum class GoAdHocABI {
   None,
@@ -32,6 +50,46 @@ enum class GoAdHocABI {
 class TangoLLVM {
 
 public:
+
+  static bool hasGoPanicReturn(const BasicBlock *BB) {
+    return BB->getGoPanicReturnCall() != nullptr;
+  }
+
+  static bool isGoPseudoIntrinsic(const Instruction &I) {
+    if (const IntrinsicInst * II = dyn_cast<const IntrinsicInst>(&I)) {
+      auto ID = II->getIntrinsicID();
+      return ID == Intrinsic::go_metadata || ID == Intrinsic::go_panicreturn;
+    }
+    return false;
+  }
+
+  static void prepareFixGoPanicReturn(BasicBlock *BB);
+  static bool fixGoPanicReturn(Function &F, Function::iterator Begin, SmallVectorImpl<ReturnInst*> &Returns);
+
+  static const char* getGoMetadataName(GoMetadata M) {
+    switch (M) {
+    default:
+      report_fatal_error("unsupported metadata");
+    case GoMetadata::OpenDeferReturn:
+      return "go.opendefer.return";
+    case GoMetadata::OpenDefer:
+      return "go.opendefer";
+    case GoMetadata::AlwaysLive:
+      return "go.alwayslive";
+    case GoMetadata::StackObjectGCData:
+      return "go.stackobject.gcdata";
+    case GoMetadata::PointerValue:
+      return "go.pointervalue";
+    case GoMetadata::PointerLikeValue:
+      return "go.pointerlikevalue";
+    }
+
+    return nullptr;
+  }
+
+  // Remove all intrinsic call llvm.go.metadata
+  // Fill the metadata back to tracked instructions
+  static void harvestGoMetadata(Function &F, ArrayRef<GoMetadata> WL);
 
   static void updateMetadataForInlining(Function *Callee, Function *Caller);
 

@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-07-25.
 //===----------------------------------------------------------------------===//
 //
 // This file implements the BasicBlock class for the IR library.
@@ -336,6 +338,21 @@ const CallInst *BasicBlock::getTerminatingDeoptimizeCall() const {
   if (auto *CI = dyn_cast_or_null<CallInst>(RI->getPrevNode()))
     if (Function *F = CI->getCalledFunction())
       if (F->getIntrinsicID() == Intrinsic::experimental_deoptimize)
+        return CI;
+
+  return nullptr;
+}
+
+const CallInst *BasicBlock::getGoPanicReturnCall() const {
+  if (InstList.empty())
+    return nullptr;
+  auto *RI = dyn_cast<ReturnInst>(&InstList.back());
+  if (!RI || RI == &InstList.front())
+    return nullptr;
+
+  if (auto *CI = dyn_cast_or_null<CallInst>(RI->getPrevNode()))
+    if (Function *F = CI->getCalledFunction())
+      if (F->getIntrinsicID() == Intrinsic::go_panicreturn)
         return CI;
 
   return nullptr;

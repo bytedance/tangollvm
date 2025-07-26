@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-07-25.
 //===----------------------------------------------------------------------===//
 //
 // This file implements inline cost analysis.
@@ -43,6 +45,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/FormattedStream.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TangoLLVM/TangoLLVM.h"
 #include <climits>
 #include <limits>
 #include <optional>
@@ -2306,6 +2309,11 @@ bool CallAnalyzer::visitCallBase(CallBase &Call) {
       onLoadRelativeIntrinsic();
       return false;
 
+    case Intrinsic::go_metadata:
+    case Intrinsic::go_panicreturn:
+      // These are essentially no-op.
+      return true;
+
     case Intrinsic::memset:
     case Intrinsic::memcpy:
     case Intrinsic::memmove:
@@ -2546,6 +2554,9 @@ CallAnalyzer::analyzeBlock(BasicBlock *BB,
     // hack around it here.
     // Similarly, skip pseudo-probes.
     if (I.isDebugOrPseudoInst())
+      continue;
+
+    if (TangoLLVM::isGoPseudoIntrinsic(I))
       continue;
 
     // Skip ephemeral values.

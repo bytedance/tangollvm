@@ -1239,6 +1239,8 @@ void PEI::insertPrologEpilogCode(MachineFunction &MF) {
     assert(SaveBlocks.size() == 1 && "must be a single entry");
     for (MachineBasicBlock *SaveBlock : SaveBlocks)
       TFI.adjustForSegmentedStacks(MF, *SaveBlock);
+
+    TFI.insertGoDeferReturn(MF);
   }
 
   // Emit additional code that is required to explicitly handle the stack in

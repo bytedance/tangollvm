@@ -122,6 +122,8 @@ static bool eliminateNilChecks(BasicBlock &BB) {
     if (ptr == nullptr) {
       continue;
     }
+    if (isa<ConstantPointerNull>(ptr->stripPointerCasts()))
+      continue;
     if (isa<GlobalVariable>(ptr) // e.g., GlobalVariable or ConstantExpr
         || isa<ConstantExpr>(ptr) // Any constant should be non-null except ConstantNullPointer
         || isa<AllocaInst>(ptr)

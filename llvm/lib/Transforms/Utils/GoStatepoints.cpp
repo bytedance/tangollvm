@@ -609,6 +609,7 @@ struct GCPtrLivenessData {
 
   // On-Stack PARAMOUT
   SetVector<Value*> ParamOut;
+  SetVector<Value*> AlwaysLive;
 
   // Alloca liveness.
 
@@ -1634,7 +1635,8 @@ zeroAmbiguouslyLiveSlots(Function &F, DenseMap<Value *, ToZeroInfo> &ToZero) {
   for (auto &It : ToZero) {
     Instruction *SO = cast<Instruction>(It.first);
     Instruction *Pos;
-    if (OptToZeroPosition == false || It.second.Pos == nullptr) {
+    if (OptToZeroPosition == false || It.second.Pos == nullptr
+        || SO->hasMetadata("go.alwayslive")) {
       Pos = SO->getNextNode();
     } else {
       Pos = It.second.Pos->getFirstNonPHI();
@@ -1749,6 +1751,10 @@ static bool insertParsePoints(Function &F, DominatorTree &DT, LoopInfo &LI,
   for (CallBase *Call : ToUpdate)
     assert(Call->getFunction() == &F);
 #endif
+
+  // The following computation depends on metadata.
+  // Lets harvest those metadata
+  TangoLLVM::harvestGoMetadata(F, {GoMetadata::AlwaysLive});
 
   SmallVector<PartiallyConstructedSafepointRecord, 64> Records(ToUpdate.size());
 
@@ -2162,8 +2168,9 @@ struct UpdateUse {
 };
 
 
-static bool legalizeAlloca(Function &F) {
+static bool legalizeTangoLLVMIR(Function &F, DomTreeUpdater *DTU) {
   DenseMap<AllocaInst*, CallInst*> PreAllocated;
+  SmallVector<CallInst*, 8> PanicReturns;
   for (Instruction &I : instructions(F)) {
     if (AllocaInst *AI = dyn_cast<AllocaInst>(&I)) {
       (void)AI;
@@ -2184,13 +2191,62 @@ static bool legalizeAlloca(Function &F) {
             }
           }
         }
+      } else if (CI->getIntrinsicID() == Intrinsic::go_panicreturn) {
+        PanicReturns.push_back(CI);
       }
     }
   }
-  if (PreAllocated.empty()) {
-    return false;
-  }
   bool Changed = false;
+
+  if (!PanicReturns.empty())
+    Changed = true;
+
+  for (CallInst *CI : PanicReturns) {
+    auto RemoveBr = [&]() {
+      // Check if panicreturn is the last statement of the basic block
+      BasicBlock *BB = CI->getParent();
+
+      TangoLLVM::prepareFixGoPanicReturn(BB);
+
+      SmallVector<DominatorTree::UpdateType, 2> DTUpdates;
+      for (BasicBlock *Succ : successors(BB)) {
+        DTUpdates.push_back({DominatorTree::Delete, BB, Succ});
+      }
+
+      Instruction* T = BB->getTerminator();
+      T->eraseFromParent();
+
+      DTU->applyUpdates(DTUpdates);
+
+      IRBuilder<> Builder(BB);
+      Builder.CreateUnreachable();
+    };
+
+    RemoveBr();
+    if (!CI->use_empty()) {
+      CI->replaceAllUsesWith(Constant::getNullValue(CI->getType()));
+    }
+    CI->eraseFromParent();
+
+#if 0
+    auto &U = *CI->use_begin();
+    if (PHINode *PN = dyn_cast<PHINode>(U.getUser())) {
+      unsigned Num = PHINode::getIncomingValueNumForOperand(U.getOperandNo());
+      PN->removeIncomingValue(Num);
+      RemoveBr();
+      CI->eraseFromParent();
+    } else if (ReturnInst *RI = dyn_cast<ReturnInst>(U.getUser())) {
+      BasicBlock *BB = RI->getParent();
+      RI->eraseFromParent();
+      CI->eraseFromParent();
+      IRBuilder<> Builder(BB);
+      Builder.CreateUnreachable();
+    } else {
+      llvm_unreachable("invalid use of panicreturn");
+    }
+#endif
+  }
+
   for (auto I : PreAllocated) {
     AllocaInst *AI = I.first;
     CallInst *CI = I.second;
@@ -2368,7 +2424,7 @@ bool GoStatepoints::runOnFunction(Function &F, DominatorTree &DT,
   bool MadeChange = removeUnreachableBlocks(F, &DTU);
   // Legalize all alloca and go preallocated.
   // TODO: move to a standalone pass
-  MadeChange |= legalizeAlloca(F);
+  MadeChange |= legalizeTangoLLVMIR(F, &DTU);
 
   // Rewrite all the calls that need statepoints to invokes, so we can
   // attach a stack map through its landing pad.
@@ -2610,6 +2666,7 @@ static void computeLiveInValues(BasicBlock::reverse_iterator Begin,
               case Intrinsic::lifetime_start:
               case Intrinsic::lifetime_end:
               case Intrinsic::assume:
+              case Intrinsic::go_metadata:
                 // Not real use.
                 continue;
               default:
@@ -3700,6 +3757,8 @@ static void computeAllocaDefState(DominatorTree &DT, LoopInfo &LI, Function &F,
         bool OperandAdded = false;
         if (Function *Fn = CI->getCalledFunction()) {
           switch (Fn->getIntrinsicID()) {
+          case Intrinsic::go_metadata:
+            break;
           case Intrinsic::memmove:
           case Intrinsic::memcpy:
           case Intrinsic::memcpy_inline:
@@ -3871,6 +3930,18 @@ static void computeAllocaDefState(DominatorTree &DT, LoopInfo &LI, Function &F,
             }
           }
         }
+        // Force all alwayslive alloca to be zeroed right after the alloca
+        if (I.hasMetadata("go.alwayslive")) {
+          if (IsTrackedAllocaChecked(&I)) {
+            if (isGoPreAllocated(&I) && !isGoPreAllocatedParamOut(&I))
+              report_fatal_error("cannot zero ParamIn");
+            auto TypePtrMap = GetTypePtrMap(getValueElementType(&I));
+            ToZeroInfo Info;
+            Info.State = TypePtrMap;
+            Info.Pos = nullptr;
+            ToZero[&I] = Info;
+          }
+        }
       } else if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(&I)) {
         // Remove the following sanity check if we need lifetime_start
         switch (II->getIntrinsicID()) {
@@ -3909,6 +3980,8 @@ static void computeLiveInValues(DominatorTree &DT, LoopInfo &LI, Function &F,
   // collect all parameter out
   for (BasicBlock &BB : F) {
     for (Instruction &I : BB) {
+      if (I.hasMetadata("go.alwayslive"))
+        Data.AlwaysLive.insert(&I);
       if (isGoPreAllocatedParamOut(&I)) {
         Data.ParamOut.insert(&I);
       }
@@ -4311,6 +4384,7 @@ static void computeLiveInValues(DominatorTree &DT, LoopInfo &LI, Function &F,
               return StackObjectNotDefAll(V, &BB);
               });
           Data.LiveAtInst[&I] = LiveTmp;
+          Data.LiveAtInst[&I].set_union(Data.AlwaysLive);
           // TODO: Very important!!!
           // A basic block should have only a single state point.
           break;

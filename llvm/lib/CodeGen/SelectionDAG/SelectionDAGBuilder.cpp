@@ -6664,6 +6664,12 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
     DAG.setRoot(Res.getValue(1));
     return;
   }
+  case Intrinsic::go_panicreturn: {
+    report_fatal_error("should be legalized in IR");
+    return;
+  }
+  case Intrinsic::go_metadata:
+    return;
   case Intrinsic::go_preallocated: {
     auto getOrCreateFixedObject = [&](const CallInst &I) {
       if (!isa<ConstantPointerNull>(I.getArgOperand(0))) {

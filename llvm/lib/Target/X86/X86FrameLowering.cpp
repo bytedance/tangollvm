@@ -34,6 +34,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Module.h"
 #include "llvm/TangoLLVM/TangoLLVM.h"
 #include "llvm/MC/MCAsmInfo.h"
@@ -3313,6 +3314,67 @@ static unsigned GetScratchRegister(bool Is64Bit, bool IsLP64,
   return Primary ? X86::ECX : X86::EAX;
 }
 
+// RAX, RBX, RCX, RDI, RSI, R8, R9, R10, R11
+const unsigned GoABIInternalIntRegs[] = {
+  // 8 bit
+  X86::AL, X86::BL, X86::CL, X86::DIL, X86::SIL, X86::R8B, X86::R9B, X86::R10B, X86::R11B,
+  X86::AX, X86::BX, X86::CX, X86::DI, X86::SI, X86::R8W, X86::R9W, X86::R10W, X86::R11W,
+  X86::EAX, X86::EBX, X86::ECX, X86::EDI, X86::ESI, X86::R8D, X86::R9D, X86::R10D, X86::R11D,
+  X86::RAX, X86::RBX, X86::RCX, X86::RDI, X86::RSI, X86::R8, X86::R9, X86::R10, X86::R11
+};
+
+const unsigned GoABIInternalFloatRegs[] = {
+  X86::XMM0, X86::XMM1, X86::XMM2, X86::XMM3, X86::XMM4, X86::XMM5, X86::XMM6, X86::XMM7,
+  X86::XMM8, X86::XMM9, X86::XMM10, X86::XMM11, X86::XMM12, X86::XMM13, X86::XMM14
+};
+
+
+static void getGoABIRegAndOp(int RegIdx, int Size, bool IsLoad, unsigned &Reg, unsigned &Op) {
+  if (RegIdx < 0) {
+    // float
+    RegIdx = -RegIdx;
+    // index starting from 0
+    RegIdx --;
+    // XMM0 to XMM14
+    assert((RegIdx >= 0 && RegIdx < 15) && "index must be non-negative");
+    Reg = GoABIInternalFloatRegs[RegIdx];
+    switch (Size) {
+      case 4:
+        Op = IsLoad ? X86::MOVSSrm_alt : X86::MOVSSmr;
+        break;
+      case 8:
+        Op = IsLoad ? X86::MOVSDrm_alt : X86::MOVSDmr;
+        break;
+      default:
+        report_fatal_error("Unsupported size for float reg.");
+    }
+  } else {
+    RegIdx --;
+    assert((RegIdx >= 0 && RegIdx < 9) && "index must be non-negative");
+    switch (Size) {
+      case 1:
+        Reg = GoABIInternalIntRegs[RegIdx];
+        Op = IsLoad ? X86::MOV8rm : X86::MOV8mr;
+        break;
+      case 2:
+        Reg = GoABIInternalIntRegs[9 + RegIdx];
+        Op = IsLoad ? X86::MOV16rm : X86::MOV16mr;
+        break;
+      case 4:
+        Reg = GoABIInternalIntRegs[9 + 9 + RegIdx];
+        Op = IsLoad ? X86::MOV32rm : X86::MOV32mr;
+        break;
+      case 8:
+        Reg = GoABIInternalIntRegs[9 + 9 + 9 + RegIdx];
+        Op = IsLoad ? X86::MOV64rm : X86::MOV64mr;
+        break;
+      default:
+        // panic
+        report_fatal_error("Unsupported size for int reg.");
+    }
+  }
+}
+
 // The stack limit in the TCB is set to this many bytes above the actual stack
 // limit.
 static const uint64_t kSplitStackAvailable = 256;
@@ -3516,19 +3578,6 @@ leafSearchDone:
     // We need this to change sp to zero before call morestack
     BuildMI(allocMBB, DL, TII.get(X86::NOOP));
 
-    // RAX, RBX, RCX, RDI, RSI, R8, R9, R10, R11
-    const unsigned GoABIInternalIntRegs[] = {
-      // 8 bit
-      X86::AL, X86::BL, X86::CL, X86::DIL, X86::SIL, X86::R8B, X86::R9B, X86::R10B, X86::R11B,
-      X86::AX, X86::BX, X86::CX, X86::DI, X86::SI, X86::R8W, X86::R9W, X86::R10W, X86::R11W,
-      X86::EAX, X86::EBX, X86::ECX, X86::EDI, X86::ESI, X86::R8D, X86::R9D, X86::R10D, X86::R11D,
-      X86::RAX, X86::RBX, X86::RCX, X86::RDI, X86::RSI, X86::R8, X86::R9, X86::R10, X86::R11
-    };
-    const unsigned GoABIInternalFloatRegs[] = {
-      X86::XMM0, X86::XMM1, X86::XMM2, X86::XMM3, X86::XMM4, X86::XMM5, X86::XMM6, X86::XMM7,
-      X86::XMM8, X86::XMM9, X86::XMM10, X86::XMM11, X86::XMM12, X86::XMM13, X86::XMM14
-    };
-
     if (auto n = MF.getFunction().getMetadata("go.caller.args.area")) {
       assert(n->getNumOperands() >= 2 && "must have at least two operands");
       unsigned numOp = n->getNumOperands();
@@ -3556,51 +3605,7 @@ leafSearchDone:
 
           unsigned reg = 0;
           unsigned op = 0; // for reg
-          // See getLoadStoreRegOpcode in X86InstrInfo.cpp
-          if (regidx < 0) {
-            // float
-            regidx = -regidx;
-            // index starting from 0
-            regidx --;
-            // XMM0 to XMM14
-            assert((regidx >= 0 && regidx < 15) && "index must be non-negative");
-            reg = GoABIInternalFloatRegs[regidx];
-            switch (size) {
-            case 4:
-              op = X86::MOVSSmr;
-              break;
-            case 8:
-              op = X86::MOVSDmr;
-              break;
-            default:
-              report_fatal_error("Unsupported size for float reg.");
-            }
-
-          } else {
-            regidx --;
-            assert((regidx >= 0 && regidx < 9) && "index must be non-negative");
-            switch (size) {
-            case 1:
-              reg = GoABIInternalIntRegs[regidx];
-              op = X86::MOV8mr;
-              break;
-            case 2:
-              reg = GoABIInternalIntRegs[9 + regidx];
-              op = X86::MOV16mr;
-              break;
-            case 4:
-              reg = GoABIInternalIntRegs[9 + 9 + regidx];
-              op = X86::MOV32mr;
-              break;
-            case 8:
-              reg = GoABIInternalIntRegs[9 + 9 + 9 + regidx];
-              op = X86::MOV64mr;
-              break;
-            default:
-              // panic
-              report_fatal_error("Unsupported size for int reg.");
-            }
-          }
+          getGoABIRegAndOp(regidx, size, /*IsLoad*/ false, reg, op);
           if (allocMBB->isLiveIn(reg)) {
             // not an unused dead argument
             addRegOffset(BuildMI(allocMBB, DL, TII.get(op)), X86::RSP, false, unsigned(offset)).addReg(reg);
@@ -3646,50 +3651,7 @@ leafSearchDone:
                                       .getSExtValue();
           unsigned reg = 0;
           unsigned op = 0;
-          // See getLoadStoreRegOpcode in X86InstrInfo.cpp
-          if (regidx < 0) {
-            // float
-            regidx = -regidx;
-            // index starting from 0
-            regidx --;
-            // XMM0 to XMM14
-            assert((regidx >= 0 && regidx < 15) && "index must be non-negative");
-            reg = GoABIInternalFloatRegs[regidx];
-            switch (size) {
-            case 4:
-              op = X86::MOVSSrm_alt;
-              break;
-            case 8:
-              op = X86::MOVSDrm_alt;
-              break;
-            default:
-              report_fatal_error("Unsupported size for float reg.");
-            }
-          } else {
-            regidx --;
-            assert((regidx >= 0 && regidx < 9) && "index must be non-negative");
-            switch (size) {
-            case 1:
-              reg = GoABIInternalIntRegs[regidx];
-              op = X86::MOV8rm;
-              break;
-            case 2:
-              reg = GoABIInternalIntRegs[9 + regidx];
-              op = X86::MOV16rm;
-              break;
-            case 4:
-              reg = GoABIInternalIntRegs[9 + 9 + regidx];
-              op = X86::MOV32rm;
-              break;
-            case 8:
-              reg = GoABIInternalIntRegs[9 + 9 + 9 + regidx];
-              op = X86::MOV64rm;
-              break;
-            default:
-              // panic
-              report_fatal_error("Unsupported size for int reg.");
-            }
-          }
+          getGoABIRegAndOp(regidx, size, true, reg, op);
           if (allocMBB->isLiveIn(reg)) {
             // only save & restore live argument regs
             addRegOffset(BuildMI(allocMBB, DL, TII.get(op)).addReg(reg, RegState::Define), X86::RSP, false, unsigned(offset));
@@ -3965,6 +3927,134 @@ leafSearchDone:
 #ifdef EXPENSIVE_CHECKS
   MF.verify();
 #endif
+}
+
+static void collectAlwaysLiveOffset(MachineFunction &MF) {
+  DenseMap<const AllocaInst*, int64_t> AllocaOffsets;
+  Function &Fn = MF.getFunction();
+  const MachineFrameInfo &MFI = MF.getFrameInfo();
+  for (int I = MFI.getObjectIndexBegin(), E = MFI.getObjectIndexEnd(); I != E; ++I) {
+    if (MFI.isDeadObjectIndex(I)) {
+      continue;
+    }
+    const AllocaInst* Alloc = MFI.getObjectAllocation(I);
+    if (Alloc == nullptr)
+      continue;
+
+    // TODO:
+    int64_t Offset = MFI.getObjectOffset(I);
+    AllocaOffsets[Alloc] = Offset;
+  }
+
+  for (auto &I : instructions(Fn)) {
+    IntrinsicInst *II = dyn_cast<IntrinsicInst>(&I);
+    if (!II || II->getIntrinsicID() != Intrinsic::go_metadata)
+      continue;
+
+    GoMetadata ID = GoMetadata(cast<ConstantInt>(II->getArgOperand(1))->getZExtValue());
+    if (ID != GoMetadata::AlwaysLive)
+      continue;
+
+    AllocaInst *AI = dyn_cast<AllocaInst>(II->getArgOperand(0)->stripPointerCasts());
+    if (AI == nullptr)
+      continue;
+
+    auto It = AllocaOffsets.find(AI);
+    if (It == AllocaOffsets.end())
+      report_fatal_error("no offset for always live alloca");
+
+    int64_t Offset = It->second;
+    MDNode * OffsetMD = MDNode::get(Fn.getContext(), {ConstantAsMetadata::get(ConstantInt::get(Type::getInt64Ty(Fn.getContext()), uint64_t(Offset)))});
+    II->setArgOperand(2, MetadataAsValue::get(Fn.getContext(), OffsetMD));
+  }
+}
+
+void X86FrameLowering::insertGoDeferReturn(MachineFunction &MF) const {
+  if (!MF.getFunction().hasMetadata("go.opendefer"))
+    return;
+
+  collectAlwaysLiveOffset(MF);
+
+  DebugLoc DL;
+  MachineBasicBlock *DeferMBB = MF.CreateMachineBasicBlock();
+  DeferMBB->setSectionID(MBBSectionID::ColdSectionID);
+  MF.push_back(DeferMBB);
+
+  const char *DeferReturn = MF.createExternalSymbolName("runtime.deferreturn");
+  BuildMI(DeferMBB, DL, TII.get(X86::CALL64pcrel32)).addExternalSymbol(DeferReturn);
+
+  SmallVector<unsigned, 16> RetRegs;
+  auto *MD = MF.getFunction().getMetadata("go.opendefer.return");
+  if (MD != nullptr) {
+    // Make sure all metadata are avaiable
+    TangoLLVM::harvestGoMetadata(MF.getFunction(), {GoMetadata::OpenDeferReturn});
+
+    // For return values, usually no more than 9 + 15
+    SmallVector<int, 32> FrameObjectIndice;
+    BitVector FrameObjectFound;
+
+    MachineFrameInfo &MFI = MF.getFrameInfo();
+    int64_t MaxObjectIndex = -1;
+    for (int I = MFI.getObjectIndexBegin(), E = MFI.getObjectIndexEnd(); I != E; ++I) {
+      if (MFI.isDeadObjectIndex(I))
+        continue;
+
+      const AllocaInst* Alloc = MFI.getObjectAllocation(I);
+      if (Alloc == nullptr)
+        continue; // Those are alloca for return values in registers
+
+      auto *AMD = Alloc->getMetadata("go.opendefer.return");
+      if (AMD == nullptr)
+        continue;
+
+      int64_t Idx = dyn_cast<ConstantAsMetadata>(AMD->getOperand(0))->getValue()->getUniqueInteger().getSExtValue();
+      if (Idx < 0)
+        report_fatal_error("opendefer index is too big");
+
+      if (Idx > MaxObjectIndex) {
+        MaxObjectIndex = Idx;
+        FrameObjectIndice.resize(MaxObjectIndex + 1);
+        FrameObjectFound.resize(MaxObjectIndex + 1);
+      }
+      if (!FrameObjectFound.test(Idx)) {
+        FrameObjectFound.set(Idx);
+        FrameObjectIndice[Idx] = I;
+      } else {
+        report_fatal_error("duplicate opendefer info");
+      }
+    }
+
+    unsigned I = 0;
+    unsigned E = MD->getNumOperands();
+    assert(E % 4 == 0 && "invariants");
+    for (; I < E; I += 4) {
+      // (regidx, index, offset, size)
+      int64_t RegIdx = dyn_cast<ConstantAsMetadata>(MD->getOperand(I + 0))->getValue()->getUniqueInteger().getSExtValue();
+      int64_t Index = dyn_cast<ConstantAsMetadata>(MD->getOperand(I + 1))->getValue()->getUniqueInteger().getSExtValue();
+      int64_t Offset = dyn_cast<ConstantAsMetadata>(MD->getOperand(I + 2))->getValue()->getUniqueInteger().getSExtValue();
+      int64_t Size = dyn_cast<ConstantAsMetadata>(MD->getOperand(I + 3))->getValue()->getUniqueInteger().getSExtValue();
+      if (Index >= FrameObjectFound.size() || !FrameObjectFound.test(Index)) {
+        report_fatal_error("frame object for opendefer not found");
+      }
+      unsigned Reg = 0;
+      unsigned Op = 0;
+      getGoABIRegAndOp(RegIdx, Size, true, Reg, Op);
+      RetRegs.push_back(Reg);
+
+      addOffset(BuildMI(DeferMBB, DL, TII.get(Op)).addReg(Reg, RegState::Define)
+          .addFrameIndex(FrameObjectIndice[Index]), Offset);
+    }
+
+  }
+
+  // Emit RET
+  MachineInstrBuilder MIB;
+  MIB = BuildMI(DeferMBB, DL, TII.get(X86::RET)).addImm(0);
+  for (unsigned Reg : RetRegs)
+    MIB.addReg(Reg);
+
+  // emitEpilogue
+  emitEpilogue(MF, *DeferMBB);
 }
 
 /// Lookup an ERTS parameter in the !hipe.literals named metadata node.

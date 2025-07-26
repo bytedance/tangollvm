@@ -2579,6 +2579,12 @@ llvm::InlineResult llvm::InlineFunction(CallBase &CB, InlineFunctionInfo &IFI,
     }
   }
 
+  if (TangoLLVM::isGoABIInternal(*Caller)) {
+    // Fix the rest panicreturn, e.g., not used by a return
+    // or the return type is void.
+    (void)TangoLLVM::fixGoPanicReturn(*Caller, FirstNewBlock, Returns);
+  }
+
   SmallVector<Value*,4> VarArgsToForward;
   SmallVector<AttributeSet, 4> VarArgsAttrs;
   for (unsigned i = CalledFunc->getFunctionType()->getNumParams();

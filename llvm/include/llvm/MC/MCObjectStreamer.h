@@ -158,6 +158,7 @@ public:
   void emitGoFileTab(ArrayRef<MCGoFileEntry> FileEntries) override;
   void emitGoDwarfInfo(ArrayRef<MCGoDwarfEntry> Entries) override;
   void emitGoBytes(StringRef Data) override;
+  void emitGoOpenDefer(int64_t TempBitsOffset, ArrayRef<int64_t> Defers) override;
   void emitDwarfAdvanceFrameAddr(const MCSymbol *LastLabel,
                                  const MCSymbol *Label, SMLoc Loc);
   void emitCVLocDirective(unsigned FunctionId, unsigned FileNo, unsigned Line,
