@@ -1247,17 +1247,23 @@ void MCGoAuxData::beginInstruction(const MachineInstr *MI) {
 
   {
     auto DwarfLoc = Asm->OutContext.getCurrentDwarfLoc();
-    DwarfTable.push_back(
+    auto Line = DwarfLoc.getLine();
+    if (Line != 0 && LastFileIndex != -1) {
+      DwarfTable.push_back(
       MCGoDwarfEntry(
-        DwarfLoc.getFileNum(),
-        DwarfLoc.getLine(),
-        DwarfLoc.getColumn(),
-        DwarfLoc.getFlags(),
-        DwarfLoc.getDiscriminator()
-      )
-    );
-    appendPCData(PCIndex, LastPCIndex++, getOrCreatePrePCSymbol(MI));
+            LastFileIndex,
+            LastPCIndex,
+            DwarfLoc.getLine(),
+            DwarfLoc.getColumn(),
+            DwarfLoc.getFlags(),
+            DwarfLoc.getDiscriminator()
+          ));
+    }
+
+    appendPCData(PCIndex, LastPCIndex, getOrCreatePrePCSymbol(MI));
+    LastPCIndex++;
   }
+
   if (PrePC != nullptr) {
     Asm->OutStreamer->emitLabel(PrePC);
     PrePC = nullptr;

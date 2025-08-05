@@ -40,14 +40,15 @@ struct MCGoFileEntry {
 
 struct MCGoDwarfEntry {
   uint32_t FileNum;
+  uint32_t Index;
   uint32_t Line;
   uint16_t Column;
   uint8_t Flags;
   uint32_t Discriminator;
 
-  MCGoDwarfEntry(uint32_t file_num, uint32_t line,
+  MCGoDwarfEntry(uint32_t file_num, uint32_t index, uint32_t line,
                  uint16_t column, uint8_t flags, uint32_t discriminator)
-      : FileNum(file_num), Line(line), Column(column), Flags(flags), Discriminator(discriminator) {}
+      : FileNum(file_num), Index(index), Line(line), Column(column), Flags(flags), Discriminator(discriminator) {}
 };
 
 struct MCGoStackObjectRecord {

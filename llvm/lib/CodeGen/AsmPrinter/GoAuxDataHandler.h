@@ -130,7 +130,7 @@ private:
     HasStatepoint = false;
     RequireDeferReturnMap = false;
     LastStackMapIndex = -1;
-    LastPCIndex = -1;
+    LastPCIndex = 0;
     FileStarted = false;
     LineStarted = false;
     InlineTreeStarted = false;

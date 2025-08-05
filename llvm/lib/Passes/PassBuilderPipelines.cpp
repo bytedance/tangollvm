@@ -1216,7 +1216,7 @@ PassBuilder::buildModuleSimplificationPipeline(OptimizationLevel Level,
   MPM.addPass(AlwaysInlinerPass(/*InsertLifetimeIntrinsics=*/true));
 
   if (TM->getTargetTriple().isGoEnvironment()) {
-    MPM.addPass(GoDevirtualAnnotatorPass());
+    // MPM.addPass(GoDevirtualAnnotatorPass());
   }
 
   if (EnableModuleInliner)
@@ -1850,7 +1850,7 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
   MPM.addPass(GlobalSplitPass());
 
   if (TM->getTargetTriple().isGoEnvironment()) {
-    MPM.addPass(GoDevirtualAnnotatorPass());
+    // MPM.addPass(GoDevirtualAnnotatorPass());
   }
   // Run whole program optimization of virtual call when the list of callees
   // is fixed.

@@ -1014,8 +1014,9 @@ void MCObjectStreamer::emitGoDwarfInfo(ArrayRef<MCGoDwarfEntry> Entries) {
 
   for (const MCGoDwarfEntry &E : Entries) {
     support::endian::write(OSE, E.FileNum, endianness::little);
+    support::endian::write(OSE, E.Index, endianness::little);
     support::endian::write(OSE, E.Line, endianness::little);
-    Offset += 4 + 4;
+    Offset += 4 + 4 + 4;
 
     support::endian::write(OSE, E.Column, endianness::little);
     support::endian::write(OSE, E.Flags, endianness::little);
