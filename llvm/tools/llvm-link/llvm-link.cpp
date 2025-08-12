@@ -409,7 +409,7 @@ static bool importFunctions(const char *argv0, Module &DestModule) {
 static bool linkFiles(const char *argv0, LLVMContext &Context, Linker &L,
                       const cl::list<std::string> &Files, unsigned Flags) {
   // Filter out flags that don't apply to the first file we load.
-  unsigned ApplicableFlags = Flags & Linker::Flags::OverrideFromSrc;
+  unsigned ApplicableFlags = Flags & (Linker::Flags::OverrideFromSrc | Linker::Flags::TangoLLVM);
   // Similar to some flags, internalization doesn't apply to the first file.
   bool InternalizeLinkedSymbols = false;
   for (const auto &File : Files) {

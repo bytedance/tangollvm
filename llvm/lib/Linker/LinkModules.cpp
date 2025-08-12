@@ -712,10 +712,11 @@ bool ModuleLinker::run() {
   if (isTangoLLVM()) {
     // We keep all globals and functions declarations for TangoLLVM
     for (GlobalVariable &GV : SrcM->globals()) {
-      assert(GV.isDeclaration() && "invariant");
       if (!GV.hasMetadata("go.global"))
         continue;
 
+      // All go globals created by the front-end are declarations.
+      assert(GV.isDeclaration() && "invariant");
       assert(GV.getLinkage() == GlobalValue::ExternalLinkage && "invariant");
       assert(GV.isConstant() == false && "invariant");
       assert(GV.hasInitializer() == false && "invariant");

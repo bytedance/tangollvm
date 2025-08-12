@@ -28,9 +28,446 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/TangoLLVM/TangoLLVM.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Support/CBindingWrapping.h"
 
 namespace llvm {
+
+
+static cl::opt<bool> IntrinsifyMemClr("go-intrinsify-memclr", cl::Hidden,
+                                  cl::init(true));
+static cl::opt<bool> IntrinsifyMemHash32Or64("go-intrinsify-memhash32or64", cl::Hidden,
+                                  cl::init(false));
+static cl::opt<bool> IntrinsifyStrHash("go-intrinsify-strhash", cl::Hidden,
+                                  cl::init(false));
+static cl::opt<bool> IntrinsifyMemHash("go-intrinsify-memhash", cl::Hidden,
+                                  cl::init(false));
+
+
+bool TangoLLVM::intrinsifyMemClr(CallInst *CI) {
+  if (!IntrinsifyMemClr)
+    return false;
+
+  Function *Callee = CI->getCalledFunction();
+  if (Callee == nullptr || Callee->getName() != "runtime.memclrNoHeapPointers") {
+    return false;
+  }
+
+  assert(CI->arg_size() == 2 && "invariant");
+  if (auto * C = dyn_cast<ConstantInt>(CI->getArgOperand(1))) {
+    if (C->getZExtValue() > 128) {
+      // TODO: hard coded threshold here
+      return false;
+    }
+  }
+
+  IRBuilder<> Builder(CI);
+  const Align ArgAlign(1);
+  Builder.CreateMemSet(
+      CI->getArgOperand(0),
+      ConstantInt::get(Type::getInt8Ty(CI->getContext()), 0, false),
+      cast<ConstantInt>(CI->getArgOperand(1))->getZExtValue(),
+      ArgAlign,
+      false);
+
+  CI->eraseFromParent();
+  return true;
+}
+
+bool TangoLLVM::intrinsifyStrHash(CallInst *CI) {
+  if (!IntrinsifyStrHash)
+    return false;
+
+  Function *Callee = CI->getCalledFunction();
+  if (!Callee) {
+    // ClouseCall may cast the function to another type
+    Callee = dyn_cast<Function>(CI->getCalledOperand()->stripPointerCasts());
+  }
+
+  if (Callee == nullptr || Callee->getName() != "runtime.strhash")
+    return false;
+
+  Module *M = CI->getModule();
+  Function *MemHashFn = M->getFunction("runtime.memhash");
+  if (MemHashFn == nullptr)
+    return false; // TODO: in LTO mode we can always get the declaration
+
+  LLVMContext &Context = M->getContext();
+  Type *I8 = Type::getInt8Ty(Context);
+  Type *I64 = Type::getInt64Ty(Context);
+  Type *PtrType = PointerType::get(Context, 0);
+  assert(MemHashFn->arg_size() == 3 && "intrinsic invariant");
+
+  IRBuilder<> Builder(CI);
+
+  unsigned ArgBegin = 0;
+  // memhash32 and memhash64 have two parameters.
+  // However, they could used as the type->hasher via function pointer
+  if (CI->arg_size() == 2) {
+    ArgBegin = 0;
+  } else if (CI->arg_size() == 3) {
+    if (!TangoLLVM::isGoClosureCall(CI)) {
+      report_fatal_error("inconsistent arg size of strhash");
+    }
+    ArgBegin = 1;
+  } else {
+    report_fatal_error("inconsistent arg size of strhash");
+  }
+
+  Value *AX = CI->getArgOperand(ArgBegin + 0);
+  Value *BX = CI->getArgOperand(ArgBegin + 1);
+
+  Value *Ptr = Builder.CreateLoad(PtrType, AX);
+  Value *Len = Builder.CreateLoad(I64, Builder.CreateConstGEP1_32(I8, AX, 8));
+
+  auto *NewCI = Builder.CreateCall(MemHashFn, {Ptr, BX, Len});
+  NewCI->setCallingConv(CI->getCallingConv());
+  assert(CI->getType() == NewCI->getType() && "strhash should have the same return value as memhash");
+  CI->replaceAllUsesWith(NewCI);
+  CI->eraseFromParent();
+  return true;
+}
+
+bool TangoLLVM::intrinsifyMemHash32Or64(CallInst *CI) {
+  if (!IntrinsifyMemHash32Or64)
+    return false;
+
+  Function *Callee = CI->getCalledFunction();
+  if (!Callee) {
+    // ClouseCall may cast the function to another type
+    Callee = dyn_cast<Function>(CI->getCalledOperand()->stripPointerCasts());
+  }
+
+  if (Callee == nullptr)
+    return false;
+
+  bool IsI32;
+  if (Callee->getName() == "runtime.memhash32") {
+    IsI32 = true;
+  } else if (Callee->getName() == "runtime.memhash64") {
+    IsI32 = false;
+  } else {
+    report_fatal_error("must be memhash32 or memhash64");
+    return false;
+  }
+
+  // TODO: Move to X86 specific files
+  Intrinsic::ID ID = Function::lookupIntrinsicID("llvm.x86.aesni.aesenc");
+  if (ID == 0)
+    return false;
+
+  Module *M = CI->getModule();
+  LLVMContext &Context = M->getContext();
+
+  Type *I8 = Type::getInt8Ty(Context);
+  Type *I32 = Type::getInt32Ty(Context);
+  Type *I64 = Type::getInt64Ty(Context);
+  VectorType * V2I64 = FixedVectorType::get(I64, 2);
+
+  GlobalVariable *G = M->getGlobalVariable("runtime.aeskeysched");
+  if (G == nullptr) {
+    G = TangoLLVM::createGoGlobalVariable(I8, GlobalValue::ExternalLinkage, "runtime.aeskeysched", M);
+  }
+  Value *G16 = ConstantExpr::getGetElementPtr(I8, G, ConstantInt::get(I32, 16));
+  Value *G32 = ConstantExpr::getGetElementPtr(I8, G, ConstantInt::get(I32, 32));
+
+  Value *Zero = ConstantInt::get(I32, 0);
+  Value  *One = ConstantInt::get(I32, 1);
+
+  IRBuilder<> Builder(CI);
+
+  unsigned ArgBegin = 0;
+  // memhash32 and memhash64 have two parameters.
+  // However, they could used as the type->hasher via function pointer
+  if (CI->arg_size() == 2) {
+    ArgBegin = 0;
+  } else if (CI->arg_size() == 3) {
+    if (!TangoLLVM::isGoClosureCall(CI)) {
+      report_fatal_error("inconsistent arg size of memhash32 or memhash64");
+    }
+    ArgBegin = 1;
+  } else {
+    report_fatal_error("inconsistent arg size of memhash32 or memhash64");
+  }
+
+  Value *AX = CI->getArgOperand(ArgBegin + 0);
+  Value *BX = CI->getArgOperand(ArgBegin + 1);
+
+  assert(Callee != nullptr && "invariant");
+
+  Value *X0 = UndefValue::get(V2I64);
+  X0 = Builder.CreateInsertElement(X0, BX, Zero);
+  if (IsI32) {
+    X0 = Builder.CreateInsertElement(X0, Builder.CreateZExt(Builder.CreateLoad(I32, AX), I64), One);
+  } else {
+    X0 = Builder.CreateInsertElement(X0, Builder.CreateLoad(I64, AX), One);
+  }
+
+  X0 = Builder.CreateIntrinsic(ID, {}, {X0, Builder.CreateLoad(V2I64, G)});
+  X0 = Builder.CreateIntrinsic(ID, {}, {X0, Builder.CreateLoad(V2I64, G16)});
+  X0 = Builder.CreateIntrinsic(ID, {}, {X0, Builder.CreateLoad(V2I64, G32)});
+  AX = Builder.CreateExtractElement(X0, Zero);
+
+  assert(AX->getType() == CI->getType() && "bad signature");
+  CI->replaceAllUsesWith(AX);
+  CI->eraseFromParent();
+
+  return true;
+}
+
+bool TangoLLVM::intrinsifyMemHash(CallInst *CI) {
+  if (!IntrinsifyMemHash)
+    return false;
+
+  if (TangoLLVM::isGoClosureCall(CI))
+    return false; // TODO: very rare
+
+  Function *Callee = CI->getCalledFunction();
+  if (Callee == nullptr)
+    return false;
+
+  if (Callee->getName() != "runtime.memhash")
+    return false;
+
+  if (Callee->arg_size() != 3)
+    return false; // may be a closure call
+
+  Value *Size = CI->getArgOperand(2);
+  if (!isa<ConstantInt>(Size))
+    return false;
+
+  size_t SizeVal = cast<ConstantInt>(Size)->getZExtValue();
+  if (SizeVal > 32)
+    return false;
+
+  Intrinsic::ID ID = Function::lookupIntrinsicID("llvm.x86.aesni.aesenc");
+  if (ID == 0)
+    return false;
+
+  Module *M = CI->getModule();
+  LLVMContext &Context = M->getContext();
+  Function *Fn = CI->getParent()->getParent();
+  Type *I8 = Type::getInt8Ty(Context);
+  Type *I16 = Type::getInt16Ty(Context);
+  Type *I32 = Type::getInt32Ty(Context);
+  Type *I64 = Type::getInt64Ty(Context);
+  VectorType * V2I64 = FixedVectorType::get(I64, 2);
+  VectorType * V16I8 = FixedVectorType::get(I8, 16);
+
+  GlobalVariable *G = M->getGlobalVariable("runtime.aeskeysched");
+  if (G == nullptr) {
+    G = TangoLLVM::createGoGlobalVariable(I8, GlobalValue::ExternalLinkage, "runtime.aeskeysched", M);
+  }
+
+  IRBuilder<> Builder(CI);
+
+  Value *AX = CI->getArgOperand(0);
+  Value *BX = CI->getArgOperand(1);
+  Constant *CX = ConstantInt::get(I16, SizeVal);
+
+  Value *X0 = UndefValue::get(V2I64);
+  X0 = Builder.CreateInsertElement(X0, BX, uint64_t(0));
+  X0 = Builder.CreateInsertElement(X0, Builder.CreateBitCast(ConstantVector::get({CX, CX, CX, CX}), I64), uint64_t(1));
+  Value *X1 = X0;
+  X0 = Builder.CreateXor(Builder.CreateLoad(V2I64, G), X0);
+  X0 = Builder.CreateIntrinsic(ID, {}, {X0, X0});
+
+  if (SizeVal == 0) {
+    X0 = Builder.CreateIntrinsic(ID, {}, {X0, X0});
+    AX = Builder.CreateExtractElement(X0, uint64_t(0));
+    assert(AX->getType() == CI->getType() && "invariant: must be i64");
+    CI->replaceAllUsesWith(AX);
+    CI->eraseFromParent();
+    return true;
+  }
+
+  if (SizeVal == 16) {
+    X1 = Builder.CreateLoad(V2I64, AX);
+
+    /*
+     * PXOR	X0, X1	// xor data with seed
+     * AESENC	X1, X1	// scramble combo 3 times
+     * AESENC	X1, X1
+     * AESENC	X1, X1
+     * MOVQ	X1, AX	// return X1
+     */
+    X1 = Builder.CreateXor(X0, X1);
+    X1 = Builder.CreateIntrinsic(ID, {}, {X1, X1});
+    X1 = Builder.CreateIntrinsic(ID, {}, {X1, X1});
+    X1 = Builder.CreateIntrinsic(ID, {}, {X1, X1});
+    AX = Builder.CreateExtractElement(X1, uint64_t(0));
+    assert(AX->getType() == CI->getType() && "invariant: must be i64");
+    CI->replaceAllUsesWith(AX);
+    CI->eraseFromParent();
+    return AX;
+  }
+
+  if (SizeVal > 0 && SizeVal < 16) {
+    /*
+     * 	ADDQ	$16, AX
+     * 	TESTW	$0xff0, AX
+     * 	JE	endofpage
+     *
+     * 	// 16 bytes loaded at this address won't cross
+     * 	// a page boundary, so we can load it directly.
+     * 	MOVOU	-16(AX), X1
+     * 	ADDQ	CX, CX
+     * 	MOVQ	$masks<>(SB), AX
+     * 	PAND	(AX)(CX*8), X1
+     * final1:
+     * 	PXOR	X0, X1	// xor data with seed
+     * 	AESENC	X1, X1	// scramble combo 3 times
+     * 	AESENC	X1, X1
+     * 	AESENC	X1, X1
+     * 	MOVQ	X1, AX	// return X1
+     * 	RET
+     *
+     * endofpage:
+     * 	// address ends in 1111xxxx. Might be up against
+     * 	// a page boundary, so load ending at last byte.
+     * 	// Then shift bytes down using pshufb.
+     * 	MOVOU	-32(AX)(CX*1), X1
+     * 	ADDQ	CX, CX
+     * 	MOVQ	$shifts<>(SB), AX
+     * 	PSHUFB	(AX)(CX*8), X1
+     * 	JMP	final1
+     */
+    Value *AX16 = Builder.CreateAdd(Builder.CreatePtrToInt(AX, I64), ConstantInt::get(I64, 16));
+    // Cast to i16 because we must emit testw
+    Value *Cmp = Builder.CreateICmpEQ(Builder.CreateTrunc(AX16, I16), ConstantInt::get(I16, 0xff0));
+
+    // Split at CMP
+    BasicBlock *Cur = CI->getParent();
+    BasicBlock *Final1BB = SplitBlock(Cur, std::next(cast<Instruction>(Cmp)->getIterator()));
+    BasicBlock *NextBB = BasicBlock::Create(Context, "next", Fn);
+    BasicBlock *EndOfPageBB = BasicBlock::Create(Context, "endofpage", Fn);
+
+    Instruction *T = Cur->getTerminator();
+    T->eraseFromParent();
+    Builder.SetInsertPoint(Cur);
+    Builder.CreateCondBr(Cmp, EndOfPageBB, NextBB);
+
+    NextBB->moveAfter(Cur);
+    Final1BB->moveAfter(NextBB);
+    EndOfPageBB->moveAfter(Final1BB);
+
+    Builder.SetInsertPoint(NextBB);
+    X1 = Builder.CreateLoad(V2I64, AX);
+    uint64_t Mask0, Mask1;
+    if (SizeVal < 8) {
+      Mask0 = (uint64_t(1) << (SizeVal * 8)) - 1;
+      Mask1 = 0;
+    } else {
+      Mask0 = 0xFFFFFFFFFFFFFFFF;
+      Mask1 = (uint64_t(1) << ((SizeVal - 8) * 8)) - 1;
+    }
+
+    Value *Mask = ConstantVector::get({ConstantInt::get(I64, Mask0), ConstantInt::get(I64, Mask1)});
+    X1 = Builder.CreateAnd(X1, Mask);
+    Value *X1NextBB = X1;
+    Builder.CreateBr(Final1BB);
+
+    // End of page
+    Builder.SetInsertPoint(EndOfPageBB);
+    /*
+     * 	MOVOU	-32(AX)(CX*1), X1
+     * 	ADDQ	CX, CX
+     * 	MOVQ	$shifts<>(SB), AX
+     * 	PSHUFB	(AX)(CX*8), X1
+     */
+
+    // CI is not erased yet
+    AX = CI->getArgOperand(0);
+    X1 = Builder.CreateLoad(V16I8, Builder.CreateConstGEP1_32(I8, AX, unsigned(SizeVal) - 16));
+
+    SmallVector<Constant*, 16> Shifts;
+    Shifts.resize(16);
+    unsigned I = 0;
+    unsigned B = 16 - SizeVal;
+    for (; I < SizeVal; ++I) {
+      // I:0, 1 -> 15; 2 -> 14;...;15->1
+      Shifts[I] = ConstantInt::get(I32, B + I);
+    }
+    for (; I < 16; ++I) {
+      Shifts[I] = ConstantInt::get(I32, 17);
+    }
+
+    X1 = Builder.CreateShuffleVector(X1, Constant::getNullValue(V16I8), ConstantVector::get(Shifts));
+    Value *X1EndOfPageBB = Builder.CreateBitCast(X1, V2I64);
+    Builder.CreateBr(Final1BB);
+
+    Builder.SetInsertPoint(Final1BB->begin());
+
+    PHINode *PN = Builder.CreatePHI(V2I64, 2);
+    PN->addIncoming(X1EndOfPageBB, EndOfPageBB);
+    PN->addIncoming(X1NextBB, NextBB);
+    X1 = PN;
+
+    X1 = Builder.CreateXor(X0, X1);
+
+    X1 = Builder.CreateIntrinsic(ID, {}, {X1, X1});
+    X1 = Builder.CreateIntrinsic(ID, {}, {X1, X1});
+    X1 = Builder.CreateIntrinsic(ID, {}, {X1, X1});
+
+    AX = Builder.CreateExtractElement(X1, uint64_t(0));
+    assert(AX->getType() == CI->getType() && "invariant: must be i64");
+    CI->replaceAllUsesWith(AX);
+
+    CI->eraseFromParent();
+    return true;
+  }
+
+  Value *G16 = ConstantExpr::getGetElementPtr(I8, G, ConstantInt::get(I32, 16));
+  if (SizeVal >= 17 && SizeVal <= 32) {
+    /*
+     * // make second starting seed
+     * PXOR	runtime·aeskeysched+16(SB), X1
+     * AESENC	X1, X1
+     *
+     * // load data to be hashed
+     * MOVOU	(AX), X2
+     * MOVOU	-16(AX)(CX*1), X3
+     *
+     * // xor with seed
+     * PXOR	X0, X2
+     * PXOR	X1, X3
+     *
+     * // scramble 3 times
+     * AESENC	X2, X2
+     * AESENC	X3, X3
+     * AESENC	X2, X2
+     * AESENC	X3, X3
+     * AESENC	X2, X2
+     * AESENC	X3, X3
+     *
+     * // combine results
+     * PXOR	X3, X2
+     * MOVQ	X2, AX	// return X2
+     * RET
+     */
+    Value *X2, *X3;
+    X1 = Builder.CreateXor(Builder.CreateLoad(V2I64, G16), X1); // previously saved X0
+    X1 = Builder.CreateIntrinsic(ID, {}, {X1, X1});
+    X2 = Builder.CreateLoad(V2I64, AX);
+    X3 = Builder.CreateLoad(V2I64, Builder.CreateConstGEP1_32(I8, AX, unsigned(SizeVal) - 16));
+    X2 = Builder.CreateXor(X0, X2);
+    X3 = Builder.CreateXor(X1, X3);
+    X2 = Builder.CreateIntrinsic(ID, {}, {X2, X2});
+    X3 = Builder.CreateIntrinsic(ID, {}, {X3, X3});
+    X2 = Builder.CreateIntrinsic(ID, {}, {X2, X2});
+    X3 = Builder.CreateIntrinsic(ID, {}, {X3, X3});
+    X2 = Builder.CreateIntrinsic(ID, {}, {X2, X2});
+    X3 = Builder.CreateIntrinsic(ID, {}, {X3, X3});
+    X2 = Builder.CreateXor(X3, X2);
+    AX = Builder.CreateExtractElement(X2, uint64_t(0));
+    assert(AX->getType() == CI->getType() && "invariant: must be i64");
+    CI->replaceAllUsesWith(AX);
+    CI->eraseFromParent();
+    return true;
+  }
+  llvm_unreachable("unsupported size");
+  return false;
+}
 
 void TangoLLVM::prepareFixGoPanicReturn(BasicBlock *BB) {
   Instruction *T = BB->getTerminator();

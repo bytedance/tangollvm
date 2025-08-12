@@ -1917,9 +1917,6 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
                       InlinePass::CGSCCInliner}));
   }
 
-  if (TM->getTargetTriple().isGoEnvironment())
-    MPM.addPass(GoRODataPass(GoRODataOptions(false)));
-
   // Perform context disambiguation after inlining, since that would reduce the
   // amount of additional cloning required to distinguish the allocation
   // contexts.
@@ -2072,6 +2069,10 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
 
   // Drop bodies of available eternally objects to improve GlobalDCE.
   MPM.addPass(EliminateAvailableExternallyPass());
+
+  // Previous optimizations may lead to new opportunity for GoROData
+  if (TM->getTargetTriple().isGoEnvironment())
+    MPM.addPass(GoRODataPass(GoRODataOptions(false)));
 
   // Now that we have optimized the program, discard unreachable functions.
   MPM.addPass(GlobalDCEPass(/*InLTOPostLink=*/true));

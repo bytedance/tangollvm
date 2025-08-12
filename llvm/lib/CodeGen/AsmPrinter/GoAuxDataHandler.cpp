@@ -1433,6 +1433,9 @@ static void emitDeferStackMap(const Function *Fn, AsmPrinter *Asm, std::vector<s
 }
 
 static void emitEntryStackMap(const Function *Fn, const DataLayout &DL, uint32_t &MaxSize, std::vector<uint8_t> &Map) {
+  if (!Fn->hasFnAttribute("go-split"))
+    return;
+
   int64_t MaxIndex = -1;
   const unsigned PtrSize = DL.getPointerSize();
   if (PtrSize != 8)

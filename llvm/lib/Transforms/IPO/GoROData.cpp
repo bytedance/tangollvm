@@ -55,6 +55,7 @@ static bool runOnFunction(Function &F, bool specialize, bool useinline);
 static bool intrinsifyGoBuiltins(Function &F) {
   SmallVector<CallInst*, 4> MemClrs;
   SmallVector<CallInst*, 4> MemHashs;
+  SmallVector<CallInst*, 4> IntHashs;
   SmallVector<CallInst*, 4> StrHashs;
   for (Instruction &I : instructions(F)) {
     CallInst *CI = dyn_cast<CallInst>(&I);
@@ -64,8 +65,9 @@ static bool intrinsifyGoBuiltins(Function &F) {
     Function *Callee = CI->getCalledFunction();
     if (!Callee) {
       Callee = dyn_cast<Function>(CI->getCalledOperand()->stripPointerCasts());
-      if (!Callee)
+      if (!Callee) {
         continue;
+      }
     }
 
     StringRef Name = Callee->getName();
@@ -77,6 +79,8 @@ static bool intrinsifyGoBuiltins(Function &F) {
         }
       }
     } else if (Name == "runtime.memhash64" || Name == "runtime.memhash32") {
+      IntHashs.push_back(CI);
+    } else if (Name == "runtime.memhash") {
       MemHashs.push_back(CI);
     } else if (Name == "runtime.strhash") {
       StrHashs.push_back(CI);
@@ -86,132 +90,55 @@ static bool intrinsifyGoBuiltins(Function &F) {
   bool Changed = false;
 
   for (auto *CI : MemClrs) {
-    IRBuilder<> Builder(CI);
-    const Align ArgAlign(1);
-    Builder.CreateMemSet(
-        CI->getArgOperand(0),
-        ConstantInt::get(Type::getInt8Ty(CI->getContext()), 0, false),
-        cast<ConstantInt>(CI->getArgOperand(1))->getZExtValue(),
-        ArgAlign,
-        false);
-
-    CI->eraseFromParent();
-    Changed = true;
+    if (TangoLLVM::intrinsifyMemClr(CI))
+      Changed = true;
   }
 
-  Module *M = F.getParent();
-  LLVMContext &Context = F.getContext();
-  Type *i64 = Type::getInt64Ty(Context);
-  Type *i8 = Type::getInt8Ty(Context);
-  Type *i8ptr = i8->getPointerTo();
+  for (auto *CI : IntHashs) {
+    if (TangoLLVM::intrinsifyMemHash32Or64(CI))
+      Changed = true;
+  }
+
+  bool NewMemHashs = false;
   if (!StrHashs.empty()) {
-    // TODO: we do not create memhash if it does not exist.
-    // This is because strhash should only be used by runtime internally.
-    Function *MemHashFn = M->getFunction("runtime.memhash");
-    Type *PtrType = PointerType::get(Context, 0);
-    if (MemHashFn != nullptr) {
-      assert(MemHashFn->arg_size() == 3 && "intrinsic invariant");
-      for (auto *CI : StrHashs) {
-        IRBuilder<> Builder(CI);
-
-        unsigned ArgBegin = 0;
-        // memhash32 and memhash64 have two parameters.
-        // However, they could used as the type->hasher via function pointer
-        if (CI->arg_size() == 2) {
-          ArgBegin = 0;
-        } else if (CI->arg_size() == 3) {
-          if (!TangoLLVM::isGoClosureCall(CI)) {
-            report_fatal_error("inconsistent arg size of strhash");
-          }
-          ArgBegin = 1;
-        } else {
-          report_fatal_error("inconsistent arg size of strhash");
-        }
-
-        Value *AX = CI->getArgOperand(ArgBegin + 0);
-        Value *BX = CI->getArgOperand(ArgBegin + 1);
-
-        Value *Ptr = Builder.CreateLoad(PtrType, AX);
-        Value *Len = Builder.CreateLoad(i64, Builder.CreateConstGEP1_32(i8,
-              Builder.CreateBitCast(AX, i8ptr), 8));
-
-        auto *NewCI = Builder.CreateCall(MemHashFn, {Ptr, BX, Len});
-        NewCI->setCallingConv(CI->getCallingConv());
-        assert(CI->getType() == NewCI->getType() && "strhash should have the same return value as memhash");
-        CI->replaceAllUsesWith(NewCI);
-        CI->eraseFromParent();
-        Changed = true;
+    bool LocalChanged = false;
+    for (auto *CI : StrHashs) {
+      if (TangoLLVM::intrinsifyStrHash(CI)) {
+        LocalChanged = true;
       }
+    }
+    if (LocalChanged) {
+      Changed = true;
+      NewMemHashs = true;
+      for (BasicBlock &BB : F)
+        SimplifyInstructionsInBlock(&BB);
     }
   }
 
-  if (MemHashs.empty()) {
-    return Changed;
+  if (NewMemHashs) {
+    // StrHash introduce new MemHash
+    // Collect them again
+    MemHashs.clear();
+    for (Instruction &I : instructions(F)) {
+      CallInst *CI = dyn_cast<CallInst>(&I);
+      if (!CI)
+        continue;
+
+      Function *Callee = CI->getCalledFunction();
+      if (!Callee) {
+        continue;
+      }
+
+      StringRef Name = Callee->getName();
+      if (Name == "runtime.memhash") {
+        MemHashs.push_back(CI);
+      }
+    }
   }
-
-  // TODO: Move to X86 specific files
-  Intrinsic::ID ID = Function::lookupIntrinsicID("llvm.x86.aesni.aesenc");
-  if (ID == 0)
-    return Changed;
-
-  Type *i32 = Type::getInt32Ty(Context);
-  VectorType * v2i64 = FixedVectorType::get(i64, 2);
-
-  GlobalVariable *G = M->getGlobalVariable("runtime.aeskeysched");
-  if (G == nullptr) {
-    G = TangoLLVM::createGoGlobalVariable(i8, GlobalValue::ExternalLinkage, "runtime.aeskeysched", M);
-  }
-  Value *G16 = ConstantExpr::getGetElementPtr(i8, G, ConstantInt::get(i32, 16));
-  Value *G32 = ConstantExpr::getGetElementPtr(i8, G, ConstantInt::get(i32, 32));
-
-  Value *Zero = ConstantInt::get(i32, 0);
-  Value  *One = ConstantInt::get(i32, 1);
 
   for (auto *CI : MemHashs) {
-    IRBuilder<> Builder(CI);
-
-    unsigned ArgBegin = 0;
-    // memhash32 and memhash64 have two parameters.
-    // However, they could used as the type->hasher via function pointer
-    if (CI->arg_size() == 2) {
-      ArgBegin = 0;
-    } else if (CI->arg_size() == 3) {
-      if (!TangoLLVM::isGoClosureCall(CI)) {
-        report_fatal_error("inconsistent arg size of memhash32 or memhash64");
-      }
-      ArgBegin = 1;
-    } else {
-      report_fatal_error("inconsistent arg size of memhash32 or memhash64");
-    }
-
-    Value *AX = CI->getArgOperand(ArgBegin + 0);
-    Value *BX = CI->getArgOperand(ArgBegin + 1);
-
-    Function *Callee = CI->getCalledFunction();
-    if (!Callee) {
-      Callee = dyn_cast<Function>(CI->getCalledOperand()->stripPointerCasts());
-    }
-
-    assert(Callee != nullptr && "invariant");
-
-    Value *X0 = UndefValue::get(v2i64);
-    X0 = Builder.CreateInsertElement(X0, BX, Zero);
-    if (Callee->getName() == "runtime.memhash32") {
-      X0 = Builder.CreateInsertElement(X0, Builder.CreateZExt(Builder.CreateLoad(i32, AX), i64), One);
-    } else if (Callee->getName() == "runtime.memhash64") {
-      X0 = Builder.CreateInsertElement(X0, Builder.CreateLoad(i64, AX), One);
-    } else {
-      report_fatal_error("hash intrinsics not implemented yet");
-    }
-
-    X0 = Builder.CreateIntrinsic(ID, {}, {X0, Builder.CreateLoad(v2i64, G)});
-    X0 = Builder.CreateIntrinsic(ID, {}, {X0, Builder.CreateLoad(v2i64, G16)});
-    X0 = Builder.CreateIntrinsic(ID, {}, {X0, Builder.CreateLoad(v2i64, G32)});
-    AX = Builder.CreateExtractElement(X0, Zero);
-
-    CI->replaceAllUsesWith(AX);
-    CI->eraseFromParent();
-    Changed = true;
+    if (TangoLLVM::intrinsifyMemHash(CI))
+      Changed = true;
   }
 
   return Changed;

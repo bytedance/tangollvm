@@ -51,6 +51,11 @@ class TangoLLVM {
 
 public:
 
+  static bool intrinsifyMemClr(CallInst *CI);
+  static bool intrinsifyStrHash(CallInst *CI);
+  static bool intrinsifyMemHash32Or64(CallInst *CI);
+  static bool intrinsifyMemHash(CallInst *CI);
+
   static bool hasGoPanicReturn(const BasicBlock *BB) {
     return BB->getGoPanicReturnCall() != nullptr;
   }

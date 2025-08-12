@@ -37,7 +37,6 @@
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
-#include "llvm/TangoLLVM/TangoLLVM.h"
 #include "llvm/IR/ValueHandle.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
@@ -210,12 +209,6 @@ static bool tailMergeBlocksWithSimilarFunctionTerminators(Function &F,
 
     // Canonical blocks are uniqued based on the terminator type (opcode).
     Structure[Term->getOpcode()].emplace_back(&BB);
-  }
-
-  // We do not merge return block because of Go's special calling convention.
-  if (TangoLLVM::isGoABIInternal(F)) {
-    if (Structure.size() <= 4)
-      return false;
   }
 
   bool Changed = false;
