@@ -112,7 +112,7 @@ void MCGoAuxData::beginModule(Module *M) {
     StringRef GoVersion = cast<MDString>(CUNodes->getOperand(0)->getOperand(0))->getString();
     int GoMinorVersion = 0;
     if (std::sscanf(GoVersion.data(), "go1.%d", &GoMinorVersion)) {
-      if (GoMinorVersion >= 22) {
+      if (GoMinorVersion >= 21) {
         FuncInfoHasStartLine = true;
       }
     }
