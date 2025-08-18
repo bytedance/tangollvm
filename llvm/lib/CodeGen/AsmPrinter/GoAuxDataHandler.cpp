@@ -284,6 +284,16 @@ void MCGoAuxData::computeFunctionSP(const MachineFunction *MF) {
 
   const MachineFrameInfo &MFI = MF->getFrameInfo();
   const MachineBasicBlock *DeferMBB = nullptr;
+
+  bool RequireFP = true;
+  assert(MF->getFunction().hasFnAttribute("go-no-frame-checked") && "See checkGoFrame in PEI");
+  auto Attr = MF->getFunction().getFnAttribute("go-no-frame-checked").getValueAsString();
+  if (Attr == "true") {
+    RequireFP = false;
+  }
+
+  uint64_t StackSize = MFI.getStackSize();
+
   // DeferReturn
   for (const auto &MBB : *MF) {
     if (MBB.isEntryBlock())
@@ -304,7 +314,9 @@ void MCGoAuxData::computeFunctionSP(const MachineFunction *MF) {
       if (!TangoLLVMCodeGen::isDeferReturnCall(MI)) {
         report_fatal_error("must be defer return");
       }
-      PreBBSP[&MBB] = SPFlow(MFI.getStackSize(), 0);
+
+      assert(RequireFP && "invariant");
+      PreBBSP[&MBB] = SPFlow(StackSize, 0);
       if (DeferMBB != nullptr) {
         report_fatal_error("should have only one deferreturn");
       }
@@ -418,8 +430,13 @@ void MCGoAuxData::computeFunctionSP(const MachineFunction *MF) {
     if (LastSP != PreSP) {
       assert(!MBB.isEntryBlock() && "entry should be zero sp");
       auto PrevMBB = &*std::prev(MBB.getIterator());
-      while (PrevMBB->empty()) {
+      while (true) {
         assert(!PrevMBB->isEntryBlock() && "entry should not be empty");
+        if (!PrevMBB->empty() && llvm::any_of(PrevMBB->instrs(), [&](const MachineInstr &MI) {
+                return !MI.isMetaInstruction();
+              })) {
+          break;
+        }
         PrevMBB = &*std::prev(PrevMBB->getIterator());
       }
       assert(!PrevMBB->empty() && "TODO");
@@ -431,12 +448,20 @@ void MCGoAuxData::computeFunctionSP(const MachineFunction *MF) {
         }
       }
       if (!IsPred) {
-        auto &MI = PrevMBB->back();
-        assert(!MI.isMetaInstruction());
         if (LastSP == 0) {
+          const MachineInstr *MI = nullptr;
+          for (auto I = PrevMBB->rbegin(), E = PrevMBB->rend(); I != E; ++I) {
+            if (I->isMetaInstruction())
+              continue;
+            MI = &*I;
+            break;
+          }
+          if (MI == nullptr)
+            report_fatal_error("block has only meta instructions");
+
           assert(PreSP != 0 && "invariant: LastSP != PreSP ");
-          assert(!MI.isCall() && "invariant: only return or morestack-jmp can change non-zero to zero");
-          PostSPMap[&MI] = PreSP;
+          assert(!MI->isCall() && "invariant: only return or morestack-jmp can change non-zero to zero");
+          PostSPMap[MI] = PreSP;
         } else if (PreSP == 0) {
           // must not be Entry
           assert(LastSP != 0 && "invariant: LastSP != PreSP ");
@@ -1435,7 +1460,6 @@ static void emitDeferStackMap(const Function *Fn, AsmPrinter *Asm, std::vector<s
 static void emitEntryStackMap(const Function *Fn, const DataLayout &DL, uint32_t &MaxSize, std::vector<uint8_t> &Map) {
   if (!Fn->hasFnAttribute("go-split"))
     return;
-
   int64_t MaxIndex = -1;
   const unsigned PtrSize = DL.getPointerSize();
   if (PtrSize != 8)

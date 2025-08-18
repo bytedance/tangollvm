@@ -3574,9 +3574,9 @@ leafSearchDone:
       return CheckMBB2;
     };
 
-    checkMBB2 = InsertCheck(checkMBB, allocMBB);
     // We need this to change sp to zero before call morestack
     BuildMI(allocMBB, DL, TII.get(X86::NOOP));
+    checkMBB2 = InsertCheck(checkMBB, allocMBB);
 
     if (auto n = MF.getFunction().getMetadata("go.caller.args.area")) {
       assert(n->getNumOperands() >= 2 && "must have at least two operands");

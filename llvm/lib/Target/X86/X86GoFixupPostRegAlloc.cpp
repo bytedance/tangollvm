@@ -96,6 +96,7 @@ bool X86GoFixupPostRegAllocPass::rewriteGCWriteBarrier() {
   bool Changed = false;
   SmallVector<MachineInstr*, 8> ToBeRemoved;
   const X86InstrInfo *TII = MF->getSubtarget<X86Subtarget>().getInstrInfo();
+  const X86RegisterInfo *TRI = MF->getSubtarget<X86Subtarget>().getRegisterInfo();
   // Need to remove call setup of KeepAlive
   unsigned FrameSetupOpcode = TII->getCallFrameSetupOpcode();
   unsigned FrameDestroyOpcode = TII->getCallFrameDestroyOpcode();
@@ -130,6 +131,15 @@ bool X86GoFixupPostRegAllocPass::rewriteGCWriteBarrier() {
         bool DestoryFound = false;
         // We use R14 to avoid spill of RBX
         bool ArgDefFound = false;
+
+        auto defineR14 = [&](MachineInstr &MI) {
+          for (const MCPhysReg &SubReg : TRI->subregs_inclusive(X86::R14)) {
+            if (MI.definesRegister(SubReg, nullptr))
+              return true;
+          }
+          return false;
+        };
+
         do {
           It = std::prev(It);
           if (!SetupFound && It->getOpcode() == FrameSetupOpcode) {
@@ -138,7 +148,7 @@ bool X86GoFixupPostRegAllocPass::rewriteGCWriteBarrier() {
             if (ArgDefFound)
               break;
           }
-          if (!ArgDefFound && It->definesRegister(X86::R14, nullptr)) {
+          if (!ArgDefFound && defineR14(*It)) {
             ArgDefFound = true;
             if (!It->isInlineAsm()) {
               // The only valid define of R14 is InlineAsm for calling ABI0
