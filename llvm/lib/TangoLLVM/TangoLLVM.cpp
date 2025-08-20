@@ -683,11 +683,9 @@ void TangoLLVM::updateMetadataForInlining(Function *Callee, Function *Caller) {
     // Caller's go.callee.args.area is too small, update
     auto newSize = ConstantAsMetadata::get(ConstantInt::get(
           Type::getInt64Ty(Caller->getContext()), CalleeArgAreaSize));
-    auto newType =
-      ConstantAsMetadata::get(ConstantAggregateZero::get(ArrayType::get(
-              Type::getInt8Ty(Caller->getContext()), CalleeArgAreaSize)));
+
     Caller->setMetadata("go.callee.args.area",
-        MDNode::get(Caller->getContext(), {newSize, newType}));
+        MDNode::get(Caller->getContext(), {newSize, newSize /* TODO: backward compatibility */}));
 
   }
 }

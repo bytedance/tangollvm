@@ -36,7 +36,6 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
-#include "llvm/TangoLLVM/TangoLLVM.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
@@ -225,7 +224,6 @@ PreservedAnalyses ModuleInlinerPass::run(Module &M,
 
     Changed = true;
     ++NumInlined;
-    TangoLLVM::updateMetadataForInlining(&Callee, CB->getCaller());
 
     LLVM_DEBUG(dbgs() << "    Size after inlining: " << F.getInstructionCount()
                       << "\n");

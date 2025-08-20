@@ -2951,6 +2951,9 @@ llvm::InlineResult llvm::InlineFunction(CallBase &CB, InlineFunctionInfo &IFI,
     if (MergeAttributes)
       AttributeFuncs::mergeAttributesForInlining(*Caller, *CalledFunc);
 
+    if (TangoLLVM::isGoABIInternal(*Caller))
+      TangoLLVM::updateMetadataForInlining(CalledFunc, Caller);
+
     // We are now done with the inlining.
     return InlineResult::success();
   }
@@ -3112,6 +3115,9 @@ llvm::InlineResult llvm::InlineFunction(CallBase &CB, InlineFunctionInfo &IFI,
 
   if (MergeAttributes)
     AttributeFuncs::mergeAttributesForInlining(*Caller, *CalledFunc);
+
+  if (TangoLLVM::isGoABIInternal(*Caller))
+    TangoLLVM::updateMetadataForInlining(CalledFunc, Caller);
 
   return InlineResult::success();
 }

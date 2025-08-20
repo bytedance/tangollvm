@@ -49,7 +49,6 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
-#include "llvm/TangoLLVM/TangoLLVM.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Pass.h"
@@ -380,7 +379,6 @@ PreservedAnalyses InlinerPass::run(LazyCallGraph::SCC &InitialC,
               *CB, InlineConstants::FunctionInlineCostMultiplierAttributeName)
               .value_or(1);
 
-      Function *Caller = CB->getCaller();
       // Setup the data structure used to plumb customization into the
       // `InlineFunction` routine.
       InlineFunctionInfo IFI(
@@ -399,8 +397,6 @@ PreservedAnalyses InlinerPass::run(LazyCallGraph::SCC &InitialC,
       DidInline = true;
       InlinedCallees.insert(&Callee);
       ++NumInlined;
-      // TANGOLLVM
-      TangoLLVM::updateMetadataForInlining(&Callee, Caller);
 
       LLVM_DEBUG(dbgs() << "    Size after inlining: "
                         << F.getInstructionCount() << "\n");

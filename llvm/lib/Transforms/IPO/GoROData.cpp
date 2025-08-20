@@ -328,7 +328,6 @@ static bool specializeGoBuiltins(Function &F, bool UseInline) {
       if (InlineRes.isSuccess()) {
         Changed = true;
         LLVM_DEBUG(dbgs() << "GoROData: " << F.getName() << ": inline a specialize function " << Callee->getName() << "\n");
-        TangoLLVM::updateMetadataForInlining(Callee, &F);
       }
     } else {
       CallInst *NewCI = specializeCall(F, CI, AggressiveSpecialization);
