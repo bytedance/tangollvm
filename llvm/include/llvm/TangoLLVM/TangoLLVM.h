@@ -96,6 +96,7 @@ public:
   // Fill the metadata back to tracked instructions
   static void harvestGoMetadata(Function &F, ArrayRef<GoMetadata> WL);
 
+  static void updateGoCalleeAreaSize(Function &F, int64_t Size);
   static void updateMetadataForInlining(Function *Callee, Function *Caller);
 
   static bool isObsoleted(Function *Fn);
@@ -103,6 +104,20 @@ public:
 
   static bool isGoClosureCall(CallBase *CB) {
     return CB->hasFnAttr("go.closurecall");
+  }
+
+  static CallInst * lowerIntrinsic(IntrinsicInst *II);
+
+  static int64_t getCallSiteGoCallerAreaSize(CallBase *CB) {
+    if (CB->hasFnAttr("go.caller.area")) {
+      auto Attr = CB->getFnAttr("go.caller.area").getValueAsString();
+      int64_t Val;
+      if (!Attr.getAsInteger(10, Val)) {
+        return Val;
+      }
+    }
+    // no attr or no valid attr
+    return -1;
   }
 
   // Note that all these symbols must be builtin symbols, which means they always

@@ -34,7 +34,6 @@
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
-#include "llvm/CodeGen/IntrinsicLowering.h"
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/BasicBlock.h"
@@ -355,9 +354,8 @@ static bool convertIntrinsicsToCalls(Function &F) {
   }
 
   if (!Intrinsics.empty()) {
-    IntrinsicLowering IL(F.getParent()->getDataLayout());
     for (IntrinsicInst *II : Intrinsics) {
-      IL.LowerIntrinsicCall(II);
+      TangoLLVM::lowerIntrinsic(II);
     }
     return true;
   }
@@ -2171,11 +2169,17 @@ struct UpdateUse {
 static bool legalizeTangoLLVMIR(Function &F, DomTreeUpdater *DTU) {
   DenseMap<AllocaInst*, CallInst*> PreAllocated;
   SmallVector<CallInst*, 8> PanicReturns;
+  // CallerCalleeAreaSize is the max caller area size of all callees.
+  int64_t CallerCalleeAreaSize = 0;
   for (Instruction &I : instructions(F)) {
     if (AllocaInst *AI = dyn_cast<AllocaInst>(&I)) {
       (void)AI;
       assert(AI->getAlign() <= F.getParent()->getDataLayout().getStackAlignment() && "invariant");
     } else if (CallInst *CI = dyn_cast<CallInst>(&I)) {
+      int64_t CalleeCallerAreaSize = TangoLLVM::getCallSiteGoCallerAreaSize(CI);
+      if (CalleeCallerAreaSize >= CallerCalleeAreaSize)
+        CallerCalleeAreaSize = CalleeCallerAreaSize;
+
       if (CI->getIntrinsicID() == Intrinsic::go_preallocated) {
         Value *Arg = CI->getArgOperand(0);
         if (AllocaInst *AI = dyn_cast<AllocaInst>(Arg)) {
@@ -2196,6 +2200,46 @@ static bool legalizeTangoLLVMIR(Function &F, DomTreeUpdater *DTU) {
       }
     }
   }
+
+  {
+    // sanity check
+    MDNode *MD = F.getMetadata("go.callee.args.area");
+    if (MD == nullptr) {
+      // TODO: this may happen if we fail to lower a llvm.memmove to instructions
+      // We should ensure that all memmove from OpMove must be lowered to memcpy.inline.
+      if (CallerCalleeAreaSize != 0)
+        report_fatal_error("bad callee args area: should be zero");
+    } else {
+      int64_t CalleeArgAreaSize = dyn_cast<ConstantAsMetadata>(MD->getOperand(0))
+                                      ->getValue()->getUniqueInteger().getSExtValue();
+      if (CallerCalleeAreaSize > CalleeArgAreaSize) {
+        bool OnlyGoIntrinsicCall = true;
+        for (Instruction &I : instructions(F)) {
+          if (CallInst *CI = dyn_cast<CallInst>(&I)) {
+            if (CI->getIntrinsicID() != 0)
+              continue;
+            if (Function *Callee = CI->getCalledFunction()) {
+              if (Callee->getName() == "runtime.memmove" || Callee->getName() == "runtime.memclrNoHeapPointers")
+                continue;
+            }
+            OnlyGoIntrinsicCall = false;
+            break;
+          }
+        }
+        if (!OnlyGoIntrinsicCall) {
+#if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
+          F.dump();
+#endif
+          dbgs() << F.getName() << ": bad callee args size: " << CallerCalleeAreaSize << " vs. " << CalleeArgAreaSize << "\n";
+          report_fatal_error("bad callee args area");
+        } else {
+          // We need to update the callee size
+          TangoLLVM::updateGoCalleeAreaSize(F, CalleeArgAreaSize);
+        }
+      }
+    }
+  }
+
   bool Changed = false;
 
   if (!PanicReturns.empty())

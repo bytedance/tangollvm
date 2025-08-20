@@ -660,6 +660,17 @@ static int64_t getArgAreaSize(Function *F) {
   return 0;
 }
 
+
+void TangoLLVM::updateGoCalleeAreaSize(Function &F, int64_t Size) {
+  int64_t OldSize = getArgAreaSize(&F);
+  if (Size < OldSize)
+    report_fatal_error("TODO: we cannot update the callee size to a smaller size now");
+
+  auto NewSize = ConstantAsMetadata::get(ConstantInt::get( Type::getInt64Ty(F.getContext()), Size));
+  F.setMetadata("go.callee.args.area",
+                MDNode::get(F.getContext(), {NewSize, NewSize}));
+}
+
 // update go.callee.args.area metadata when inlining
 void TangoLLVM::updateMetadataForInlining(Function *Callee, Function *Caller) {
   if (Callee->hasMetadata("go.opendefer")) {
@@ -686,7 +697,6 @@ void TangoLLVM::updateMetadataForInlining(Function *Callee, Function *Caller) {
 
     Caller->setMetadata("go.callee.args.area",
         MDNode::get(Caller->getContext(), {newSize, newSize /* TODO: backward compatibility */}));
-
   }
 }
 
@@ -725,6 +735,89 @@ void TangoLLVM::markObsoleted(Function *Fn) {
   assert(NewFn->getName() == Name && "no renaming");
 }
 
+
+Function *getOrCreateGoFunction(FunctionType *Ty, GlobalValue::LinkageTypes Linkage,
+      StringRef N, Module *M) {
+  Function *Fn = M->getFunction(N);
+  if (Fn != nullptr)
+    return Fn;
+
+  Fn = TangoLLVM::createGoFunction(Ty, Linkage, N, M);
+  return Fn;
+}
+
+
+CallInst *TangoLLVM::lowerIntrinsic(IntrinsicInst *II) {
+  Module *M = II->getParent()->getParent()->getParent();
+  LLVMContext &Context = M->getContext();
+  const DataLayout &DL = M->getDataLayout();
+  Type *IntPtr = DL.getIntPtrType(Context);
+  Type *VoidTy = Type::getVoidTy(Context);
+  Intrinsic::ID ID = II->getIntrinsicID();
+
+  auto SetGoAttrs = [&](CallInst *CI, StringRef Val) {
+    auto Attrs = CI->getAttributes();
+    Attrs = Attrs.addFnAttribute(Context, "go.caller.area", Val);
+    CI->setAttributes(Attrs);
+  };
+
+  switch (ID) {
+  case Intrinsic::memcpy:
+    // TODO: no runtime.memcpy support. Lower to memmove instead.
+  case Intrinsic::memmove: {
+    // uintptr
+    IRBuilder<> Builder(II->getParent(), II->getIterator());
+    Value *Size = Builder.CreateIntCast(II->getArgOperand(2), IntPtr,
+                                        /* isSigned */ false);
+    Value *Ops[3];
+    Ops[0] = II->getArgOperand(0);
+    Ops[1] = II->getArgOperand(1);
+    Ops[2] = Size;
+
+    assert(Ops[0]->getType()->isPointerTy() && "must be pointer type");
+    assert(Ops[0]->getType() == Ops[1]->getType() && "must be pointer type");
+
+    FunctionType *FnTy = FunctionType::get(VoidTy, {Ops[0]->getType(), Ops[1]->getType(), IntPtr}, false);
+    Function *Fn = getOrCreateGoFunction(FnTy, GlobalValue::ExternalLinkage, "runtime.memmove", M);
+
+    CallInst *NewCI = Builder.CreateCall(Fn, Ops);
+    NewCI->setCallingConv(CallingConv::Go_Internal);
+    SetGoAttrs(NewCI, "24");
+    NewCI->setName(II->getName());
+    if (!II->use_empty())
+      II->replaceAllUsesWith(NewCI);
+    II->eraseFromParent();
+    return NewCI;
+  }
+  case Intrinsic::memset: {
+    IRBuilder<> Builder(II->getParent(), II->getIterator());
+    Value *Op0 = II->getArgOperand(0);
+    Value *Size = Builder.CreateIntCast(II->getArgOperand(2), IntPtr,
+                                        /* isSigned */ false);
+
+    Value *Ops[2];
+    Ops[0] = Op0;
+    Ops[1] = Size;
+
+    assert(Ops[0]->getType()->isPointerTy() && "must be pointer type");
+
+    FunctionType *FnTy = FunctionType::get(VoidTy, {Ops[0]->getType(), IntPtr}, false);
+    Function *Fn = getOrCreateGoFunction(FnTy, GlobalValue::ExternalLinkage, "runtime.memclrNoHeapPointers", M);
+
+    CallInst *NewCI = Builder.CreateCall(Fn, Ops);
+    NewCI->setCallingConv(CallingConv::Go_Internal);
+    SetGoAttrs(NewCI, "16");
+    NewCI->setName(II->getName());
+    if (!II->use_empty())
+      II->replaceAllUsesWith(NewCI);
+    II->eraseFromParent();
+    return NewCI;
+  }
+  default:
+    report_fatal_error("unsupported intrinsic");
+  }
+}
+
 Function *TangoLLVM::createGoFunction(FunctionType *Ty, GlobalValue::LinkageTypes Linkage,
       StringRef N, Module *M) {
   GlobalValue *GV = M->getNamedValue(N);
@@ -737,6 +830,8 @@ Function *TangoLLVM::createGoFunction(FunctionType *Ty, GlobalValue::LinkageType
   }
 
   Function *NewFn = Function::Create(Ty, Linkage, N, M);
+  // TODO: we only support ABI internal now
+  NewFn->setCallingConv(CallingConv::Go_Internal);
   NewFn->setMetadata("go.global", MDNode::get(M->getContext(), {}));
 
   if (GV) {

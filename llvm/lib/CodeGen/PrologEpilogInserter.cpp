@@ -1179,7 +1179,6 @@ void PEI::calculateFrameObjectOffsets(MachineFunction &MF) {
   if (TangoLLVM::isGoABIInternal(MF.getFunction())) {
     // this is a special Go function.
     if (auto n = MF.getFunction().getMetadata("go.callee.args.area")) {
-      assert(n->getNumOperands() == 2 && "must have at least two operands");
       int64_t CalleeArgAreaSize = dyn_cast<ConstantAsMetadata>(n->getOperand(0))
                                       ->getValue()
                                       ->getUniqueInteger()

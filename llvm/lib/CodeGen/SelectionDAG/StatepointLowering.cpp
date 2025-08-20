@@ -1083,19 +1083,21 @@ SelectionDAGBuilder::LowerStatepoint(const GCStatepointInst &I,
       if (Fn->getName() == "runtime.memmove") {
         // we can lower to memmove
         unsigned ArgBeginIndex = GCStatepointInst::CallArgsBeginPos;
-        SDValue Op1 = getValue(I.getOperand(ArgBeginIndex + 0));
-        SDValue Op2 = getValue(I.getOperand(ArgBeginIndex + 1));
-        SDValue Op3 = getValue(I.getOperand(ArgBeginIndex + 2));
-        SDValue MM = DAG.getMemmove(
-            getRoot(), getCurSDLoc(), Op1, Op2, Op3, Align(8), false,
-            cast<CallInst>(&I), std::optional<bool>(false),
-            MachinePointerInfo(I.getOperand(ArgBeginIndex + 0)),
-            MachinePointerInfo(I.getOperand(ArgBeginIndex + 1)),
-            I.getAAMetadata());
-        if (MM.getNode()) {
-          DAG.setRoot(MM);
-          setValue(&I, DAG.getIntPtrConstant(-1, getCurSDLoc()));
-          return;
+        if (isa<ConstantInt>(I.getOperand(ArgBeginIndex + 2))) {
+          SDValue Op1 = getValue(I.getOperand(ArgBeginIndex + 0));
+          SDValue Op2 = getValue(I.getOperand(ArgBeginIndex + 1));
+          SDValue Op3 = getValue(I.getOperand(ArgBeginIndex + 2));
+          SDValue MM = DAG.getMemmove(
+              getRoot(), getCurSDLoc(), Op1, Op2, Op3, Align(8), false,
+              cast<CallInst>(&I), std::optional<bool>(false),
+              MachinePointerInfo(I.getOperand(ArgBeginIndex + 0)),
+              MachinePointerInfo(I.getOperand(ArgBeginIndex + 1)),
+              I.getAAMetadata());
+          if (MM.getNode()) {
+            DAG.setRoot(MM);
+            setValue(&I, DAG.getIntPtrConstant(-1, getCurSDLoc()));
+            return;
+          }
         }
       }
     }
