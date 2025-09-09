@@ -924,6 +924,8 @@ static Value* findBaseDefiningValue(Value *I) {
     // If the base is Alloca, we can always return the Alloca as the base.
     // The GEP must be within bounds since the address of an Alloca is determined
     // during layout frames.
+    // Later in MIR, we will clone each Alloca in MIR (e.g., LEA64r FrameIndex) after
+    // each state point before each use.
     Value* PtrBase = GEP->getPointerOperand();
     PtrBase = PtrBase->stripPointerCasts();
     if (isa<AllocaInst>(PtrBase) || isGoPreAllocated(PtrBase))
@@ -3302,12 +3304,20 @@ static bool moveITPToDefAndPTIToUse(Function &F) {
       PTIs.push_back(PTI);
 
   if (MoveITPToDef) {
+    DenseMap<Instruction*, Instruction*> SrcToITP;
     for (Instruction *ITP : ITPs) {
       Instruction *Src = dyn_cast<Instruction>(ITP->getOperand(0));
       if (Src == nullptr)
         continue;
 
       Changed = true;
+      auto I = SrcToITP.find(Src);
+      if (I != SrcToITP.end()) {
+        ITP->replaceAllUsesWith(I->second);
+        ITP->eraseFromParent();
+        continue;
+      }
+      SrcToITP[Src] = ITP;
       if (isa<PHINode>(Src)) {
         ITP->moveBefore(Src->getParent()->getFirstNonPHIOrDbg());
       } else {
@@ -3624,7 +3634,6 @@ static void computeLiveInValues(BasicBlock::reverse_iterator Begin,
         // locally exploit facts without respect to global reachability.  This
         // can create sections of code which are dynamically unreachable and
         // contain just about anything.  (see constants.ll in tests)
-
         if (isAlloca(V, DVCache)) {
           Value *Base = isTrackedAlloca(V, DVCache);
           if (!Base) {
@@ -3907,9 +3916,9 @@ static void checkBackward(Function &F, Instruction* Start, const Type *PtrIntTy)
 
   // We only mark a value as pointer-like if all operands have
   // been checked.
-  if (Start->hasMetadata("go.pointerlike")) {
-    return;
-  }
+  // if (Start->hasMetadata("go.pointerlike")) {
+  //   return;
+  // }
 
   SmallSetVector<Value*, 32> Visited;
   std::vector<Instruction*> Stack;
@@ -3929,12 +3938,6 @@ static void checkBackward(Function &F, Instruction* Start, const Type *PtrIntTy)
     if (!I)
       return;
 
-    // Sink: stop propagation
-    if (isa<LoadInst>(V)
-        || isa<CallInst>(V)) {
-      return;
-    }
-
     // For better logging, check type here.
     // Must be i64 or <i64 x n> in 64bit system
     Type *T = V->getType()->getScalarType();
@@ -3942,12 +3945,20 @@ static void checkBackward(Function &F, Instruction* Start, const Type *PtrIntTy)
       return;
     }
 
+    StackVisitGuard Guard(&Stack, I);
+
+    // Sink: stop propagation
+    if (isa<LoadInst>(V)
+        || isa<CallInst>(V)) {
+      // TODO: we must mark the source of IntToPtr as Pointer as well.
+      return;
+    }
+
+    // We check pointers in the destructor of Guard
     if (Visited.count(V))
       return;
 
-    StackVisitGuard Guard(&Stack, I);
     Visited.insert(V);
-
 
     // Freeze, PHI, Select, ShuffleVector and Binary
     // are valid instructions for producing well-formed pointer-like values.
@@ -4183,6 +4194,14 @@ static void checkGoPointerLikeValues(Function &F) {
   for (Instruction &I : instructions(F)) {
     if (PtrToIntInst *PTI = dyn_cast<PtrToIntInst>(&I)) {
       checkForward(F, PTI, PtrIntTy);
+      continue;
+    }
+    if (IntToPtrInst *ITP = dyn_cast<IntToPtrInst>(&I)) {
+      // The Src of a IntToPtrInst must be a pointer-like value.
+      // If the Src does not derive from a PtrToInt, we probably have no need to track it.
+      // However, it produces many false warnings in the MIR fixup pass.
+      // Here, we simply mark the value as pointer-like value to avoid unnecessary false warnings.
+      checkBackward(F, ITP, PtrIntTy);
       continue;
     }
   }

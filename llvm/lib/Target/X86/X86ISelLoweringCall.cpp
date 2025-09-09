@@ -2165,42 +2165,7 @@ X86TargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
   GoAdHocABI goAdHocABI = GoAdHocABI::None;
   if (GlobalAddressSDNode *GA = dyn_cast<GlobalAddressSDNode>(Callee)) {
     StringRef CalleeName = GA->getGlobal()->getName();
-    if (CalleeName.starts_with("runtime.")) {
-      CalleeName = CalleeName.substr(8); // 8 = strlen("runtime.")
-      if (CalleeName == "gcWriteBarrier") {
-        // AdHoc Calling Convention and Preserve All General Purposes
-        goAdHocABI = GoAdHocABI::GoWriteBarrier;
-      } else if (CalleeName.starts_with("gcWriteBarrier")) {
-        // starts_with but not gcWriteBarrier
-        goAdHocABI = GoAdHocABI::GoWriteBarrierN;
-      } else if (CalleeName == "duffcopy") {
-        // C Calling Convention and Preserve All
-        goAdHocABI = GoAdHocABI::DuffCopy;
-      } else if (CalleeName == "duffzero") {
-        // C Calling Convention and Preserve All
-        goAdHocABI = GoAdHocABI::DuffZero;
-      } else if (CalleeName.starts_with("panic")) {
-        CalleeName = CalleeName.substr(5); // 5 = strlen("panic")
-        if (CalleeName == "Slice3Alen" || CalleeName == "Slice3AlenU"
-            || CalleeName == "Slice3Acap" || CalleeName == "Slice3AcapU"
-            || CalleeName == "SliceConvert") {
-          // DX, BX
-          goAdHocABI = GoAdHocABI::PanicBoundsA;
-        } else if (CalleeName == "SliceAlen" || CalleeName == "SliceAlenU"
-            || CalleeName == "SliceAcap" || CalleeName == "SliceAcapU"
-           || CalleeName == "Slice3B" || CalleeName == "Slice3BU") {
-          // CX, DX
-          goAdHocABI = GoAdHocABI::PanicBoundsB;
-        } else if (CalleeName == "Index" || CalleeName == "IndexU"
-            || CalleeName == "SliceB" || CalleeName == "SliceBU"
-           || CalleeName == "Slice3C" || CalleeName == "Slice3CU") {
-          // AX, CX
-          goAdHocABI = GoAdHocABI::PanicBoundsC;
-        }
-      } else if (CalleeName == "KeepAlive") {
-        goAdHocABI = GoAdHocABI::KeepAlive;
-      }
-    }
+    goAdHocABI = TangoLLVM::getGoAdHocABI(CalleeName);
   }
 
   MachineFunction::CallSiteInfo CSInfo;

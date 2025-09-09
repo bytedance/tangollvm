@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-09-09.
 //===----------------------------------------------------------------------===//
 //
 // This file contains utility functions and a wrapper class analogous to
@@ -124,6 +126,9 @@ public:
     return FT->getReturnType();
   }
 
+  FunctionType *getActualFunctionType() const {
+    return cast<FunctionType>(getParamElementType(CalledFunctionPos));
+  }
 
   /// Return the number of arguments to the underlying call.
   size_t actual_arg_size() const { return getNumCallArgs(); }

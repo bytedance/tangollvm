@@ -77,6 +77,47 @@ public:
         .Default(false);
   }
 
+  static GoAdHocABI getGoAdHocABI(StringRef Name) {
+    GoAdHocABI goAdHocABI = GoAdHocABI::None;
+    if (Name.starts_with("runtime.")) {
+      Name = Name.substr(8); // 8 = strlen("runtime.")
+      if (Name == "gcWriteBarrier") {
+        // AdHoc Calling Convention and Preserve All General Purposes
+        goAdHocABI = GoAdHocABI::GoWriteBarrier;
+      } else if (Name.starts_with("gcWriteBarrier")) {
+        // starts_with but not gcWriteBarrier
+        goAdHocABI = GoAdHocABI::GoWriteBarrierN;
+      } else if (Name == "duffcopy") {
+        // C Calling Convention and Preserve All
+        goAdHocABI = GoAdHocABI::DuffCopy;
+      } else if (Name == "duffzero") {
+        // C Calling Convention and Preserve All
+        goAdHocABI = GoAdHocABI::DuffZero;
+      } else if (Name.starts_with("panic")) {
+        Name = Name.substr(5); // 5 = strlen("panic")
+        if (Name == "Slice3Alen" || Name == "Slice3AlenU"
+            || Name == "Slice3Acap" || Name == "Slice3AcapU"
+            || Name == "SliceConvert") {
+          // DX, BX
+          goAdHocABI = GoAdHocABI::PanicBoundsA;
+        } else if (Name == "SliceAlen" || Name == "SliceAlenU"
+            || Name == "SliceAcap" || Name == "SliceAcapU"
+           || Name == "Slice3B" || Name == "Slice3BU") {
+          // CX, DX
+          goAdHocABI = GoAdHocABI::PanicBoundsB;
+        } else if (Name == "Index" || Name == "IndexU"
+            || Name == "SliceB" || Name == "SliceBU"
+           || Name == "Slice3C" || Name == "Slice3CU") {
+          // AX, CX
+          goAdHocABI = GoAdHocABI::PanicBoundsC;
+        }
+      } else if (Name == "KeepAlive") {
+        goAdHocABI = GoAdHocABI::KeepAlive;
+      }
+    }
+    return goAdHocABI;
+  }
+
   static bool intrinsifyMemClr(CallInst *CI);
   static bool intrinsifyStrHash(CallInst *CI);
   static bool intrinsifyMemHash32Or64(CallInst *CI);
