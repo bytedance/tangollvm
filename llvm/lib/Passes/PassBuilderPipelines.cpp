@@ -308,6 +308,10 @@ static cl::opt<bool> UseLoopVersioningLICM(
     "enable-loop-versioning-licm", cl::init(false), cl::Hidden,
     cl::desc("Enable the experimental Loop Versioning LICM pass"));
 
+static cl::opt<bool> UseGoGlobalInitRestoreOpt(
+    "enable-go-global-init-opt", cl::init(true), cl::Hidden,
+    cl::desc("Enable generate initializer & restore go global var passes."));
+
 namespace llvm {
 extern cl::opt<bool> EnableMemProfContextDisambiguation;
 
@@ -1602,14 +1606,22 @@ PassBuilder::buildPerModuleDefaultPipeline(OptimizationLevel Level,
   // Add the core simplification pipeline.
   MPM.addPass(buildModuleSimplificationPipeline(Level, LTOPhase));
 
-  if (TM->getTargetTriple().isGoEnvironment())
+  if (TM->getTargetTriple().isGoEnvironment()) {
     MPM.addPass(GoRODataPass(GoRODataOptions(true)));
+    if (UseGoGlobalInitRestoreOpt) {
+      MPM.addPass(GORoDataInitializerPass());
+    }
+  }
 
   // Now add the optimization pipeline.
   MPM.addPass(buildModuleOptimizationPipeline(Level, LTOPhase));
 
-  if (TM->getTargetTriple().isGoEnvironment())
-     MPM.addPass(GoRODataPass(GoRODataOptions(true)));
+  if (TM->getTargetTriple().isGoEnvironment()) {
+    if (UseGoGlobalInitRestoreOpt) {
+      MPM.addPass(GORoDataRestorePass());
+    }
+    MPM.addPass(GoRODataPass(GoRODataOptions(true)));
+  }
 
   if (PGOOpt && PGOOpt->PseudoProbeForProfiling &&
       PGOOpt->Action == PGOOptions::SampleUse)
@@ -1772,8 +1784,12 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
   // in the current module.
   MPM.addPass(CrossDSOCFIPass());
 
-  if (TM->getTargetTriple().isGoEnvironment())
+  if (TM->getTargetTriple().isGoEnvironment()) {
     MPM.addPass(GoRODataPass(GoRODataOptions(true)));
+    if (UseGoGlobalInitRestoreOpt) {
+      MPM.addPass(GORoDataInitializerPass());
+    }
+  }
 
   if (Level == OptimizationLevel::O0) {
     // The WPD and LowerTypeTest passes need to run at -O0 to lower type
@@ -2010,7 +2026,6 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
   LPM.addPass(IndVarSimplifyPass());
   LPM.addPass(LoopDeletionPass());
   // FIXME: Add loop interchange.
-
   // Unroll small loops and perform peeling.
   LPM.addPass(LoopFullUnrollPass(Level.getSpeedupLevel(),
                                  /* OnlyWhenForced= */ !PTO.LoopUnrolling,
@@ -2071,8 +2086,12 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
   MPM.addPass(EliminateAvailableExternallyPass());
 
   // Previous optimizations may lead to new opportunity for GoROData
-  if (TM->getTargetTriple().isGoEnvironment())
+  if (TM->getTargetTriple().isGoEnvironment()) {
+    if (UseGoGlobalInitRestoreOpt) {
+      MPM.addPass(GORoDataRestorePass());
+    }
     MPM.addPass(GoRODataPass(GoRODataOptions(false)));
+  }
 
   // Now that we have optimized the program, discard unreachable functions.
   MPM.addPass(GlobalDCEPass(/*InLTOPostLink=*/true));

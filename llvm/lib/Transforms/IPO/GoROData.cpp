@@ -10,24 +10,25 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/Transforms/IPO/GoROData.h"
-#include "llvm/Transforms/Utils/Cloning.h"
-#include "llvm/Transforms/Utils/Local.h"
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/Analysis/InstructionSimplify.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Intrinsics.h"
-#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
-#include "llvm/TangoLLVM/TangoLLVM.h"
 #include "llvm/Support/Alignment.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/TangoLLVM/TangoLLVM.h"
+#include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Transforms/Utils/Local.h"
 using namespace llvm;
 
 
@@ -366,7 +367,6 @@ static bool replaceLoadROData(Function &F) {
           << " by constant value ";
           if (NewValue->hasName()) { dbgs() << NewValue->getName(); } else { dbgs() <<  *NewValue; }
           dbgs() << "\n");
-
       for (auto &U : LI->uses()) {
         if (LoadInst *NewLI = dyn_cast<LoadInst>(U.getUser())) {
           Worklist.insert(NewLI);
@@ -646,4 +646,143 @@ Value* TangoLLVM::simplifyLoadGoROData(LoadInst *LI) {
     return nullptr;
   const DataLayout &DL = LI->getDataLayout();
   return TangoLLVM::resolveLoadROData(LI, DL);
+}
+
+static GlobalVariable* materializeROInit(const GlobalVariable &G, Module &M) {
+  auto *Top = dyn_cast_or_null<MDNode>(G.getMetadata("go.rodata"));
+  if (!Top) return nullptr;
+
+  auto *MDBytes = dyn_cast<MDString>(Top->getOperand(0));
+  if (!MDBytes) return nullptr;
+  StringRef Bytes = MDBytes->getString();
+
+  SmallVector<GoReloc, 8> R;
+  if (Top->getNumOperands() >= 2) {
+    auto *MDRel = cast<MDNode>(Top->getOperand(1));
+    for (unsigned i = 0; i + 4 < MDRel->getNumOperands(); i += 5) {
+      auto getI64 = [&](unsigned idx)->int64_t {
+        auto *C = cast<ConstantAsMetadata>(MDRel->getOperand(i+idx));
+        return cast<ConstantInt>(C->getValue())->getSExtValue();
+      };
+
+      int64_t enabled = getI64(0);
+      uint64_t off    = (uint64_t)getI64(1);
+      uint64_t siz    = (uint64_t)getI64(2);
+      int64_t addend  = getI64(3);
+
+      if (enabled == 0) {
+        return nullptr;
+      }
+      StringRef sym;
+      if (auto *S = dyn_cast<MDString>(MDRel->getOperand(i+4)))
+        sym = S->getString();
+
+      if (enabled == 1 && siz == 8 && off + 8 <= Bytes.size())
+        R.push_back({off, addend, sym.str()});
+    }
+  }
+
+  sort(R, [](auto &a, auto &b){ return a.off < b.off; });
+
+  LLVMContext &C = M.getContext();
+  Type *I8  = Type::getInt8Ty(C);
+  Type *Ptr = PointerType::getUnqual(C);
+
+  SmallVector<Type*,   16> FieldsT;
+  SmallVector<Constant*,16> FieldsV;
+
+  uint64_t cur = 0;
+  auto addBytes = [&](uint64_t len) {
+    if (!len) return;
+    auto slice = ArrayRef<uint8_t>((const uint8_t*)Bytes.data() + cur, len);
+    FieldsT.push_back(ArrayType::get(I8, len));
+    FieldsV.push_back(ConstantDataArray::get(C, slice));
+    cur += len;
+  };
+
+  for (auto &re : R) {
+    if (re.off > cur) addBytes(re.off - cur);
+
+    Constant *P = ConstantPointerNull::get(cast<PointerType>(Ptr));
+    if (!re.sym.empty()) {
+      if (GlobalValue *GV = M.getNamedValue(re.sym)) {
+        P = ConstantExpr::getBitCast(GV, Ptr);
+      }
+    }
+    if (re.addend != 0) {
+      P = ConstantExpr::getInBoundsGetElementPtr(
+            I8, P, ConstantInt::get(Type::getInt64Ty(C), re.addend));
+    }
+    FieldsT.push_back(Ptr);
+    FieldsV.push_back(P);
+    cur = re.off + 8;
+  }
+  if (cur < Bytes.size()) addBytes(Bytes.size() - cur);
+
+  StructType *ST = StructType::get(C, FieldsT, /*packed=*/false);
+  Constant   *Init = ConstantStruct::get(ST, FieldsV);
+
+  auto *Mat = new GlobalVariable(M, ST,
+      /*isConstant=*/true,
+      GlobalValue::LinkOnceODRLinkage,
+      Init,
+      G.getName() + ".mat");
+
+  Mat->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
+  Mat->setAlignment(Align(8));
+  Mat->setMetadata("go.rodata.materialized",
+                   MDNode::get(C, {}));
+  return Mat;
+}
+
+PreservedAnalyses GORoDataInitializerPass::run(Module &M, ModuleAnalysisManager &) {
+  for (GlobalVariable &GV : M.globals()) {
+    GlobalVariable *NG = materializeROInit(GV, M);
+    if (NG == nullptr) {
+      continue;
+    }
+
+    std::string OldName = GV.getName().str();
+    GV.setName(OldName + ".old");
+    auto *Aliasee = ConstantExpr::getBitCast(NG, PointerType::get(GV.getValueType(), GV.getAddressSpace()));
+    auto *GA = GlobalAlias::create(
+        GV.getValueType(), /*addrspace=*/GV.getAddressSpace(), GlobalValue::ExternalLinkage,
+        /*Name=*/OldName + "$newalias",
+        Aliasee, &M);
+    GV.replaceAllUsesWith(GA);
+  }
+  return PreservedAnalyses::none();
+}
+
+PreservedAnalyses GORoDataRestorePass::run(Module &M, ModuleAnalysisManager &) {
+  SmallVector<GlobalAlias*, 16> Targets;
+  for (GlobalAlias &A : M.aliases()) {
+    if (!A.hasName()) continue;
+    if (!A.getName().ends_with("$newalias")) continue;
+    Targets.push_back(&A);
+  }
+
+  for (GlobalAlias *GA : Targets) {
+    StringRef AliasName = GA->getName();                // "<base>$newalias"
+    StringRef Base = AliasName.drop_back(strlen("$newalias"));
+
+    GlobalVariable *Old = M.getGlobalVariable((Base + ".old").str());
+    GlobalVariable *Mat = M.getGlobalVariable((Base + ".mat").str());
+
+    GlobalVariable *Rest = Old;
+    if (!Rest) {
+      assert(Rest && "old global value should live.");
+    } else {
+      if (Old->getName() != Base) Old->setName(Base);
+      Old->setLinkage(GlobalValue::ExternalLinkage);
+      Old->setInitializer(nullptr);
+      Old->setConstant(false);
+    }
+
+    GA->replaceAllUsesWith(Rest);
+    GA->eraseFromParent();
+    if (Mat) Mat->eraseFromParent();
+  }
+
+  return PreservedAnalyses::none();
 }

@@ -1485,6 +1485,7 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
     }
   }
 
+  Value *CallTarget = Call->getCalledOperand();
   ArrayRef<Value *> GCArgs(PtrFields);
 
   uint64_t StatepointID = ID;
@@ -1493,7 +1494,6 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
 
   ArrayRef<Use> CallArgs(Call->arg_begin(), Call->arg_end());
 
-  Value *CallTarget = Call->getCalledOperand();
 
   // Create the statepoint given all the arguments
   GCStatepointInst *Token = nullptr;
@@ -1763,6 +1763,12 @@ static bool insertParsePoints(Function &F, DominatorTree &DT, LoopInfo &LI,
   // large numbers of duplicate base_phis.
   DefiningValueMapTy DVCache;
 
+  SmallSet<Value*, 32> CallOpSet;
+  for (Instruction &I : instructions(F)) {
+    if (isa<CallInst>(I)) {
+      CallOpSet.insert(cast<CallInst>(&I)->getCalledOperand());
+    }
+  }
 
   // A) Identify all gc pointers which are statically live at the given call
   // site.
@@ -1784,10 +1790,12 @@ static bool insertParsePoints(Function &F, DominatorTree &DT, LoopInfo &LI,
   // if the base is constant.
   // Also make sure bad loads are not included in the liveset.
   for (auto &Info : Records)
-    for (auto &BasePair : Info.PointerToBase)
+    for (auto &BasePair : Info.PointerToBase) {
       if (isa<Constant>(BasePair.second)
-          || isGoConstantPointer(BasePair.second))
+          || isGoConstantPointer(BasePair.second)
+          || CallOpSet.contains(BasePair.first))
         Info.LiveSet.remove(BasePair.first);
+    }
 
   // We need this to safely RAUW and delete call or invoke return values that
   // may themselves be live over a statepoint.  For details, please see usage in
@@ -2234,7 +2242,7 @@ static bool legalizeTangoLLVMIR(Function &F, DomTreeUpdater *DTU) {
           report_fatal_error("bad callee args area");
         } else {
           // We need to update the callee size
-          TangoLLVM::updateGoCalleeAreaSize(F, CalleeArgAreaSize);
+          TangoLLVM::updateGoCalleeAreaSize(F, CallerCalleeAreaSize);
         }
       }
     }
@@ -2369,6 +2377,27 @@ static bool moveITPToDefAndPTIToUse(Function &F) {
         ITP->moveAfter(Src);
       }
     }
+
+    SmallVector<IntToPtrInst*, 8> ToCheck;
+    for (Instruction &I : instructions(F)) {
+      for (User *U : I.users()) {
+        if (auto *ITP = dyn_cast<IntToPtrInst>(U)) {
+          if (ITP->getOperand(0) == &I)
+            ToCheck.push_back(ITP);
+        }
+      }
+    }
+
+    DenseMap<Instruction*, IntToPtrInst*> Canonical;
+    for (auto *ITP : ToCheck) {
+      auto *Key = dyn_cast<Instruction>(ITP->getOperand(0));
+      if (auto *C = Canonical.lookup(Key)) {
+        ITP->replaceAllUsesWith(C);
+        ITP->eraseFromParent();
+      } else {
+        Canonical[Key] = ITP;
+      }
+    }
   }
 
   if (MovePTIToUse) {
@@ -2472,10 +2501,10 @@ bool GoStatepoints::runOnFunction(Function &F, DominatorTree &DT,
 
   // Rewrite all the calls that need statepoints to invokes, so we can
   // attach a stack map through its landing pad.
-  SmallVector<CallInst *, 64> Calls;
-  for (Instruction &I : instructions(F))
-    if (NeedsRewrite(I) && isa<CallInst>(I))
-      Calls.push_back(cast<CallInst>(&I));
+  // SmallVector<CallInst *, 64> Calls;
+  // for (Instruction &I : instructions(F))
+  //   if (NeedsRewrite(I) && isa<CallInst>(I))
+  //     Calls.push_back(cast<CallInst>(&I));
 
   // We should not run removeUnreachableBlocks at this point, as it
   // will remove the dummy landing pads.
