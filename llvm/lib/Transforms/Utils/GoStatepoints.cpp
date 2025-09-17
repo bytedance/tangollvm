@@ -2173,6 +2173,32 @@ struct UpdateUse {
   }
 };
 
+// cast non-zero constant int to ptr, these instructions are generated
+// by optimizations, such as SROA
+// -------
+// %2 = phi ptr [null, b1], [%1 (alloca), b2]
+// statepoint
+// %3 = gep %2, 192
+// -->
+// %1.1 = gep %1, 192
+// %null.1 = inttoptr 192 // gep null, 192
+// %2 = phi ptr [%0, b1], [%1, b2]
+static bool isNonZeroConstantInt(Value *V) {
+  auto IsNonZeroConstantInt = [](Value *Tmp) {
+    if (ConstantInt *CI = dyn_cast<ConstantInt>(Tmp); CI && !CI->isZero())
+        return true;
+    return false;
+  };
+  if (IsNonZeroConstantInt(V)) {
+    return true;
+  }
+  if (auto *CE = dyn_cast<ConstantExpr>(V)) {
+    if (CE->getOpcode() == Instruction::IntToPtr)
+      if (IsNonZeroConstantInt(CE->getOperand(0)))
+        return true;
+  }
+  return false;
+}
 
 static bool legalizeTangoLLVMIR(Function &F, DomTreeUpdater *DTU) {
   DenseMap<AllocaInst*, CallInst*> PreAllocated;
@@ -2180,7 +2206,18 @@ static bool legalizeTangoLLVMIR(Function &F, DomTreeUpdater *DTU) {
   // CallerCalleeAreaSize is the max caller area size of all callees.
   int64_t CallerCalleeAreaSize = 0;
   for (Instruction &I : instructions(F)) {
-    if (AllocaInst *AI = dyn_cast<AllocaInst>(&I)) {
+    if (PHINode *PHI = dyn_cast<PHINode>(&I)) {
+      if (PHI->getType()->isPointerTy())
+        for (unsigned i = 0; i < PHI->getNumIncomingValues(); i++)
+          if (isNonZeroConstantInt(PHI->getIncomingValue(i))) {
+            TangoLLVM::markObsoleted(&F);
+            break;
+          }
+    } else if (IntToPtrInst *ITP = dyn_cast<IntToPtrInst>(&I)) {
+      if (isNonZeroConstantInt(ITP->getOperand(0))) {
+        TangoLLVM::markObsoleted(&F);
+      }
+    } else if (AllocaInst *AI = dyn_cast<AllocaInst>(&I)) {
       (void)AI;
       assert(AI->getAlign() <= F.getParent()->getDataLayout().getStackAlignment() && "invariant");
     } else if (CallInst *CI = dyn_cast<CallInst>(&I)) {

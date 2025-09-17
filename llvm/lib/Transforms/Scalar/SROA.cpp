@@ -5586,6 +5586,18 @@ bool SROA::promoteAllocas(Function &F) {
   return true;
 }
 
+static bool dontSROA(AllocaInst *AI) {
+  for (const User *U : AI->users())
+    if (const PHINode *PHI = dyn_cast<PHINode>(U))
+      for (unsigned i = 0, e = PHI->getNumIncomingValues(); i != e; ++i) {
+        Value *V = PHI->getIncomingValue(i);
+        if (Constant *C = dyn_cast<Constant>(V);
+            C && C->isNullValue())
+          return true;
+      }
+  return false;
+}
+
 std::pair<bool /*Changed*/, bool /*CFGChanged*/> SROA::runSROA(Function &F) {
   LLVM_DEBUG(dbgs() << "SROA function: " << F.getName() << "\n");
 
@@ -5594,6 +5606,9 @@ std::pair<bool /*Changed*/, bool /*CFGChanged*/> SROA::runSROA(Function &F) {
   for (BasicBlock::iterator I = EntryBB.begin(), E = std::prev(EntryBB.end());
        I != E; ++I) {
     if (AllocaInst *AI = dyn_cast<AllocaInst>(I)) {
+      if (TangoLLVM::hasGoGC(F) && dontSROA(AI))
+        continue;
+
       if (DL.getTypeAllocSize(AI->getAllocatedType()).isScalable() &&
           isAllocaPromotable(AI))
         PromotableAllocas.push_back(AI);
