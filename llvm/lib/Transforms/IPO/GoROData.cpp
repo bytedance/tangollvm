@@ -648,16 +648,193 @@ Value* TangoLLVM::simplifyLoadGoROData(LoadInst *LI) {
   return TangoLLVM::resolveLoadROData(LI, DL);
 }
 
+static bool expectZeroBytes(StringRef Bytes, size_t Pos, size_t Len) {
+  if (Pos + Len > (size_t)Bytes.size()) return false;
+  for (size_t i = 0; i < Len; ++i)
+    if (Bytes[Pos + i] != 0) return false;
+  return true;
+}
+
+static APInt readAPIntBits(StringRef Bytes, size_t Off,
+                           unsigned BitWidth, bool LittleEndian) {
+  assert((BitWidth % 8) == 0 && "bit width must be byte-multiple");
+  const unsigned N = BitWidth / 8;
+  APInt Val(BitWidth, 0);
+  if (LittleEndian) {
+    for (unsigned i = 0; i < N; ++i)
+      Val |= APInt(BitWidth, (uint64_t)(uint8_t)Bytes[Off + i]) << (8 * i);
+  } else {
+    for (unsigned i = 0; i < N; ++i)
+      Val |= APInt(BitWidth, (uint64_t)(uint8_t)Bytes[Off + i]) << (8 * (N - 1 - i));
+  }
+  return Val;
+}
+
+static Constant* buildConstFromBytes(Type *T, StringRef Bytes, size_t &Off,
+                                     const DataLayout &DL, LLVMContext &C,
+                                     std::string *Err = nullptr,
+                                     bool AllowNonZeroPointerWithoutReloc = false) {
+  auto emitErr = [&](StringRef S) -> Constant* {
+    if (Err) *Err = S.str();
+    return nullptr;
+  };
+
+  const bool LE = DL.isLittleEndian();
+  const uint64_t Store = DL.getTypeStoreSize(T);
+  const uint64_t Alloc = DL.getTypeAllocSize(T);
+
+  if (Off + Store > (uint64_t)Bytes.size())
+    return emitErr("insufficient bytes for type store size");
+
+  auto allZeroRange = [&](size_t From, size_t Len) -> bool {
+    return expectZeroBytes(Bytes, From, Len);
+  };
+
+  if (auto *ITy = dyn_cast<IntegerType>(T)) {
+    unsigned BW = ITy->getBitWidth();
+    assert(Store == BW / 8 && "integer store size mismatch");
+    APInt Bits = readAPIntBits(Bytes, Off, BW, LE);
+    Off += Store;
+    return ConstantInt::get(ITy, Bits);
+  }
+
+  if (T->isHalfTy() || T->isBFloatTy() || T->isFloatTy() ||
+      T->isDoubleTy() || T->isFP128Ty() || T->isX86_FP80Ty() ) {
+    unsigned BW = 8 * Store;
+    APInt Bits = readAPIntBits(Bytes, Off, BW, LE);
+    Off += Store;
+    Type *IBTy = IntegerType::get(C, BW);
+    Constant *IBits = ConstantInt::get(IBTy, Bits);
+    return ConstantExpr::getBitCast(IBits, T);
+  }
+
+  if (auto *PTy = dyn_cast<PointerType>(T)) {
+    uint64_t Need = DL.getPointerSize(PTy->getAddressSpace());
+    if (Need != Store)
+      return emitErr("pointer store size mismatch with DL");
+    bool AllZero = allZeroRange(Off, Need);
+    if (AllZero) {
+      Off += Need;
+      return ConstantPointerNull::get(PTy);
+    }
+    if (!AllowNonZeroPointerWithoutReloc)
+      return emitErr("non-zero pointer without relocation is unsupported");
+    APInt Bits = readAPIntBits(Bytes, Off, 8 * Need, LE);
+    Off += Need;
+    Type *IBTy = IntegerType::get(C, 8 * Need);
+    Constant *AsInt = ConstantInt::get(IBTy, Bits);
+    return ConstantExpr::getIntToPtr(AsInt, PTy);
+  }
+
+  if (auto *ATy = dyn_cast<ArrayType>(T)) {
+    SmallVector<Constant*, 16> Elems;
+    Elems.reserve(ATy->getNumElements());
+    Type *EltTy = ATy->getElementType();
+    uint64_t EltStore = DL.getTypeStoreSize(EltTy);
+    uint64_t EltAlloc = DL.getTypeAllocSize(EltTy);
+    size_t Base = Off; // 数组起点
+
+    for (uint64_t i = 0, n = ATy->getNumElements(); i < n; ++i) {
+      size_t Expected = Base + i * EltAlloc;
+      if (Off < Expected) {
+        if (!allZeroRange(Off, Expected - Off))
+          return emitErr("non-zero bytes found in array element tail padding");
+        Off = Expected;
+      } else if (Off > Expected) {
+        return emitErr("array element cursor exceeded expected position");
+      }
+
+      if (Constant *EC = buildConstFromBytes(EltTy, Bytes, Off, DL, C, Err,
+                                             AllowNonZeroPointerWithoutReloc))
+        Elems.push_back(EC);
+      else
+        return nullptr;
+
+      size_t NextExpected = Base + (i + 1) * EltAlloc;
+      if (Off < NextExpected) {
+        if (!allZeroRange(Off, NextExpected - Off))
+          return emitErr("non-zero bytes found in array element tail padding");
+        Off = NextExpected;
+      } else if (Off > NextExpected) {
+        return emitErr("array element decode overran element stride");
+      }
+    }
+    assert(Off == Base + Alloc && "array size accounting mismatch");
+    return ConstantArray::get(ATy, Elems);
+  }
+
+  if (auto *VTy = dyn_cast<FixedVectorType>(T)) {
+    SmallVector<Constant*, 16> Elems;
+    unsigned N = VTy->getNumElements();
+    Elems.reserve(N);
+    Type *EltTy = VTy->getElementType();
+    for (unsigned i = 0; i < N; ++i) {
+      if (Constant *EC = buildConstFromBytes(EltTy, Bytes, Off, DL, C, Err,
+                                             AllowNonZeroPointerWithoutReloc))
+        Elems.push_back(EC);
+      else
+        return nullptr;
+    }
+    return ConstantVector::get(Elems);
+  }
+
+  if (T->isScalableTy()) {
+    return emitErr("scalable vector is not supported in rodata decode");
+  }
+
+  if (auto *STy = dyn_cast<StructType>(T)) {
+    const StructLayout *SL = DL.getStructLayout(STy);
+    SmallVector<Constant*, 16> Fields;
+    Fields.reserve(STy->getNumElements());
+
+    size_t Base = Off;
+    for (unsigned i = 0, n = STy->getNumElements(); i < n; ++i) {
+      Type *EltTy = STy->getElementType(i);
+      uint64_t EltOff = SL->getElementOffset(i);
+      size_t Expected = Base + (size_t)EltOff;
+
+      if (Off < Expected) {
+        if (!allZeroRange(Off, Expected - Off))
+          return emitErr("non-zero bytes found in struct inter-field padding");
+        Off = Expected;
+      } else if (Off > Expected) {
+        return emitErr("struct field cursor exceeded expected position");
+      }
+
+      if (Constant *FC = buildConstFromBytes(EltTy, Bytes, Off, DL, C, Err,
+                                             AllowNonZeroPointerWithoutReloc))
+        Fields.push_back(FC);
+      else
+        return nullptr;
+    }
+    size_t StructEnd = Base + (size_t)SL->getSizeInBytes();
+    if (Off < StructEnd) {
+      if (!allZeroRange(Off, StructEnd - Off))
+        return emitErr("non-zero bytes found in struct tail padding");
+      Off = StructEnd;
+    } else if (Off > StructEnd) {
+      return emitErr("struct decode overran struct size");
+    }
+
+    return ConstantStruct::get(STy, Fields);
+  }
+
+  return emitErr("unsupported IR type in rodata decode");
+}
+
 static GlobalVariable* materializeROInit(const GlobalVariable &G, Module &M) {
   auto *Top = dyn_cast_or_null<MDNode>(G.getMetadata("go.rodata"));
   if (!Top) return nullptr;
 
   auto *MDBytes = dyn_cast<MDString>(Top->getOperand(0));
   if (!MDBytes) return nullptr;
-  StringRef Bytes = MDBytes->getString();
 
+  auto *Zero = dyn_cast_or_null<MDNode>(G.getMetadata("go.zerorodata"));
+  if (Zero) return nullptr;
+
+  StringRef Bytes = MDBytes->getString();
   SmallVector<GoReloc, 8> R;
-  if (Top->getNumOperands() >= 2) {
+  if (Top->getNumOperands() == 2) {
     auto *MDRel = cast<MDNode>(Top->getOperand(1));
     for (unsigned i = 0; i + 4 < MDRel->getNumOperands(); i += 5) {
       auto getI64 = [&](unsigned idx)->int64_t {
@@ -677,9 +854,47 @@ static GlobalVariable* materializeROInit(const GlobalVariable &G, Module &M) {
       if (auto *S = dyn_cast<MDString>(MDRel->getOperand(i+4)))
         sym = S->getString();
 
-      if (enabled == 1 && siz == 8 && off + 8 <= Bytes.size())
+      if (enabled == 1 && siz == 8 && off + 8 <= Bytes.size()) {
         R.push_back({off, addend, sym.str()});
+      } else {
+        return nullptr;
+      }
     }
+  }
+
+  auto &DL = M.getDataLayout();
+  if (R.empty() && isa<StructType>(G.getValueType())) {
+      LLVMContext &C = M.getContext();
+      Type *T = G.getValueType();
+      size_t Off = 0;
+      std::string Err;
+      auto AllZero = [&]{
+        for (char ch : Bytes) if (ch != 0) return false;
+        return true;
+      }();
+      Constant *Init = nullptr;
+      if (AllZero) {
+        if (T->isAggregateType())      Init = ConstantAggregateZero::get(T);
+        else if (isa<IntegerType>(T))  Init = ConstantInt::get(T, 0);
+        else if (T->isFloatingPointTy()) Init = ConstantFP::getNegativeZero(T);
+        else if (isa<PointerType>(T))  Init = ConstantPointerNull::get(cast<PointerType>(T));
+      }
+
+      if (!Init) {
+        Init = buildConstFromBytes(T, Bytes, Off, DL, C, &Err /*, AllowNonZeroPtr*/);
+        if (!Init || Off != Bytes.size()) {
+          // dbgs() << "materializeROInit failed for " << G.getName()
+          //        << ": " << Err << "\n";
+          return nullptr;
+        }
+      }
+      // dbgs() << "reslove R: " << G << "\n";
+      auto *Mat = new GlobalVariable(M, T, /*isConstant=*/true,
+      GlobalValue::LinkOnceODRLinkage, Init, G.getName() + ".mat");
+      if (auto A = G.getAlign()) Mat->setAlignment(*A);
+      else Mat->setAlignment(Align(DL.getABITypeAlign(T)));
+      Mat->setMetadata("go.rodata.materialized", MDNode::get(C, {}));
+      return Mat;
   }
 
   sort(R, [](auto &a, auto &b){ return a.off < b.off; });
@@ -702,8 +917,7 @@ static GlobalVariable* materializeROInit(const GlobalVariable &G, Module &M) {
 
   for (auto &re : R) {
     if (re.off > cur) addBytes(re.off - cur);
-
-    Constant *P = ConstantPointerNull::get(cast<PointerType>(Ptr));
+    Constant *P = nullptr;
     if (!re.sym.empty()) {
       if (GlobalValue *GV = M.getNamedValue(re.sym)) {
         P = ConstantExpr::getBitCast(GV, Ptr);
@@ -713,6 +927,11 @@ static GlobalVariable* materializeROInit(const GlobalVariable &G, Module &M) {
       P = ConstantExpr::getInBoundsGetElementPtr(
             I8, P, ConstantInt::get(Type::getInt64Ty(C), re.addend));
     }
+
+    if (P == nullptr) {
+      return nullptr;
+    }
+    assert(P && "not null.");
     FieldsT.push_back(Ptr);
     FieldsV.push_back(P);
     cur = re.off + 8;
@@ -721,7 +940,7 @@ static GlobalVariable* materializeROInit(const GlobalVariable &G, Module &M) {
 
   StructType *ST = StructType::get(C, FieldsT, /*packed=*/false);
   Constant   *Init = ConstantStruct::get(ST, FieldsV);
-
+  // assert(!isa<StructType>(G.getValueType()) && "not structure type.");
   auto *Mat = new GlobalVariable(M, ST,
       /*isConstant=*/true,
       GlobalValue::LinkOnceODRLinkage,
@@ -741,7 +960,6 @@ PreservedAnalyses GORoDataInitializerPass::run(Module &M, ModuleAnalysisManager 
     if (NG == nullptr) {
       continue;
     }
-
     std::string OldName = GV.getName().str();
     GV.setName(OldName + ".old");
     auto *Aliasee = ConstantExpr::getBitCast(NG, PointerType::get(GV.getValueType(), GV.getAddressSpace()));
