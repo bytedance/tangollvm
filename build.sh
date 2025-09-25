@@ -14,7 +14,7 @@ mkdir -p ${DIR}/llvm-build-release
 pushd ${DIR}/llvm-build-release &> /dev/null
 
 # Disable assertion for better compilation performance
-ASSERTION=OFF
+ASSERTION=ON
 
 cmake -G Ninja \
      -DCMAKE_BUILD_TYPE=Release \

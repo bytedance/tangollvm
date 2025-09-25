@@ -30,9 +30,6 @@
 
 using namespace llvm;
 
-static cl::opt<bool> TangoLLVMLTO("tangollvm-lto", cl::Hidden, cl::init(false));
-static cl::opt<std::string> LTOFileTable("tangollvm-lto-index", cl::init(""), cl::desc("file index"));
-
 // Any negative value would be OK because no index should be negative.
 const int32_t DeferReturnStackMapIndexPlaceholder = -1000;
 
@@ -47,66 +44,8 @@ static const MCExpr *buildSymbolDiff(MCContext &Context, const MCSymbol *A,
   return AddrDelta;
 }
 
-void MCGoAuxData::MDNodeToFileTab(std::vector<MCGoFileEntry> &Dst,
-                                  NamedMDNode *Meta) {
-  if (Meta == nullptr) {
-    return;
-  }
-
-  if (TangoLLVMLTO) {
-    std::map<std::string, int32_t> UniqueFileMap;
-    std::map<int32_t, int32_t> OldToNewIndexMap;
-    std::vector<MCGoFileEntry> TempEntries;
-
-    for (MDNode *D : Meta->operands()) {
-      for (unsigned i = 0; i < D->getNumOperands(); i += 3) {
-        StringRef Dir = cast<MDString>(D->getOperand(i + 0))->getString();
-        StringRef File = cast<MDString>(D->getOperand(i + 1))->getString();
-        int32_t OldFileIndex =
-            int32_t(cast<ConstantAsMetadata>(D->getOperand(i + 2))
-                        ->getValue()
-                        ->getUniqueInteger()
-                        .getSExtValue());
-        std::string UniqueKey = (Dir + "/" + File).str();
-
-        if (UniqueFileMap.find(UniqueKey) == UniqueFileMap.end()) {
-          int32_t NewFileIndex = TempEntries.size();
-          UniqueFileMap[UniqueKey] = NewFileIndex;
-          OldToNewIndexMap[OldFileIndex] = NewFileIndex;
-          TempEntries.push_back(MCGoFileEntry(Dir, File, NewFileIndex));
-        } else {
-          int32_t ExistingIndex = UniqueFileMap[UniqueKey];
-          OldToNewIndexMap[OldFileIndex] = ExistingIndex;
-        }
-      }
-    }
-    Dst.insert(Dst.end(), TempEntries.begin(), TempEntries.end());
-    std::string symbol = "tangollvmlto..filetable";
-    MCSymbol *AddrSymbol = Asm->OutContext.getOrCreateSymbol(StringRef(symbol));
-    Asm->OutStreamer->emitLabel(AddrSymbol);
-    Asm->OutStreamer->emitGoFileTab(Dst);
-  } else {
-    for (MDNode *D : Meta->operands()) {
-      for (unsigned i = 0; i < D->getNumOperands(); i += 3) {
-        StringRef Dir = cast<MDString>(D->getOperand(i + 0))->getString();
-        StringRef File = cast<MDString>(D->getOperand(i + 1))->getString();
-        int32_t FileIndex =
-            int32_t(cast<ConstantAsMetadata>(D->getOperand(i + 2))
-                        ->getValue()
-                        ->getUniqueInteger()
-                        .getSExtValue());
-        Dst.push_back(MCGoFileEntry(Dir, File, FileIndex));
-      }
-    }
-  }
-}
-
 void MCGoAuxData::beginModule(Module *M) {
   resetModule();
-
-  NamedMDNode *FileTabMeta = M->getNamedMetadata("go.local.filetab");
-  MDNodeToFileTab(FileTable, FileTabMeta);
-  FileTableMap.reserve(FileTable.size());
 
   if (NamedMDNode *CUNodes = M->getNamedMetadata("go.version")) {
     StringRef GoVersion = cast<MDString>(CUNodes->getOperand(0)->getOperand(0))->getString();
@@ -124,6 +63,12 @@ void MCGoAuxData::beginModule(Module *M) {
   Asm->OutStreamer->pushSection();
   Asm->OutStreamer->switchSection(ReadOnlySection);
 
+  // TODO: remove Go ROData
+  // Previously, we create Go rodata for missing read-only symbols in LTO.
+  // Later we have fixed the bug of missing symbols.
+  // However, there may also be cases where a symbol is missing.
+  // We have no idea whether the missing symbol can be fixed by the go.rodata here.
+  // We keep this and remove go.rodata until we can fix all issues about missing symbols in LTO.
   Asm->OutStreamer->emitLabel(Asm->OutContext.getOrCreateSymbol("go.rodata.begin"));
   Asm->OutStreamer->emitInt64(0);
 
@@ -157,6 +102,34 @@ void MCGoAuxData::beginModule(Module *M) {
   Asm->OutStreamer->emitLabel(Asm->OutContext.getOrCreateSymbol("go.rodata.end"));
   Asm->OutStreamer->emitInt64(0);
 
+  Asm->OutStreamer->popSection();
+}
+
+void MCGoAuxData::endModule() {
+  const TargetLoweringObjectFile &TLOF= Asm->getObjFileLowering();
+  MCSection *ReadOnlySection = TLOF.getGoAuxDataSection();
+  Asm->OutStreamer->pushSection();
+  Asm->OutStreamer->switchSection(ReadOnlySection);
+
+  if (!FileTableMap.empty()) {
+    std::vector<MCGoFileEntry> Entries;
+    Entries.reserve(FileTableMap.size());
+    for (auto I : FileTableMap) {
+      auto *DF = I.first;
+      StringRef Dir = DF->getDirectory();
+      StringRef File = DF->getFilename();
+      auto Index = I.second;
+      Entries.emplace_back(Dir, File, Index);
+    }
+    // Sort by Index so that we can access file table entry by Index
+    llvm::sort(Entries, [](const MCGoFileEntry &LHS, const MCGoFileEntry &RHS) { return LHS.Index < RHS.Index; });
+    assert(Entries[0].Index == 0 && "invariant");
+    assert((Entries[Entries.size() - 1].Index == Entries.size() - 1) && "invariant");
+    std::string symbol = "tangollvm..filetable";
+    MCSymbol *AddrSymbol = Asm->OutContext.getOrCreateSymbol(StringRef(symbol));
+    Asm->OutStreamer->emitLabel(AddrSymbol);
+    Asm->OutStreamer->emitGoFileTab(Entries);
+  }
   Asm->OutStreamer->popSection();
 }
 
@@ -1123,29 +1096,18 @@ void MCGoAuxData::endFunctionImpl(const MachineFunction *MF) {
   Asm->OutStreamer->popSection();
 }
 
-
+// Self-growing DIFile to Index mapping
 int32_t MCGoAuxData::getFileIndex(DIFile* DF) {
-  if (FileTable.empty()) {
-    return -1;
-  }
   auto It = FileTableMap.find(DF);
+  int32_t Index;
   if (It != FileTableMap.end()) {
-    auto Index = It->second;
-    FuncInfo.recordUsedFile(Index);
-    return Index;
+    Index = It->second;
+  } else {
+    Index = FileTableMap.size();
+    FileTableMap[DF] = Index;
   }
-
-  StringRef Dir = DF->getDirectory();
-  StringRef File = DF->getFilename();
-
-  for (auto &F : FileTable) {
-    if (F.Dir == Dir && F.File == File) {
-      FuncInfo.recordUsedFile(F.Index);
-      FileTableMap[DF] = F.Index;
-      return F.Index;
-    }
-  }
-  return -1;
+  FuncInfo.recordUsedFile(Index);
+  return Index;
 }
 
 int32_t MCGoAuxData::getInlineTreeNodeIndex(DILocation* DL) {

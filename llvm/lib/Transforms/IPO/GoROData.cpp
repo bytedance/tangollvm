@@ -881,14 +881,14 @@ static GlobalVariable* materializeROInit(const GlobalVariable &G, Module &M) {
       }
 
       if (!Init) {
-        Init = buildConstFromBytes(T, Bytes, Off, DL, C, &Err /*, AllowNonZeroPtr*/);
-        if (!Init || Off != Bytes.size()) {
-          // dbgs() << "materializeROInit failed for " << G.getName()
-          //        << ": " << Err << "\n";
-          return nullptr;
-        }
+        // Init = buildConstFromBytes(T, Bytes, Off, DL, C, &Err /*, AllowNonZeroPtr*/);
+        // if (!Init || Off != Bytes.size()) {
+        //   // dbgs() << "materializeROInit failed for " << G.getName()
+        //   //        << ": " << Err << "\n";
+        //   return nullptr;
+        // }
+        return nullptr;
       }
-      // dbgs() << "reslove R: " << G << "\n";
       auto *Mat = new GlobalVariable(M, T, /*isConstant=*/true,
       GlobalValue::LinkOnceODRLinkage, Init, G.getName() + ".mat");
       if (auto A = G.getAlign()) Mat->setAlignment(*A);

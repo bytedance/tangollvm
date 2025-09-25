@@ -92,7 +92,7 @@ public:
 
   virtual void beginModule(Module *M) override;
 
-  virtual void endModule() override {}
+  virtual void endModule() override;
 
   virtual void beginFunctionImpl(const MachineFunction *MF) override;
 
@@ -173,7 +173,6 @@ private:
 
   void emitPCData(std::vector<PCData> &list, std::string &sym);
   void appendPCData(std::vector<PCData> &list, int32_t value, MCSymbol* PC);
-  void MDNodeToFileTab(std::vector<MCGoFileEntry> &Dst, NamedMDNode *Meta);
 };
 
 

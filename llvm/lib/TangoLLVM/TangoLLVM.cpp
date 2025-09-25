@@ -726,6 +726,8 @@ void TangoLLVM::markObsoleted(Function *Fn) {
   NewFn->setCallingConv(Fn->getCallingConv());
   NewFn->copyMetadata(Fn, 0);
   NewFn->setMetadata(LLVMContext::MD_dbg, nullptr);
+  // see Verifier::visitFunction
+  NewFn->eraseMetadata(LLVMContext::MD_prof);
   NewFn->setAttributes(Fn->getAttributes());
   NewFn->takeName(Fn);
 

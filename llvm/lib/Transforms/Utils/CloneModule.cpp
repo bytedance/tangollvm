@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-09-25.
 //===----------------------------------------------------------------------===//
 //
 // This file implements the CloneModule interface which makes a copy of an
@@ -170,6 +172,9 @@ std::unique_ptr<Module> llvm::CloneModule(
       F->setLinkage(GlobalValue::ExternalLinkage);
       // Personality function is not valid on a declaration.
       F->setPersonalityFn(nullptr);
+      if (I.hasMetadata("go.global")) {
+        F->setMetadata("go.global", I.getMetadata("go.global"));
+      }
       continue;
     }
 
