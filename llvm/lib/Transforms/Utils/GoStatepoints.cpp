@@ -168,6 +168,10 @@ static cl::opt<bool> CheckIllFormedPointerStore("gogc-check-ifp-store", cl::Hidd
                                   cl::init(false));
 
 
+static cl::opt<std::string>
+    ReHoistDebugFunc("debug-re-hoist-func", cl::Hidden, cl::init(""),
+               cl::desc("print analysis and move progress"));
+
 // Statepoint ID. TODO: this is not thread safe.
 static uint64_t ID = 0;
 
@@ -213,6 +217,9 @@ static bool isConstant(Value *V) {
 // Those value are not part of data flow analysis since
 // they are constants.
 static bool isGoConstantLikeValue(Value *V) {
+  if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(V)) {
+    return isa<GlobalVariable>(GEP->stripPointerCasts());
+  }
   return isConstant(V) || isa<InlineAsm>(V)
           || isGoConstantPointer(V);
 }
@@ -404,6 +411,12 @@ static bool hasPointerTy(Type *T) {
   return TangoLLVM::hasPointerTy(T);
 }
 
+static bool ignorePointer(Type *T, unsigned Idx) {
+  StructType *ST = dyn_cast<StructType>(T);
+  if (!ST)
+    return false;
+  return Idx == 0 && ST->hasName() && ST->getName().starts_with("interface$");
+}
 
 static void
 getPtrBitmapForTypeHelper(Type *T, const DataLayout &DL, uint64_t BaseOffset, BitVector &BV) {
@@ -442,7 +455,7 @@ getPtrBitmapForTypeHelper(Type *T, const DataLayout &DL, uint64_t BaseOffset, Bi
   case Type::StructTyID: {
     for (unsigned i = 0, n = T->getStructNumElements(); i < n; ++i) {
       Type *ET = T->getStructElementType(i);
-      if (!hasPointerTy(ET))
+      if (!hasPointerTy(ET) || ignorePointer(T, i))
         continue;
       Value *ivals[2] = { ConstantInt::get(Int32Ty, 0),
                           ConstantInt::get(Int32Ty, i) };
@@ -1273,7 +1286,7 @@ extractPointerFromFCA(Value *V, IRBuilder<> &Builder,
   if (T->isStructTy()) {
     for (unsigned i = 0, e = T->getStructNumElements(); i < e; ++i) {
       Type *ElemT = T->getStructElementType(i);
-      if (ElemT->isPointerTy()) {
+      if (ElemT->isPointerTy() && !ignorePointer(T, i)) {
         Value *Field = Builder.CreateExtractValue(V, {i});
         PtrFields.push_back(Field);
       } else
@@ -2160,6 +2173,870 @@ static bool replaceUndefPointerWithNullPointer(Function &F) {
   return Changed;
 }
 
+static Value* getNonNullValueFromBr(BasicBlock* BB, DenseMap<BasicBlock*,DenseSet<Value*>> &NNs) {
+  BasicBlock *Pred = BB->getUniquePredecessor();
+  if (!Pred)
+    return nullptr;
+  if (!isa<BranchInst>(Pred->getTerminator()))
+    return nullptr;
+  BranchInst *BI = dyn_cast<BranchInst>(Pred->getTerminator());
+  if (!BI->isConditional())
+    return nullptr;
+  if (!isa<ICmpInst>(BI->getCondition()))
+    return nullptr;
+  ICmpInst *ICI = dyn_cast<ICmpInst>(BI->getCondition());
+  if (ICI->getPredicate() != CmpInst::ICMP_EQ
+      && ICI->getPredicate() == CmpInst::ICMP_NE)
+    return nullptr;
+
+  enum NullConstant {
+    Null,
+    NonNull,
+    Unknown
+  };
+  std::function<NullConstant(Value*)> IsNullConstant;
+  IsNullConstant = [&](Value* V) {
+    if (NNs.contains(Pred) && NNs[Pred].contains(V))
+      return NonNull;
+    if (Constant *C = dyn_cast<Constant>(V))
+      return C->isNullValue()? Null: NonNull;
+    if (isa<ZExtInst>(V) || isa<SExtInst>(V))
+      return IsNullConstant(dyn_cast<Instruction>(V)->getOperand(0));
+    return Unknown;
+  };
+
+  Value *Op0 = ICI->getOperand(0);
+  Value *Op1 = ICI->getOperand(1);
+  Value* Op = nullptr;
+  NullConstant Ret;
+  if (Ret = IsNullConstant(Op0); Ret != Unknown) {
+    Op = Op1;
+  } else if (Ret = IsNullConstant(Op1); Ret != Unknown) {
+    Op = Op0;
+  }
+  BasicBlock* SuccTrue = BI->getSuccessor(0);
+  BasicBlock* SuccFalse = BI->getSuccessor(1);
+  if (ICI->getPredicate() == CmpInst::ICMP_EQ) {
+    if (Ret == NonNull && BB == SuccTrue)
+      return Op;
+    if (Ret == Null && BB == SuccFalse)
+      return Op;
+  } else if (ICI->getPredicate() == CmpInst::ICMP_NE) {
+    if (Ret == Null && BB == SuccTrue)
+      return Op;
+  }
+  return nullptr;
+}
+
+static bool isNonNullPointer(Instruction *I, BasicBlock* BB, DenseSet<Value*> NonNullVs) {
+  if (isGoReadRegister(I))
+    return true;
+
+  // constant may be cast to ptr or used in phi
+  if (Constant *C = dyn_cast<Constant>(I))
+    return !C->isNullValue();
+
+  if (isa<ZExtInst>(I) || isa<SExtInst>(I))
+    return NonNullVs.contains(dyn_cast<Instruction>(I)->getOperand(0));
+
+  // should be pointer-like
+  if (!I->getType()->isPointerTy())
+    return false;
+
+  if (SelectInst* SI = dyn_cast<SelectInst>(I))
+    return NonNullVs.contains(SI->getTrueValue())
+           && NonNullVs.contains(SI->getFalseValue());
+
+  if (IntToPtrInst* ITP = dyn_cast<IntToPtrInst>(I))
+    return NonNullVs.contains(ITP->getOperand(0));
+  if (PtrToIntInst* PTI = dyn_cast<PtrToIntInst>(I))
+    return NonNullVs.contains(PTI->getOperand(0));
+
+  if (TangoLLVM::isGoPreAllocated(I)
+      || isa<AllocaInst>(I)
+      || isa<ConstantExpr>(I)
+      || isa<GlobalVariable>(I))
+    return true;
+
+  if (CallBase *CB = dyn_cast<CallBase>(I))
+    if (Function *Callee = CB->getCalledFunction())
+      if (Callee->getAttributes().hasRetAttr(Attribute::NonNull))
+        return true;
+
+  if (GetElementPtrInst* GEP = dyn_cast<GetElementPtrInst>(I)) {
+    // GEP is non-null if the base is non-null
+    if (NonNullVs.contains(GEP->getPointerOperand()))
+      return true;
+    // GEP is non-null if the base is a global variable
+    if (isa<GlobalVariable>(GEP->getPointerOperand()))
+      return true;
+  }
+  return false;
+}
+
+static uint64_t getDereferSize(Value* V, unsigned Idx,
+                               DenseMap<Value*, DenseMap<uint64_t, uint64_t>> &DereferSizes) {
+  if (DereferSizes.contains(V)) {
+    if (DereferSizes[V].contains(Idx))
+      return DereferSizes[V][Idx];
+    return 0;
+  }
+  if (Instruction *I = dyn_cast<Instruction>(V)) {
+    StringRef Metadata = TangoLLVM::getGoMetadataName(GoMetadata::DereferSize);
+    if (!I->hasMetadata(Metadata))
+      return 0;
+    auto *MD = I->getMetadata(Metadata);
+    assert(MD->getNumOperands() >= 3);
+    unsigned Len = mdconst::extract<ConstantInt>(MD->getOperand(0))->getLimitedValue();
+    for (unsigned N = 0; N < Len; N++) {
+      uint64_t Index = mdconst::extract<ConstantInt>(MD->getOperand(1 + 2 * N))->getLimitedValue();
+      uint64_t Size = mdconst::extract<ConstantInt>(MD->getOperand(2 + 2 * N))->getLimitedValue();;
+      DereferSizes[V][Index] = Size;
+    }
+    if (DereferSizes[V].contains(Idx))
+      return DereferSizes[V][Idx];
+  }
+  return 0;
+}
+
+static MDNode* mergeDereferMetadata(MDNode *L, MDNode *R) {
+  if (!L || !R)
+    return nullptr;
+  if (L == R)
+    return L;
+  unsigned LLen = mdconst::extract<ConstantInt>(L->getOperand(0))->getLimitedValue();
+  unsigned RLen = mdconst::extract<ConstantInt>(R->getOperand(0))->getLimitedValue();
+  if (LLen != RLen)
+    return nullptr;
+  // for CallInst, only care about the first part. see TangoLLVM/DereferSize
+  // MDNode::get(F.getContext(), {CommonLen, CommonIdx, SizeMD})
+  bool AllSame = true;
+  DenseMap<uint64_t, uint64_t> Sizes;
+  for (unsigned I = 0; I < LLen; I++) {
+    uint64_t LID = mdconst::extract<ConstantInt>(L->getOperand(1 + 2 * I))->getLimitedValue();
+    uint64_t RID = mdconst::extract<ConstantInt>(R->getOperand(1 + 2 * I))->getLimitedValue();
+    if (LID != RID)
+      return nullptr;
+    uint64_t LVal = mdconst::extract<ConstantInt>(L->getOperand(2 + 2 * I))->getLimitedValue();
+    uint64_t RVal = mdconst::extract<ConstantInt>(R->getOperand(2 + 2 * I))->getLimitedValue();
+    if (LVal!= RVal) {
+      AllSame = false;
+      LVal = std::min(LVal, RVal);
+    }
+    Sizes[LID] = LVal;
+  }
+  if (AllSame)
+    return L;
+
+  SmallVector<Metadata *, 4> MDs;
+  MDs.reserve(2 * LLen + 1);
+  MDs.push_back(ConstantAsMetadata::get(ConstantInt::get(Type::getInt64Ty(L->getContext()), LLen)));
+  for (auto &Pair : Sizes) {
+    MDs.push_back(ConstantAsMetadata::get(ConstantInt::get(Type::getInt64Ty(L->getContext()), Pair.first)));
+    MDs.push_back(ConstantAsMetadata::get(ConstantInt::get(Type::getInt64Ty(L->getContext()), Pair.second)));
+  }
+  return MDNode::get(L->getContext(), MDs);
+}
+
+
+static void populateDereferMetadata(Function &F) {
+  ConstantAsMetadata *CommonLen = ConstantAsMetadata::get(
+      ConstantInt::get(Type::getInt64Ty(F.getContext()), 1));
+  ConstantAsMetadata *CommonIdx = ConstantAsMetadata::get(
+      ConstantInt::get(Type::getInt64Ty(F.getContext()), 0));
+
+  bool Changed = true;
+  DenseMap<Value*, DenseMap<uint64_t, uint64_t>> DereferSizes;
+  StringRef GoDereferMetadata = TangoLLVM::getGoMetadataName(GoMetadata::DereferSize);
+  while (Changed) {
+    Changed = false;
+    for (BasicBlock &BB : F) {
+      for (Instruction &I : BB) {
+        if (I.hasMetadata(GoDereferMetadata))
+          continue;
+
+        if (CallBase *CI = dyn_cast<CallBase>(&I)) {
+          Function *Callee = CI->getCalledFunction();
+          if (Callee && Callee->hasMetadata(GoDereferMetadata)) {
+            I.setMetadata(GoDereferMetadata, Callee->getMetadata(GoDereferMetadata));
+            for (auto i = 0; i < Callee->arg_size(); i++) {
+              Instruction *Arg = dyn_cast<Instruction>(CI->getArgOperand(i));
+              uint64_t Size = TangoLLVM::getDereferSize(Callee, i, true);
+              if (Size > 0 && Arg && !Arg->hasMetadata(GoDereferMetadata)) {
+                ConstantAsMetadata *SizeMD = ConstantAsMetadata::get(
+                    ConstantInt::get(Type::getInt64Ty(F.getContext()), Size));
+                Arg->setMetadata(GoDereferMetadata,
+                                 MDNode::get(F.getContext(),
+                                             {CommonLen, CommonIdx, SizeMD}));
+              }
+            }
+            Changed = true;
+          }
+        }
+        // %0 = call xxx
+        // %1 = extractvalue { ptr, i64 }, %0, 0
+        else if (ExtractValueInst *EVI = dyn_cast<ExtractValueInst>(&I)) {
+          if (EVI->getNumIndices() != 1)
+            continue;
+          unsigned Size = getDereferSize(EVI->getOperand(0), EVI->getIndices()[0], DereferSizes);
+          if (Size > 0) {
+            ConstantAsMetadata *SizeMD = ConstantAsMetadata::get(
+                ConstantInt::get(Type::getInt64Ty(F.getContext()), Size));
+            EVI->setMetadata(GoDereferMetadata,
+                             MDNode::get(F.getContext(), {CommonLen, CommonIdx, SizeMD}));
+            Changed = true;
+          }
+        }
+        // %0 = load i64, @runtime.error
+        // %1 = inttoptr %0
+        else if (IntToPtrInst *ITP = dyn_cast<IntToPtrInst>(&I)) {
+          unsigned Size = getDereferSize(ITP->getOperand(0), 0, DereferSizes);
+          if (Size > 0) {
+            ConstantAsMetadata *SizeMD = ConstantAsMetadata::get(
+                ConstantInt::get(Type::getInt64Ty(F.getContext()), Size));
+            ITP->setMetadata(GoDereferMetadata,
+                             MDNode::get(F.getContext(), {CommonLen, CommonIdx, SizeMD}));
+            Changed = true;
+          }
+        }
+        // phi?
+        else if (PHINode* PHI = dyn_cast<PHINode>(&I)) {
+          MDNode* Node = nullptr;
+          for (unsigned i = 0, e = PHI->getNumIncomingValues(); i < e; i++) {
+            Value *Incoming = PHI->getIncomingValue(i);
+            Instruction *In = dyn_cast<Instruction>(Incoming);
+            if (!In || !In->hasMetadata(GoDereferMetadata)) {
+              Node = nullptr;
+              break;
+            }
+            if (Node == nullptr) {
+              Node = In->getMetadata(GoDereferMetadata);
+            } else {
+              Node = mergeDereferMetadata(Node, In->getMetadata(GoDereferMetadata));
+            }
+            if (!Node)
+              break;
+          }
+          if (Node) {
+            PHI->setMetadata(GoDereferMetadata, Node);
+            Changed = true;
+          }
+        }
+      }
+    }
+  }
+}
+
+static void analyzeNonNullGep(Function &F, DenseSet<Value*> &NNGeps) {
+  using ValueSet = DenseSet<Value*>;
+  // NonNull Pointers at BB
+  DenseMap<BasicBlock*, ValueSet> InNN;
+  DenseMap<BasicBlock*, ValueSet> OutNN;
+
+  auto Intersect = [](ValueSet &A, const ValueSet &B) {
+      for (auto I = A.begin(), E = A.end(); I != E;) {
+        Value *V = *I;
+        I++;
+        if (!B.contains(V))
+          A.erase(V);
+      }
+  };
+
+  auto JoinBB = [&](BasicBlock* BB, ValueSet& NNs) {
+    bool First = true;
+    for (BasicBlock *Pred : predecessors(BB)) {
+      if (!OutNN.contains(Pred))
+        continue;
+      // meet the non-null pointers
+      if (First)
+        NNs = OutNN[Pred];
+      else
+        Intersect(NNs, OutNN[Pred]);
+      First = false;
+    }
+
+    // Phi is non-null if all predecessors are non-null
+    for (Instruction &I : *BB) {
+      if (!isa<PHINode>(&I))
+        break;
+      PHINode *PN = dyn_cast<PHINode>(&I);
+      bool NNPhi = true;
+      for (unsigned II = 0, E = PN->getNumIncomingValues(); II < E; II++) {
+        Value *Incoming = PN->getIncomingValue(II);
+        BasicBlock* Pred = PN->getIncomingBlock(II);
+        if (OutNN.contains(Pred) && !OutNN[Pred].contains(Incoming)) {
+          NNPhi = false;
+          break;
+        }
+      }
+      if (NNPhi)
+        NNs.insert(PN);
+    }
+  };
+
+  auto ProcessBB = [&](BasicBlock *BB, SmallSetVector<BasicBlock*, 16>& Worklist) {
+    // join predecessors
+    ValueSet NNs;
+    JoinBB(BB, NNs);
+    Value *NNV = getNonNullValueFromBr(BB, OutNN);
+    if (NNV)
+      NNs.insert(NNV);
+
+    if (InNN.contains(BB) && InNN[BB] == NNs)
+      return;
+
+    InNN[BB] = NNs;
+    for (Instruction &I : make_range(BB->begin(), BB->end())) {
+      if (isa<PHINode>(&I))
+        continue;
+
+      if (isNonNullPointer(&I, BB, NNs))
+        NNs.insert(&I);
+
+      // Pointer is non-null after it's Loaded/Stored
+      if (LoadInst *LI = dyn_cast<LoadInst>(&I))
+        NNs.insert(LI->getPointerOperand());
+      else if (StoreInst *SI = dyn_cast<StoreInst>(&I))
+        NNs.insert(SI->getPointerOperand());
+
+      // the ConstantExpr/GEP is a compiler time constant value,
+      // so ignore it
+      // if (ConstantExpr *CE = dyn_cast<ConstantExpr>(&I);
+      //      CE && CE->getOpcode() == Instruction::GetElementPtr) {}
+
+      // if the base pointer is non-null, collect the GEP
+      if (GetElementPtrInst* GEP = dyn_cast<GetElementPtrInst>(&I)) {
+        // GlobalVariable is not an Inst, so it is not stored in NNs
+        if (isa<GlobalVariable>(GEP->getPointerOperand())) {
+          NNs.insert(GEP->getPointerOperand());
+        }
+        if (NNGeps.contains(GEP) && !NNs.contains(GEP->getPointerOperand())) {
+          NNGeps.erase(GEP);
+        }
+        if (NNs.contains(GEP->getPointerOperand()))
+          NNGeps.insert(GEP);
+      }
+    }
+    OutNN[BB] = NNs;
+    Worklist.insert(succ_begin(BB), succ_end(BB));
+  };
+
+  SmallSetVector<BasicBlock*, 16> Worklist;
+  // pre-process with RPO may be more efficient
+  ReversePostOrderTraversal<Function*> RPOT(&F);
+  for (BasicBlock *BB : RPOT) {
+    ProcessBB(BB, Worklist);
+  }
+  while (!Worklist.empty()) {
+    BasicBlock* BB = Worklist.front();
+    Worklist.remove(BB);
+    ProcessBB(BB, Worklist);
+  }
+}
+
+static void analyzeDereferenceableGeps(DenseSet<GetElementPtrInst*> &NonDerefGEPs,
+                                       DenseSet<GetElementPtrInst*> &GEPs,
+                                       Function &F,
+                                       DominatorTree &DT,
+                                       const TargetLibraryInfo &TLI) {
+  // 1. populate the dereferenceable metadata from go-frontend
+  populateDereferMetadata(F);
+  // 2. analyze the dereferenceable GEP
+  const DataLayout &DL = F.getParent()->getDataLayout();
+  for (GetElementPtrInst *GEP : GEPs) {
+    Value *Base = GEP->getPointerOperand();
+    if (IntToPtrInst *ITP = dyn_cast<IntToPtrInst>(Base))
+      if (isGoReadRegister(ITP->getOperand(0)))
+        continue;
+
+    // ignore vector <N x Ptr>
+    if (!Base->getType()->isPointerTy())
+      continue;
+
+    APInt Offset(DL.getIndexTypeSizeInBits(GEP->getType()), 0);
+    if (!GEP->accumulateConstantOffset(DL, Offset) || Offset.isNegative())
+      NonDerefGEPs.insert(GEP);
+    // Is it correct to obtain the size from getResultElementType()?
+    // Possibly not, since getResultElementType() might be optimized to 'i8'.
+    // However, there is no better alternative currently.
+    // False positives are acceptable here, as this may cause a GEP
+    // that doesn't strictly require moving to be moved, which is safe.
+    APInt Size(DL.getPointerTypeSizeInBits(GEP->getType()),
+               DL.getTypeStoreSize(GEP->getResultElementType()));
+    if (!TangoLLVM::isDereferenceable(
+            Base, Offset + Size.sextOrTrunc(Offset.getBitWidth()), DL, TLI))
+      NonDerefGEPs.insert(GEP);
+  }
+}
+
+
+// the number of usage won't too large, so use SmallSet/SmallMap
+template<typename T, unsigned DefaultBuckets = 8>
+using GoSmallSet = llvm::SmallDenseSet<T, DefaultBuckets>;
+template<typename K, typename V, unsigned DefaultBuckets = 8>
+using GoSmallMap = llvm::SmallDenseMap<K, V, DefaultBuckets>;
+
+struct GEPUsages {
+  // first usage
+  GoSmallSet<Instruction*> FirstUsages;
+  // first usage -> id
+  GoSmallMap<Instruction*, unsigned> FUIds;
+  // the ids of first usages that through stack map
+  GoSmallSet<unsigned> UnsafeIds;
+  // the following usages of a first usage, the key is the id of the first usage
+  GoSmallMap<unsigned, GoSmallSet<Instruction*>> Children;
+  // for phi, record the incoming basic block and the id of the incoming value
+  GoSmallMap<Instruction*, GoSmallMap<BasicBlock*, unsigned>> PhiFUIds;
+  // for phi, record the id to the index of the incoming value
+  GoSmallMap<Instruction*, GoSmallMap<unsigned, GoSmallSet<unsigned>>> PhiId2Idx;
+};
+
+const unsigned UnDef = 0;
+const unsigned Def = 1;
+const unsigned StackMap = 2;
+
+struct ReHoistDebugger {
+private:
+  const Function &F;
+  bool Debug;
+  std::string Buffer;
+  raw_string_ostream OS;
+
+  std::string idName(unsigned Id) {
+    switch (Id) {
+    case UnDef:
+      return "Undef";
+    case Def:
+      return "Def";
+    case StackMap:
+      return "StackMap";
+    default:
+      return std::to_string(Id);
+    }
+  };
+
+public:
+  ReHoistDebugger(const Function &F)
+      : F(F), Debug(F.getName() == ReHoistDebugFunc), Buffer(), OS(Buffer) {}
+
+  void start() {
+    if (Debug)
+      OS << "ReHoist start: " << F.getName() << "\n";
+  }
+
+  void printCandidates(const DenseSet<GetElementPtrInst *> &GEPs,
+                       const DenseSet<GetElementPtrInst *> &Candidates) {
+    if (!Debug)
+      return;
+    F.print(OS);
+    for (GetElementPtrInst *GEP : GEPs) {
+      OS << "# GEP: " << *GEP << "\n";
+      if (Candidates.contains(GEP))
+        OS << "  - ToMove (Unsafe Pointer)\n";
+      else
+        OS << "  - Not moved (Safe Pointer)\n";
+    }
+  }
+
+  void printAnalyzeResult(SetVector<GetElementPtrInst *> WorkSet,
+                          SetVector<GetElementPtrInst *> NeedMove,
+                          DenseSet<Value *> NNBase,
+                          DenseSet<GetElementPtrInst *> NonDerefGEPs,
+                          DenseMap<Value *, GEPUsages> Usages) {
+    if (!Debug || WorkSet.empty())
+      return;
+
+    const DataLayout &DL = F.getParent()->getDataLayout();
+    for (GetElementPtrInst *GEP : WorkSet) {
+      OS << "** GEP: " << *GEP << "\n";
+      APInt Offset(DL.getIndexTypeSizeInBits(GEP->getType()), 0);
+      bool ConstantIdx = GEP->accumulateConstantOffset(DL, Offset);
+      OS << "  - Constant Idx? : " << (ConstantIdx ? "True" : "False")
+             << "\n";
+      OS << "  - Base is "
+             << (NNBase.contains(GEP) ? "Non-Null" : "NULL !!!") << "\n";
+      OS << "  - GEP  is " << (NonDerefGEPs.contains(GEP) ? "Non-" : "")
+             << "Dereferenceable\n";
+      if (NeedMove.contains(GEP)) {
+        assert(!Usages[GEP].FirstUsages.empty());
+        OS << "  - First Usage: Size = " << Usages[GEP].FirstUsages.size()
+               << "\n";
+        for (Instruction *FU : Usages[GEP].FirstUsages) {
+          if (isa<PHINode>(FU)) {
+            OS << "  - First Usage: \n";
+            OS << "    " << *FU << ", at BB: " << FU->getParent()->getName()
+                   << "\n";
+            for (auto &Pair : Usages[GEP].PhiFUIds[FU])
+              OS << "    BB: " << Pair.first->getName()
+                     << ", Id:" << Pair.second << "\n";
+            continue;
+          }
+          unsigned Id = Usages[GEP].FUIds[FU];
+          OS << "  - First Usage: \n";
+          OS << "    " << *FU << ", at BB: " << FU->getParent()->getName()
+                 << ", Id:" << Id << "\n";
+          if (!Usages[GEP].Children[Id].empty()) {
+            OS << "  Follow: Size = " << Usages[GEP].Children[Id].size()
+                   << "\n";
+            for (Value *V : Usages[GEP].Children[Id])
+              OS << "   " << *V << ", at BB: "
+                     << dyn_cast<Instruction>(V)->getParent()->getName()
+                     << "\n";
+          }
+        }
+      } else {
+        OS << "    - Not moved (Not through StackMap)\n";
+      }
+    }
+  }
+
+  void analyzeBB(BasicBlock *BB, const DenseMap<Value *, unsigned> &Ids) {
+    if (Debug) {
+      OS << "  BB: " << BB->getName() << ", InState:\n";
+      for (auto &Pair : Ids)
+        OS << "  - " << *Pair.first << ", Id:" << idName(Pair.second) << "\n";
+    }
+  }
+
+  void analyzeBBDone(BasicBlock *BB, const DenseMap<Value *, unsigned> &Ids) {
+    if (Debug) {
+      OS << "  BB: " << BB->getName() << ", OutState:\n";
+      for (auto &Pair : Ids)
+        OS << "  - " << *Pair.first << ", Id:" << idName(Pair.second) << "\n";
+    }
+  }
+
+  void startMove() {
+    if (Debug)
+      F.print(OS);
+  }
+
+  void processGEP(GetElementPtrInst *GEP) {
+    if (Debug)
+      OS << "  process GEP: " << *GEP << "\n";
+  }
+
+  void processFirstUse(Instruction *I) {
+    if (Debug)
+      OS << "  process First Use: " << *I << "\n";
+  }
+
+  void processFollowingUse(Instruction *I) {
+    if (Debug)
+      OS << "  process Follow Use: " << *I << "\n";
+  };
+
+  void nonEmptyErr(Instruction *I) {
+    if (!Debug || I->use_empty())
+      return;
+    dbgs() << "Use Not Empty: " << *I << "\n";
+    dbgs() << OS.str() << "\n";
+    dbgs() << "Error Function:\n";
+    F.print(dbgs());
+  }
+
+  ~ReHoistDebugger() {
+    if (Debug)
+      dbgs() << OS.str() << "\n";
+  }
+};
+
+static SetVector<GetElementPtrInst*> analyzeGepUsages(
+    Function &F,
+    SetVector<GetElementPtrInst*> &WorkSet,
+    DenseMap<Value*, GEPUsages> &GEPUsages,
+    ReHoistDebugger &Debugger) {
+  SetVector<GetElementPtrInst*> NeedMove;
+  auto AddToMoveList = [&](GetElementPtrInst* GEP) {
+    if (!WorkSet.contains(GEP))
+      return;
+    NeedMove.insert(GEP);
+  };
+
+  DenseMap<Value*, unsigned> IdGetter;
+  DenseMap<BasicBlock*, DenseMap<Value*, unsigned>> In;
+  DenseMap<BasicBlock*, DenseMap<Value*, unsigned>> Out;
+
+  // Undef: 0, Def: 1, StackMap: 2
+  auto GetId = [&](Value* V) {
+    unsigned Id;
+    if (IdGetter.contains(V))
+      Id = IdGetter[V] + 1;
+    else
+      Id = StackMap + 1;
+    IdGetter[V] = Id;
+    return Id;
+  };
+  auto MergeId = [](unsigned L, unsigned R) {
+    if (L == R)
+      return L;
+    unsigned Max = std::max(L, R);
+    unsigned Min = std::min(L, R);
+    // GEP through stack map in at least one path, mark it as StackMap
+    // then we can assign a new id for it.
+    if (Min >= StackMap)
+      return StackMap;
+    if (Max >= StackMap)
+      return StackMap;
+
+    assert(Max == Def && Min == UnDef);
+    // 1. the path with undef hasn't been analyzed
+    // 2. if there is a usage in the following path, there must be a phi node
+    return Def;
+  };
+  auto JoinBB = [&](BasicBlock* BB, DenseMap<Value*, unsigned>& Ids) {
+    DenseMap<Value*, unsigned> Count;
+    for (BasicBlock *Pred : predecessors(BB)) {
+      for (auto &Pair : Out[Pred]) {
+        Value *GEP = Pair.first;
+        Count[GEP]++;
+        if (!Ids.contains(GEP))
+          Ids[GEP] = Pair.second;
+        else
+          Ids[GEP] = MergeId(Ids[GEP], Pair.second);
+      }
+    }
+    for (auto &Pair: Count)
+      if (Pair.second < pred_size(BB))
+        // if some of BB's predecessors have not been analyzed, treated it
+        // as the first usage, this may happen when we meet a back edge.
+        // maybe it's a bit more conservative
+        if (Ids[Pair.first] > StackMap)
+          Ids[Pair.first] = StackMap;
+  };
+  auto ProcessBB = [&](BasicBlock *BB, SmallSetVector<BasicBlock*, 16>& Worklist) {
+    DenseMap<Value*, unsigned> Ids;
+    JoinBB(BB, Ids);
+    if (In.contains(BB) && In[BB] == Ids)
+      return;
+    Debugger.analyzeBB(BB, Ids);
+    In[BB] = Ids;
+
+    for (Instruction &I : make_range(BB->begin(), BB->end())) {
+      if (isa<GetElementPtrInst>(&I))
+        Ids[&I] = Def;
+
+      for (unsigned II = 0, E = I.getNumOperands(); II < E; II++) {
+        Value *V = I.getOperand(II);
+        GetElementPtrInst* GEP = dyn_cast<GetElementPtrInst>(V);
+        if (!GEP)
+          continue;
+
+        if (PHINode *PHI = dyn_cast<PHINode>(&I)) {
+          unsigned PhiIdx = II;
+          BasicBlock* Pred = PHI->getIncomingBlock(PhiIdx);
+          unsigned PredId = Out[Pred][GEP];
+          if (PredId <= StackMap) {
+            // Phi would be a special first-usage that has no children
+            if (!GEPUsages[GEP].PhiFUIds[PHI].contains(Pred)) {
+              PredId = GetId(GEP);
+              GEPUsages[GEP].FirstUsages.insert(PHI);
+              GEPUsages[GEP].PhiFUIds[PHI][Pred] = PredId;
+              GEPUsages[GEP].PhiId2Idx[PHI][PredId].insert(PhiIdx);
+              if (PredId == StackMap) {
+                AddToMoveList(GEP);
+                GEPUsages[GEP].UnsafeIds.insert(PredId);
+              }
+            }
+          } else if (PredId > StackMap) {
+            if (!GEPUsages[GEP].PhiFUIds[PHI].contains(Pred)) {
+              GEPUsages[GEP].Children[PredId].insert(PHI);
+              GEPUsages[GEP].PhiId2Idx[PHI][PredId].insert(PhiIdx);
+            }
+          }
+          continue;
+        }
+
+        unsigned Id = Ids[GEP];
+        assert(Id != UnDef);
+        if (Id <= StackMap) {
+          // we meet the first usage
+          if (!GEPUsages[GEP].FirstUsages.contains(&I)) {
+            Id = GetId(GEP);
+            GEPUsages[GEP].FirstUsages.insert(&I);
+            GEPUsages[GEP].FUIds[&I] = Id;
+          }
+          Ids[GEP] = GEPUsages[GEP].FUIds[&I];
+          // there is state point between def and first usage
+          if (Id == StackMap) {
+            AddToMoveList(GEP);
+            GEPUsages[GEP].UnsafeIds.insert(Ids[GEP]);
+          }
+        } else {
+          if (!GEPUsages[GEP].FirstUsages.contains(&I))
+            GEPUsages[GEP].Children[Id].insert(&I);
+          else
+            Ids[GEP] = GEPUsages[GEP].FUIds[&I];
+        }
+      }
+
+      if (CallBase* CB = dyn_cast<CallBase>(&I);
+          CB && hasStackMap(CB)) {
+        for (auto &Pair : Ids)
+          if (Pair.second == Def)
+            Pair.second = StackMap;
+      }
+    }
+
+    Debugger.analyzeBBDone(BB, Ids);
+    Out[BB] = Ids;
+    Worklist.insert(succ_begin(BB), succ_end(BB));
+  };
+
+  SmallSetVector<BasicBlock*, 16> Worklist;
+  ReversePostOrderTraversal<Function*> RPOT(&F);
+  for (BasicBlock *BB : RPOT) {
+    ProcessBB(BB, Worklist);
+  }
+  while (!Worklist.empty()) {
+    BasicBlock* BB = Worklist.front();
+    Worklist.remove(BB);
+    ProcessBB(BB, Worklist);
+  }
+
+  return NeedMove;
+}
+
+static void moveHoistedGEP(Function &F, DominatorTree &DT,
+                           const SetVector<GetElementPtrInst*> &ToMove,
+                           DenseMap<Value*, GEPUsages> &GEPUsages,
+                           ReHoistDebugger &Debugger) {
+  Debugger.startMove();
+  auto CreateNewGEP = [&](GetElementPtrInst *GEP, unsigned Id) {
+    GetElementPtrInst *NewGEP = dyn_cast<GetElementPtrInst>(GEP->clone());
+    NewGEP->copyMetadata(*GEP);
+    NewGEP->setName(GEP->getName() + ".gosp.hoist.id" + std::to_string(Id));
+    return NewGEP;
+  };
+
+  for (GetElementPtrInst *GEP : ToMove) {
+    assert(GEPUsages.contains(GEP));
+    Debugger.processGEP(GEP);
+    for (Instruction *FirstUse : GEPUsages[GEP].FirstUsages) {
+      Debugger.processFirstUse(FirstUse);
+      if (PHINode* PHI = dyn_cast<PHINode>(FirstUse)) {
+        for (unsigned I = 0, E = PHI->getNumIncomingValues(); I < E; I++) {
+          BasicBlock *Pred = PHI->getIncomingBlock(I);
+          if (GEPUsages[GEP].PhiFUIds[PHI].contains(Pred)) {
+            unsigned Id = GEPUsages[GEP].PhiFUIds[PHI][Pred];
+            assert(!GEPUsages[GEP].Children.contains(Id));
+            auto *NewGEP = CreateNewGEP(GEP, Id);
+            NewGEP->insertBefore(Pred->getTerminator());
+            assert(GEPUsages[GEP].PhiId2Idx[PHI][Id].contains(I));
+            PHI->setIncomingValue(I, NewGEP);
+          }
+        }
+        // we have asserted that Phi has no children
+        continue;
+      }
+      unsigned Id = GEPUsages[GEP].FUIds[FirstUse];
+      GetElementPtrInst *NewGEP = CreateNewGEP(GEP, Id);
+      NewGEP->insertBefore(FirstUse);
+      FirstUse->replaceUsesOfWith(GEP, NewGEP);
+      if (GEPUsages[GEP].Children.contains(Id)) {
+        for (Value *U : GEPUsages[GEP].Children[Id]) {
+          Instruction *User = dyn_cast<Instruction>(U);
+          if (!User)
+            continue;
+          Debugger.processFollowingUse(User);
+          if (PHINode *PHI = dyn_cast<PHINode>(User)) {
+            for (unsigned Idx : GEPUsages[GEP].PhiId2Idx[PHI][Id]) {
+              PHI->setIncomingValue(Idx, NewGEP);
+            }
+          } else {
+            User->replaceUsesOfWith(GEP, NewGEP);
+          }
+        }
+      }
+    }
+  }
+
+  for (Instruction *I : ToMove) {
+    Debugger.nonEmptyErr(I);
+    assert(I->use_empty());
+    I->eraseFromParent();
+  }
+}
+
+static bool reHoistGEP(DominatorTree &DT, LoopInfo &LI, Function &F,
+                       const TargetLibraryInfo &TLI) {
+  if (!RehoistGEP)
+    return false;
+
+  DenseSet<GetElementPtrInst*> GEPs;
+  for (BasicBlock &BB : F)
+    for (Instruction &I : BB)
+      if (GetElementPtrInst* GEP = dyn_cast<GetElementPtrInst>(&I))
+        // filter GEP?
+        GEPs.insert(GEP);
+
+  if (GEPs.empty())
+    return false;
+
+  ReHoistDebugger Debugger(F);
+  Debugger.start();
+
+  // 1. forward analysis to confirm if a pointer is non-null
+  DenseSet<Value*> NNGeps;
+  analyzeNonNullGep(F, NNGeps);
+
+  // 2. check if a GEP is dereferenceable
+  DenseSet<GetElementPtrInst*> NonDerefGEPs;
+  analyzeDereferenceableGeps(NonDerefGEPs, GEPs, F, DT, TLI);
+
+  DenseSet<GetElementPtrInst*> ToMove;
+  for (GetElementPtrInst *GEP : GEPs) {
+    if (!NNGeps.contains(GEP) || NonDerefGEPs.contains(GEP))
+      ToMove.insert(GEP);
+  }
+
+  Debugger.printCandidates(GEPs, ToMove);
+
+  // there is nothing need to process
+  if (ToMove.empty())
+    return false;
+
+  // 3. forward analysis to find the first usage and the following usage
+  //    of a GEP, and check if it's through stack map
+  bool Changed = false;
+  // we must analyze and move the GEPs that are not the base of other GEPs
+  DenseMap<GetElementPtrInst*, DenseSet<GetElementPtrInst*>> SplitByBase;
+  for (GetElementPtrInst *GEP : ToMove) {
+    if (GetElementPtrInst *Base = dyn_cast<GetElementPtrInst>(GEP->getPointerOperand());
+        Base && ToMove.contains(Base))
+      SplitByBase[Base].insert(GEP);
+  }
+  DenseSet<GetElementPtrInst*> Visited;
+  while(true) {
+    // filter the GEPs that are not the base of other GEPs
+    SetVector<GetElementPtrInst*> WorkSet;
+    for (GetElementPtrInst *GEP : ToMove) {
+      if (!SplitByBase.contains(GEP) || SplitByBase[GEP].empty()) {
+        if (!Visited.insert(GEP).second)
+          continue;
+        WorkSet.insert(GEP);
+      }
+    }
+    for (GetElementPtrInst *GEP : WorkSet) {
+      auto *Base = dyn_cast<GetElementPtrInst>(GEP->getPointerOperand());
+      if (Base && SplitByBase.contains(Base))
+        SplitByBase[Base].erase(GEP);
+    }
+    if (WorkSet.empty()) {
+      assert(Visited.size() == ToMove.size());
+      break;
+    }
+
+    DenseMap<Value *, GEPUsages> GEPUsages;
+    auto NeedMove = analyzeGepUsages(F, WorkSet, GEPUsages, Debugger);
+    Debugger.printAnalyzeResult(WorkSet, NeedMove, NNGeps, NonDerefGEPs, GEPUsages);
+    moveHoistedGEP(F, DT, NeedMove, GEPUsages, Debugger);
+    Changed |= !NeedMove.empty();
+  }
+
+  return Changed;
+}
+
 struct UpdateUse {
   Value *Val;
   Instruction *User;
@@ -2203,8 +3080,8 @@ static bool isNonZeroConstantInt(Value *V) {
 static bool legalizeTangoLLVMIR(Function &F, DomTreeUpdater *DTU) {
   DenseMap<AllocaInst*, CallInst*> PreAllocated;
   SmallVector<CallInst*, 8> PanicReturns;
-  // CallerCalleeAreaSize is the max caller area size of all callees.
-  int64_t CallerCalleeAreaSize = 0;
+  // ComputedCalleeAreaSize is the max caller area size of all callees.
+  int64_t ComputedCalleeAreaSize = 0;
   for (Instruction &I : instructions(F)) {
     if (PHINode *PHI = dyn_cast<PHINode>(&I)) {
       if (PHI->getType()->isPointerTy())
@@ -2222,8 +3099,8 @@ static bool legalizeTangoLLVMIR(Function &F, DomTreeUpdater *DTU) {
       assert(AI->getAlign() <= F.getParent()->getDataLayout().getStackAlignment() && "invariant");
     } else if (CallInst *CI = dyn_cast<CallInst>(&I)) {
       int64_t CalleeCallerAreaSize = TangoLLVM::getCallSiteGoCallerAreaSize(CI);
-      if (CalleeCallerAreaSize >= CallerCalleeAreaSize)
-        CallerCalleeAreaSize = CalleeCallerAreaSize;
+      if (CalleeCallerAreaSize >= ComputedCalleeAreaSize)
+        ComputedCalleeAreaSize = CalleeCallerAreaSize;
 
       if (CI->getIntrinsicID() == Intrinsic::go_preallocated) {
         Value *Arg = CI->getArgOperand(0);
@@ -2252,34 +3129,57 @@ static bool legalizeTangoLLVMIR(Function &F, DomTreeUpdater *DTU) {
     if (MD == nullptr) {
       // TODO: this may happen if we fail to lower a llvm.memmove to instructions
       // We should ensure that all memmove from OpMove must be lowered to memcpy.inline.
-      if (CallerCalleeAreaSize != 0)
+      if (ComputedCalleeAreaSize != 0)
         report_fatal_error("bad callee args area: should be zero");
     } else {
       int64_t CalleeArgAreaSize = dyn_cast<ConstantAsMetadata>(MD->getOperand(0))
                                       ->getValue()->getUniqueInteger().getSExtValue();
-      if (CallerCalleeAreaSize > CalleeArgAreaSize) {
-        bool OnlyGoIntrinsicCall = true;
+      if (ComputedCalleeAreaSize > CalleeArgAreaSize) {
+        bool HasOtherCall = false;
+        bool HasGoPanicBounds = false;
+        bool HasMemmove = false;
+        bool HasMemclr = false;
         for (Instruction &I : instructions(F)) {
           if (CallInst *CI = dyn_cast<CallInst>(&I)) {
             if (CI->getIntrinsicID() != 0)
               continue;
             if (Function *Callee = CI->getCalledFunction()) {
-              if (Callee->getName() == "runtime.memmove" || Callee->getName() == "runtime.memclrNoHeapPointers")
+              if (Callee->getName() == "runtime.memmove") {
+                HasMemmove = true;
                 continue;
+              } else if (Callee->getName() == "runtime.memclrNoHeapPointers") {
+                HasMemclr = true;
+                continue;
+              } else if (TangoLLVM::isGoPanicBounds(Callee->getName())) {
+                HasGoPanicBounds = true;
+                continue;
+              } else {
+                HasOtherCall = true;
+              }
             }
-            OnlyGoIntrinsicCall = false;
-            break;
           }
         }
-        if (!OnlyGoIntrinsicCall) {
+        bool ReportFailure = HasOtherCall;
+        if (ReportFailure) {
+          // 24 is the space for memmove
+          if (HasMemmove && ComputedCalleeAreaSize == 24) {
+            ReportFailure = false;
+          } else if (HasMemclr && ComputedCalleeAreaSize == 16) {
+            ReportFailure = false;
+          }
+        }
+        if (ReportFailure) {
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
           F.dump();
 #endif
-          dbgs() << F.getName() << ": bad callee args size: " << CallerCalleeAreaSize << " vs. " << CalleeArgAreaSize << "\n";
+          dbgs() << F.getName() << ": bad callee args size: " << ComputedCalleeAreaSize << " vs. " << CalleeArgAreaSize << "\n";
           report_fatal_error("bad callee args area");
         } else {
+          if (HasGoPanicBounds && ComputedCalleeAreaSize < 16) {
+            report_fatal_error("bad callee args area: must be at least 16 for panic bounds");
+          }
           // We need to update the callee size
-          TangoLLVM::updateGoCalleeAreaSize(F, CallerCalleeAreaSize);
+          TangoLLVM::updateGoCalleeAreaSize(F, ComputedCalleeAreaSize);
         }
       }
     }
@@ -2500,9 +3400,9 @@ static bool needsRewriteForGo(CallBase *Call) {
 }
 
 bool GoStatepoints::runOnFunction(Function &F, DominatorTree &DT,
-                                            LoopInfo &LI,
-                                            TargetTransformInfo &TTI,
-                                            const TargetLibraryInfo &TLI) {
+                                  LoopInfo &LI,
+                                  TargetTransformInfo &TTI,
+                                  const TargetLibraryInfo &TLI) {
   assert(!F.isDeclaration() && !F.empty() &&
          "need function body to rewrite statepoints in");
   assert(shouldRewriteStatepointsIn(F) && "mismatch in rewrite decision");
@@ -2632,6 +3532,7 @@ bool GoStatepoints::runOnFunction(Function &F, DominatorTree &DT,
   }
 
   MadeChange |= moveITPToDefAndPTIToUse(F);
+  MadeChange |= reHoistGEP(DT, LI, F, TLI);
   MadeChange |= insertParsePoints(F, DT, LI, TTI, ParsePointNeeded);
   MadeChange |= replaceUndefPointerWithNullPointer(F);
   MadeChange |= optimizeNilCheck(F);
@@ -2850,6 +3751,8 @@ static void checkBasicSSA(DominatorTree &DT, SetVector<Value *> &Live,
       // such, we need to special case this to allow it.
       if (TermOkay && TI == I)
         continue;
+      if (!DT.dominates(I, TI))
+        dbgs() << "basic SSA liveness expectation violated by liveness analysis, I" << *I << "TI" << *TI << "\n";
       assert(DT.dominates(I, TI) &&
              "basic SSA liveness expectation violated by liveness analysis");
     }
@@ -4215,254 +5118,6 @@ static void computeLiveInValues(DominatorTree &DT, LoopInfo &LI, Function &F,
       while (true) {
         if (!moveUnusedGEPAfterStatepoints(*BB, Data))
           break;
-      }
-    }
-  }
-
-  if (RehoistGEP) {
-    // LICM may move GEP to an invalid position for GC.
-    // The root cause is that the base pointer of GEP is null
-    // at runtime. A bad pointer error may be triggered at runtime,
-    // when the stack is being copied.
-    // 1). We only handle hoisted GEPs, i.e., those annotated with go.hoist.
-    // 2). If a GEP never appears in any stack map, we do not move it.
-    // 3). If there is some use of base that dominates the GEP, we do not
-    //     move the GEP because any REAL use of the base is a null check.
-    // 4). We must have to move GEP to a proper place, before any use of the GEP
-    //     and after any real use of the Base
-    auto InAnyStackMap = [&](Instruction *I) {
-      // Fast check
-      if (!Data.LiveOut[I->getParent()].count(I))
-        return false;
-
-      SmallVector<BasicBlock*, 8> Worklist;
-      SmallSet<BasicBlock*, 8> Visited;
-
-      Worklist.push_back(I->getParent());
-      while (!Worklist.empty()) {
-        BasicBlock *Cur = Worklist.pop_back_val();
-        Visited.insert(Cur);
-
-        if (!Data.LiveOut[I->getParent()].count(I))
-          continue;
-
-        auto RI = Cur->rbegin();
-        ++RI; // skip terminator
-        if (RI != Cur->rend())
-          if (const CallBase* CB = dyn_cast<CallBase>(&*RI))
-            if (hasStackMap(CB))
-              return true; // used by some stack map
-
-        for (BasicBlock *Succ : successors(Cur)) {
-          if (Visited.count(Succ))
-            continue;
-
-          Worklist.push_back(Succ);
-        }
-
-      }
-
-      return false;
-    };
-
-
-    std::function<Instruction*(Instruction*,BasicBlock*)> IsDominatedBySelfOrRealUse;
-    IsDominatedBySelfOrRealUse = [&](Instruction *I, BasicBlock *Cur) {
-      if (isa<GetElementPtrInst>(I)
-          || isa<PtrToIntInst>(I)
-          || isa<IntToPtrInst>(I)
-          || isa<BitCastInst>(I)
-          || isa<ICmpInst>(I)
-          || isa<FCmpInst>(I)) {
-        for (auto &UU : I->uses()) {
-          Instruction *II = dyn_cast<Instruction>(UU.getUser());
-          if (II == nullptr)
-            continue;
-          if (auto RU = IsDominatedBySelfOrRealUse(II, Cur))
-            return RU;
-        }
-        return (Instruction*) nullptr;
-      }
-
-      if (BranchInst *BI = dyn_cast<BranchInst>(I)) {
-        // must be conditional
-        (void)BI;
-        assert(BI->isConditional() && "invariant");
-        // TODO: a CmpInst of Ptr does not read from or write to the Ptr.
-        // TODO: If CmpInst is a null-check, we can conclude that the Ptr is non-null in one branch.
-        // It should not be considered as a real use.
-        // if (DT.dominates(BI->getSuccessor(0), Cur) || DT.dominates(BI->getSuccessor(1), Cur))
-        //   return cast<Instruction>(BI->getOperand(0));
-        return (Instruction*) nullptr;
-      }
-
-      // TODO: Call is tricky. Call can pass a null pointer without deference it.
-      if (DT.dominates(I->getParent(), Cur)) {
-        return I;
-      }
-
-      return (Instruction*) nullptr;
-    };
-
-
-    std::function<Instruction*(Value*,BasicBlock*)> IsDominatedByAnyUseOf;
-    IsDominatedByAnyUseOf = [&](Value*V, BasicBlock *Cur) {
-      // If V itself is a GEP, we should check its base;
-      if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(V)) {
-        return IsDominatedByAnyUseOf(GEP->getPointerOperand(), Cur);
-      }
-
-      // strip all pointer casts here because here is the start point.
-      V = V->stripPointerCasts();
-
-      for (auto &U : V->uses()) {
-        Instruction *I = dyn_cast<Instruction>(U.getUser());
-        if (!I)
-          continue;
-
-        if (auto *RU = IsDominatedBySelfOrRealUse(I, Cur))
-          return RU;
-      }
-
-      return (Instruction*) nullptr;
-    };
-
-
-    auto UpdateCommonDom = [&](BasicBlock* Common, BasicBlock *New) {
-      if (Common == nullptr)
-        return New;
-      if (Common == New)
-        return New;
-      return DT.findNearestCommonDominator(Common, New);
-    };
-
-    auto GetUseCommonDom = [&](Instruction* V) {
-        BasicBlock *CommonDom = nullptr;
-        // dbgs() << "Checking " << *GEP << " in " << F.getName() << "\n";
-        for (auto &U : V->uses()) {
-          Instruction *I = dyn_cast<Instruction>(U.getUser());
-          if (!I)
-            continue;
-          if (PHINode *PN = dyn_cast<PHINode>(I)) {
-            unsigned Num = PHINode::getIncomingValueNumForOperand(U.getOperandNo());
-            CommonDom = UpdateCommonDom(CommonDom, PN->getIncomingBlock(Num));
-          } else {
-            CommonDom = UpdateCommonDom(CommonDom, I->getParent());
-          }
-        }
-
-        return CommonDom;
-    };
-
-    // 1). Collect all candidates
-    SmallVector<Value*, 16> ToBeMoved;
-    for (Instruction &I : instructions(F)) {
-      if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(&I)) {
-        // For newly created GEP for moved GEP from front
-        // TODO: currently we only mark moved GEP in LICM. We need to mark more such
-        // pointers in all optimizations.
-        if (!GEP->hasMetadata("go.gep") || GEP->hasMetadata("go.hoisted")) {
-          if (!InAnyStackMap(GEP)) {
-            // dbgs() << "A hoisted GEP is not used in any stack map: " << *GEP << " in " << F.getName() << "\n";
-            continue;
-          }
-
-          if (IsDominatedByAnyUseOf(GEP->getPointerOperand(), GEP->getParent())) {
-            // Note the real use may be in the same block as GEP.
-            // In this case, the real USE of base may not dominate the GEP.
-            // It is still safe here because the real USE and the GEP can be executed together
-            // unconditionally.
-            // dbgs() << "A hoisted GEP is dominated by some real use of the GEP: " << *GEP << " and use: " << *RU << " in " << F.getName() << "\n";
-            continue;
-          }
-
-          BasicBlock *CommonDom = GetUseCommonDom(GEP);
-          if (CommonDom == nullptr || CommonDom == GEP->getParent())
-            continue;
-
-          auto *DefNode = DT.getNode(GEP->getParent());
-          auto *DomNode = DT.getNode(CommonDom);
-          BasicBlock *NewDst = nullptr;
-          while (DomNode != nullptr) {
-            if (DomNode == DefNode) {
-              break;
-            }
-            DomNode = DomNode->getIDom();
-
-            if (IsDominatedByAnyUseOf(GEP->getPointerOperand(), DomNode->getBlock())) {
-              // Test if we can move to DomNode.
-              NewDst = DomNode->getBlock();
-            }
-          }
-
-          // dbgs() << "The DOM of all use of " << *GEP << " is " << CommonDom->getName() << "\n";
-          ToBeMoved.push_back(GEP);
-          if (NewDst != nullptr) {
-            // dbgs() << "We have found a better one: " << NewDst->getName() << " than " << CommonDom->getName()  << "\n";
-            assert(DT.dominates(GEP->getParent(), NewDst) && "invariant");
-            ToBeMoved.push_back(NewDst);
-          } else {
-            assert(DT.dominates(GEP->getParent(), CommonDom) && "invariant");
-            ToBeMoved.push_back(CommonDom);
-          }
-        }
-      }
-    }
-
-    if (!ToBeMoved.empty()) {
-      for (unsigned i = 0; i < ToBeMoved.size(); i +=2) {
-        GetElementPtrInst *GEP = cast<GetElementPtrInst>(ToBeMoved[i]);
-        BasicBlock *Dst = cast<BasicBlock>(ToBeMoved[i + 1]);
-
-        if (PrintMoved)
-          dbgs() << "move GEP " << *GEP << " to " << Dst->getName() << " in " << F.getName() << "\n";
-
-        assert(Data.LiveIn[Dst].count(GEP) && "invariant: GEP must be live in DOM");
-
-        BasicBlock *Src = GEP->getParent();
-        Value *Base = GEP->getPointerOperand();
-
-        // Remove GEP from current BB's LiveSet
-        Data.LiveSet[Src].remove(GEP);
-        // Replace GEP by Base in LiveOut
-        Data.LiveOut[Src].remove(GEP);
-        Data.LiveOut[Src].insert(Base);
-
-        SmallVector<BasicBlock*, 32> Worklist;
-        SmallSet<BasicBlock*, 32> Visited;
-
-        Worklist.push_back(Src);
-        while (!Worklist.empty()) {
-          BasicBlock *Cur = Worklist.pop_back_val();
-          Visited.insert(Cur);
-
-          for (BasicBlock *Succ : successors(Cur)) {
-            if (Visited.count(Succ))
-              continue;
-
-            if (Succ == Dst)
-              continue;
-
-            // Not live-through this GEP
-            if (!Data.LiveOut[Succ].count(GEP))
-              continue;
-
-            // Replace GEP by Base in LiveOut and LiveIn
-            Data.LiveIn[Succ].remove(GEP);
-            Data.LiveIn[Succ].insert(Base);
-            Data.LiveOut[Succ].remove(GEP);
-            Data.LiveOut[Succ].insert(Base);
-
-            Worklist.push_back(Succ);
-          }
-        }
-
-        Data.LiveSet[Dst].insert(GEP);
-        Data.LiveIn[Dst].remove(GEP);
-        Data.LiveIn[Dst].insert(Base);
-
-        //TODO: Do we need to update DebugLoc here?
-        GEP->moveBefore(Dst->getFirstNonPHIOrDbg());
       }
     }
   }

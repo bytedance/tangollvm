@@ -71,7 +71,7 @@ convertBitVectorToBytesVector(uint32_t &Size, BitVector &BV, std::vector<uint8_t
   if (BV.none())
     return;
   int last = BV.find_last();
-  Size = last + 1;
+  Size = std::max(uint32_t(last + 1), Size);
   Bytes.reserve(last/8 + 1);
   int i;
   for (i = 0; i <= last; i += 8) {
@@ -166,6 +166,9 @@ computeBitVector(const Function * Fn, uint64_t StackSize, bool requireFP,
       dbgs() << "Idx: " << Idx << "\n";
 #endif
 
+      if (IsLocal)
+        LocalsSize = std::max(LocalsSize, Idx + 1);
+
       // If a slot is following a "Constant" location, it is an aggregate type
       // and that constant encodes the pointer bitmap.
       if (i+1 < n &&
@@ -178,7 +181,7 @@ computeBitVector(const Function * Fn, uint64_t StackSize, bool requireFP,
         // Make sure it is a local/arg slot, not a spill of in-register value.
         assert(Loc.Type == StackMaps::Location::Direct);
         i++;
-        for (; i < n && CSLocs[i].Type == StackMaps::Location::Constant; i++) {
+	for (; i < n && CSLocs[i].Type == StackMaps::Location::Constant; i++) {
           if (Idx + 32 >= BV->size())
             BV->resize(Idx + 32);
           uint32_t Bits = CSLocs[i].Offset;

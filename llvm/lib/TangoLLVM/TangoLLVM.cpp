@@ -15,21 +15,24 @@
 #include "llvm-c/Core.h"
 #include "llvm-c/TangoLLVM.h"
 #include "llvm/ADT/APInt.h"
+#include "llvm/Analysis/AssumeBundleQueries.h"
+#include "llvm/Analysis/MemoryBuiltins.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/DebugLoc.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/IntrinsicInst.h"
-#include "llvm/IR/InstIterator.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/CBindingWrapping.h"
 #include "llvm/TangoLLVM/TangoLLVM.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
-#include "llvm/Support/CBindingWrapping.h"
 
 namespace llvm {
 
@@ -861,6 +864,111 @@ GlobalVariable *TangoLLVM::createGoGlobalVariable(Type *Ty, GlobalValue::Linkage
   return G;
 }
 
+uint64_t TangoLLVM::getDereferSize(const Value* V, unsigned Idx, bool FnParam) {
+  MDNode *MD = nullptr;
+  if (const GlobalObject * GO = dyn_cast<GlobalObject>(V)) {
+    if (!GO->hasMetadata(getGoMetadataName(GoMetadata::DereferSize)))
+      return 0;
+    MD = GO->getMetadata(getGoMetadataName(GoMetadata::DereferSize));
+  } else if (const Instruction *I = dyn_cast<Instruction>(V)) {
+    if (!I->hasMetadata(getGoMetadataName(GoMetadata::DereferSize)))
+      return 0;
+    MD = I->getMetadata(getGoMetadataName(GoMetadata::DereferSize));
+  }
+  if (MD == nullptr)
+    return 0;
+  assert(MD->getNumOperands() >= 3);
+  ConstantInt *CI = mdconst::extract<ConstantInt>(MD->getOperand(0));
+  uint64_t Len = CI->getLimitedValue();
+  unsigned Start = 1;
+  unsigned End = 1 * 2 * Len;
+  if (FnParam) {
+    // len, {idx, value} ..., len, {idx, value}...
+    // ............................start here...
+    Start = 1 + 2 * Len + 1;
+    End = MD->getNumOperands();
+  }
+  for (; Start < End; Start += 2) {
+    CI = mdconst::extract<ConstantInt>(MD->getOperand(Start));
+    if (Idx == CI->getLimitedValue()) {
+      CI = mdconst::extract<ConstantInt>(MD->getOperand(Start + 1));
+      return CI->getLimitedValue();
+    }
+  }
+  return 0;
+}
+
+static bool isDereferenceableImpl(const Value *V,
+                                  const APInt &Size,
+                                  const DataLayout &DL,
+                                  const TargetLibraryInfo &TLI,
+                                  SmallPtrSetImpl<const Value *> &Visited,
+                                  unsigned MaxDepth) {
+  if (MaxDepth-- == 0)
+    return false;
+
+  if (!Visited.insert(V).second)
+    return false;
+
+  if (const GEPOperator *GEP = dyn_cast<GEPOperator>(V)) {
+    APInt Offset(DL.getIndexTypeSizeInBits(GEP->getType()), 0);
+    if (!GEP->accumulateConstantOffset(DL, Offset) || Offset.isNegative())
+      return false;
+
+    const Value *Base = GEP->getPointerOperand();
+    return isDereferenceableImpl(Base, Offset + Size, DL, TLI, Visited, MaxDepth);
+  }
+
+  if (const BitCastOperator *BC = dyn_cast<BitCastOperator>(V)) {
+    if (BC->getSrcTy()->isPointerTy())
+      return isDereferenceableImpl(BC->getOperand(0), Size, DL, TLI, Visited, MaxDepth);
+  }
+
+  if (const SelectInst * Sel = dyn_cast<SelectInst>(V))
+    return isDereferenceableImpl(Sel->getTrueValue(), Size, DL, TLI, Visited, MaxDepth) &&
+           isDereferenceableImpl(Sel->getFalseValue(), Size, DL, TLI, Visited, MaxDepth);
+
+  if (const PHINode * PN = dyn_cast<PHINode>(V)) {
+    for (unsigned i = 0; i < PN->getNumIncomingValues(); ++i) {
+      if (!isDereferenceableImpl(PN->getIncomingValue(i), Size, DL, TLI, Visited, MaxDepth))
+        return false;
+    }
+    return true;
+  }
+
+  uint64_t DerefBytes = 0;
+  // get the deref size from metadata first
+  if (const Argument *A = dyn_cast<Argument>(V)) {
+    const Function *F = A->getParent();
+    unsigned ArgNo = A->getArgNo();
+    DerefBytes = TangoLLVM::getDereferSize(F, ArgNo, true);
+  } else if (auto * I = dyn_cast<Instruction>(V)) {
+    DerefBytes = TangoLLVM::getDereferSize(I, 0);
+  }
+  // if the metadata is not set, compute the size of object pointed
+  // by ptr. see ObjectSizeOffsetVisitor.
+  if (DerefBytes == 0) {
+    ObjectSizeOpts Opts;
+    Opts.RoundToAlign = false;
+    Opts.NullIsUnknownSize = true;
+    uint64_t ObjSize;
+    (void)getObjectSize(V, DerefBytes, DL, &TLI, Opts);
+  }
+  APInt KnownDerefBytes(Size.getBitWidth(), DerefBytes);
+  if (KnownDerefBytes.getBoolValue() && KnownDerefBytes.uge(Size)) {
+    return true;
+  }
+
+  return false;
+}
+
+bool TangoLLVM::isDereferenceable(const Value *V,
+                                  const APInt &Size,
+                                  const DataLayout &DL,
+                                  const TargetLibraryInfo &TLI) {
+  SmallPtrSet<const Value *, 32> Visited;
+  return isDereferenceableImpl(V, Size, DL, TLI, Visited, 16);
+}
 
 } // namespace llvm
 

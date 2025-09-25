@@ -9,11 +9,13 @@
 #ifndef LLVM_IR_TANGOLLVM_H_
 #define LLVM_IR_TANGOLLVM_H_
 
+#include <llvm/Analysis/AssumptionCache.h>
+#include <llvm/CodeGen/MachineInstr.h>
+#include <llvm/IR/Constants.h>
+#include "llvm/IR/Dominators.h"
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/IntrinsicInst.h>
-#include <llvm/IR/Constants.h>
-#include <llvm/CodeGen/MachineInstr.h>
 
 
 namespace llvm {
@@ -30,6 +32,11 @@ enum class GoMetadata {
   PointerValue,
   // uintptr created by the front-end, which can be converted into a pointer.
   PointerLikeValue,
+  // The number of bytes known to be dereferenceable
+  // for function, it would be
+  // |------- ret -------|------ param ------|
+  // |len{idx:value, ...}, len{idx:value,...}
+  DereferSize,
 
   // Count of metadata
   MaxMetadata
@@ -50,6 +57,25 @@ enum class GoAdHocABI {
 class TangoLLVM {
 
 public:
+
+  static bool isGoPanicBounds(StringRef Name) {
+    if (!Name.consume_front("runtime."))
+      return false;
+    if (!Name.consume_front("panic"))
+      return false;
+
+    return StringSwitch<bool>(Name)
+        .Cases("Slice3Alen", "Slice3AlenU", true)
+        .Cases("Slice3Acap", "Slice3AcapU", true)
+        .Case("SliceConvert", true)
+        .Cases("SliceAlen", "SliceAlenU", true)
+        .Cases("SliceAcap", "SliceAcapU", true)
+        .Cases("Slice3B", "Slice3BU", true)
+        .Cases("Index", "IndexU", true)
+        .Cases("SliceB", "SliceBU", true)
+        .Cases("Slice3C", "Slice3CU", true)
+        .Default(false);
+  }
 
   static bool intrinsifyMemClr(CallInst *CI);
   static bool intrinsifyStrHash(CallInst *CI);
@@ -87,6 +113,8 @@ public:
       return "go.pointervalue";
     case GoMetadata::PointerLikeValue:
       return "go.pointerlikevalue";
+      case GoMetadata::DereferSize:
+      return "go.derefersize";
     }
 
     return nullptr;
@@ -237,6 +265,13 @@ public:
       StringRef N, Module *M);
   static GlobalVariable *createGoGlobalVariable(Type *ValueType, GlobalValue::LinkageTypes Linkage,
       StringRef N, Module *M);
+
+  static uint64_t getDereferSize(const Value* V, unsigned Idx = 0, bool FnParam = false);
+
+  static bool isDereferenceable(const Value *V,
+                                const APInt &Size,
+                                const DataLayout &DL,
+                                const TargetLibraryInfo &TLI);
 };
 
 
