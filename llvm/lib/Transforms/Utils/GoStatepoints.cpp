@@ -2583,6 +2583,8 @@ struct GEPUsages {
   GoSmallSet<Instruction*> FirstUsages;
   // first usage -> id
   GoSmallMap<Instruction*, unsigned> FUIds;
+  // id -> first usage, only for query
+  GoSmallMap<unsigned, Instruction*> Id2Fu;
   // the ids of first usages that through stack map
   GoSmallSet<unsigned> UnsafeIds;
   // the following usages of a first usage, the key is the id of the first usage
@@ -2745,6 +2747,7 @@ public:
 
 static SetVector<GetElementPtrInst*> analyzeGepUsages(
     Function &F,
+    DominatorTree &DT,
     SetVector<GetElementPtrInst*> &WorkSet,
     DenseMap<Value*, GEPUsages> &GEPUsages,
     ReHoistDebugger &Debugger) {
@@ -2798,13 +2801,20 @@ static SetVector<GetElementPtrInst*> analyzeGepUsages(
           Ids[GEP] = MergeId(Ids[GEP], Pair.second);
       }
     }
-    for (auto &Pair: Count)
-      if (Pair.second < pred_size(BB))
+    for (auto &Pair: Count) {
+      Value *GEP = Pair.first;
+      unsigned Id = Ids[GEP];
+      unsigned C = Pair.second;
+      if (C < pred_size(BB))
         // if some of BB's predecessors have not been analyzed, treated it
-        // as the first usage, this may happen when we meet a back edge.
-        // maybe it's a bit more conservative
-        if (Ids[Pair.first] > StackMap)
-          Ids[Pair.first] = StackMap;
+        // as the first usage, unless a known first usage dom the BB. this
+        // may happen when we meet a back edge. maybe it's a bit more conservative
+        if (Id > StackMap) {
+          Instruction *FU = GEPUsages[Pair.first].Id2Fu[Id];
+          if (isa<PHINode>(FU) || !DT.dominates(FU->getParent(), BB))
+            Ids[Pair.first] = StackMap;
+        }
+    }
   };
   auto ProcessBB = [&](BasicBlock *BB, SmallSetVector<BasicBlock*, 16>& Worklist) {
     DenseMap<Value*, unsigned> Ids;
@@ -2857,6 +2867,7 @@ static SetVector<GetElementPtrInst*> analyzeGepUsages(
             Id = GetId(GEP);
             GEPUsages[GEP].FirstUsages.insert(&I);
             GEPUsages[GEP].FUIds[&I] = Id;
+            GEPUsages[GEP].Id2Fu[Id] = &I;
           }
           Ids[GEP] = GEPUsages[GEP].FUIds[&I];
           // there is state point between def and first usage
@@ -3030,7 +3041,7 @@ static bool reHoistGEP(DominatorTree &DT, LoopInfo &LI, Function &F,
     }
 
     DenseMap<Value *, GEPUsages> GEPUsages;
-    auto NeedMove = analyzeGepUsages(F, WorkSet, GEPUsages, Debugger);
+    auto NeedMove = analyzeGepUsages(F, DT, WorkSet, GEPUsages, Debugger);
     Debugger.printAnalyzeResult(WorkSet, NeedMove, NNGeps, NonDerefGEPs, GEPUsages);
     moveHoistedGEP(F, DT, NeedMove, GEPUsages, Debugger);
     Changed |= !NeedMove.empty();
