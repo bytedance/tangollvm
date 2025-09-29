@@ -15,6 +15,7 @@
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/InstructionSimplify.h"
+#include "llvm/Analysis/ProfileSummaryInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
@@ -49,9 +50,6 @@ static cl::opt<bool> AggressiveSpecialization("go-aggressive-spec", cl::Hidden,
 
 static cl::opt<uint32_t> GoMaxSpecInlineSize("go-max-spec-inline-size", cl::Hidden,
                                   cl::init(2500));
-
-static bool replaceLoadROData(Function &F);
-static bool runOnFunction(Function &F, bool specialize, bool useinline);
 
 static bool intrinsifyGoBuiltins(Function &F) {
   SmallVector<CallInst*, 4> MemClrs;
@@ -158,7 +156,7 @@ static bool isSupportedArg(const Value *V) {
 
 const uint64_t AggressiveFlag = 1 << 31;
 
-static CallInst *specializeCall(Function &F, CallInst *CI, bool Aggressive) {
+CallInst *GoRODataPass::specializeCall(ProfileSummaryInfo& PSI, Function &F, CallInst *CI, bool Aggressive) {
   Function* Callee = CI->getCalledFunction();
   if (Callee->hasMetadata("go.specialized"))
     return nullptr;
@@ -237,7 +235,7 @@ static CallInst *specializeCall(Function &F, CallInst *CI, bool Aggressive) {
 
     NewCallee->setMetadata("go.specialized", MDNode::get(Callee->getContext(), {}));
 
-    runOnFunction(*NewCallee, true, true);
+    runOnFunction(PSI, *NewCallee, true, true);
 
     ++NumSpecializedFunc;
   }
@@ -253,7 +251,7 @@ static CallInst *specializeCall(Function &F, CallInst *CI, bool Aggressive) {
   return NewCI;
 }
 
-static bool specializeGoBuiltins(Function &F, bool UseInline) {
+bool GoRODataPass::specializeGoBuiltins(ProfileSummaryInfo& PSI, Function &F, bool UseInline) {
   if (!EnableGoSpecialization)
     return false;
 
@@ -331,7 +329,7 @@ static bool specializeGoBuiltins(Function &F, bool UseInline) {
         LLVM_DEBUG(dbgs() << "GoROData: " << F.getName() << ": inline a specialize function " << Callee->getName() << "\n");
       }
     } else {
-      CallInst *NewCI = specializeCall(F, CI, AggressiveSpecialization);
+      CallInst *NewCI = specializeCall(PSI, F, CI, AggressiveSpecialization);
       if (NewCI != nullptr) {
         Changed = true;
         NewCI->insertBefore(CI);
@@ -346,7 +344,7 @@ static bool specializeGoBuiltins(Function &F, bool UseInline) {
   return Changed;
 }
 
-static bool replaceLoadROData(Function &F) {
+bool GoRODataPass::replaceLoadROData(Function &F) {
   bool Changed = false;
 
   const DataLayout &DL = F.getParent()->getDataLayout();
@@ -361,7 +359,7 @@ static bool replaceLoadROData(Function &F) {
   while (!Worklist.empty()) {
     LoadInst *LI = Worklist.pop_back_val();
 
-    Constant *NewValue = TangoLLVM::resolveLoadROData(LI, DL);
+    Constant *NewValue = resolveLoadROData(LI, DL);
     if (NewValue != nullptr) {
       LLVM_DEBUG(dbgs() << "GoROData: " << F.getName() << ": replace" << *LI
           << " by constant value ";
@@ -388,12 +386,13 @@ static bool replaceLoadROData(Function &F) {
   return Changed;
 }
 
-static bool runOnFunction(Function &F, bool Specialize, bool UseInline) {
+bool GoRODataPass::runOnFunction(ProfileSummaryInfo& PSI, Function &F, bool Specialize, bool UseInline) {
   bool Changed = false;
   while (true) {
     bool IterChanged = replaceLoadROData(F);
     IterChanged |= intrinsifyGoBuiltins(F);
-    if (Specialize && specializeGoBuiltins(F, UseInline)) {
+    auto Hot = F.hasProfileData() ? PSI.isFunctionEntryHot(&F) : true;
+    if (Specialize && Hot && specializeGoBuiltins(PSI, F, UseInline)) {
       IterChanged = true;
     }
     if (!IterChanged) {
@@ -404,10 +403,11 @@ static bool runOnFunction(Function &F, bool Specialize, bool UseInline) {
   return Changed;
 }
 
-PreservedAnalyses GoRODataPass::run(Module &M, ModuleAnalysisManager &) {
+PreservedAnalyses GoRODataPass::run(Module &M, ModuleAnalysisManager &MAM) {
   if (!EnableGoROData)
     return PreservedAnalyses::all();
 
+  auto &PSI = MAM.getResult<ProfileSummaryAnalysis>(M);
   bool Changed = false;
 
   for (Function &F : M) {
@@ -417,7 +417,7 @@ PreservedAnalyses GoRODataPass::run(Module &M, ModuleAnalysisManager &) {
     if (F.isIntrinsic())
       continue;
 
-    Changed |= runOnFunction(F, Options.Specialize, false);
+    Changed |= runOnFunction(PSI, F,  Options.Specialize, false);
   }
 
   if (!Changed)
@@ -467,7 +467,31 @@ static PtrAndOff findBasePtrAndOff(Value *V, const DataLayout &DL) {
   return {};
 }
 
-Constant *TangoLLVM::resolveLoadROData(LoadInst *LI, const DataLayout &DL) {
+static GoROData buildRODataRelocation(MDNode *ROData) {
+  GoROData data;
+  auto *MDRel = cast<MDNode>(ROData->getOperand(1));
+  for (unsigned i = 0; i + 4 < MDRel->getNumOperands(); i += 5) {
+    auto getI64 = [&](unsigned idx)->int64_t {
+      auto *C = cast<ConstantAsMetadata>(MDRel->getOperand(i+idx));
+      return cast<ConstantInt>(C->getValue())->getZExtValue();
+    };
+
+    int64_t enabled = getI64(0);
+    uint64_t off    = (uint64_t)getI64(1);
+    uint64_t siz    = (uint64_t)getI64(2);
+    int64_t addend  = getI64(3);
+
+    StringRef sym;
+    if (auto *S = dyn_cast<MDString>(MDRel->getOperand(i+4)))
+      sym = S->getString();
+
+    data.relocs.push_back({off, siz, addend, enabled, sym.str()});
+  }
+
+  return data;
+}
+
+Constant *GoRODataPass::resolveLoadROData(LoadInst *LI, const DataLayout &DL) {
   auto PO = findBasePtrAndOff(LI->getPointerOperand(), DL);
   GlobalVariable *GV = PO.GV;
   if (GV == nullptr) {
@@ -479,10 +503,8 @@ Constant *TangoLLVM::resolveLoadROData(LoadInst *LI, const DataLayout &DL) {
   if (!ROData) {
     return nullptr;
   }
-
   const unsigned PtrSizeInBits = DL.getPointerSizeInBits();
   assert(PtrSizeInBits == 64 && "64bit only");
-
   Type *ValType = LI->getType();
   // TODO: ValSize could be zero in LLVM but non-zero in Go, e.g., empty struct
   auto ValSize = DL.getTypeStoreSize(ValType);
@@ -499,17 +521,23 @@ Constant *TangoLLVM::resolveLoadROData(LoadInst *LI, const DataLayout &DL) {
   Module *M = LI->getParent()->getParent()->getParent();
 
   if (ROData->getNumOperands() == 2) {
-    MDNode *Reloc = cast<MDNode>(ROData->getOperand(1));
+    // load cache
+    GoROData data;
+    auto It = GVMap.find(GV);
+    if (It == GVMap.end()) {
+      data = buildRODataRelocation(ROData);
+      GVMap[GV] = data;
+    } else {
+      data = It->second;
+    }
 
+    for (auto Reloc: data.relocs) {
     // Function *F = LI->getParent()->getParent();
     // dbgs() << F->getName() << " GlobalVariable: "
     //   << *LI << ", GV="
     //   << *GV << ", Reloc=" << *Reloc << "\n";
-    for (unsigned i = 0; i < Reloc->getNumOperands(); i += 5) {
-      uint64_t Off = dyn_cast<ConstantAsMetadata>(Reloc->getOperand(i + 1))
-        ->getValue()->getUniqueInteger().getZExtValue();
-      uint64_t Siz = dyn_cast<ConstantAsMetadata>(Reloc->getOperand(i + 2))
-        ->getValue()->getUniqueInteger().getZExtValue();
+      uint64_t Off = Reloc.off;
+      uint64_t Siz = Reloc.size;
 
       // We must stop constant replacement if the Offset+ValSize has overlap with the Reloc
       if (Off < Offset) {
@@ -524,10 +552,9 @@ Constant *TangoLLVM::resolveLoadROData(LoadInst *LI, const DataLayout &DL) {
         break;
       }
 
-      uint64_t enabled = dyn_cast<ConstantAsMetadata>(Reloc->getOperand(i + 0))
-        ->getValue()->getUniqueInteger().getZExtValue();
-      if (enabled == 0)
-        return nullptr; // unknown relocation type or invalid offset
+      if (Reloc.enabled == 0) {
+        return nullptr;
+      }
 
       // Now, we can only return a pointer or pointer-like integer
       if (!(ValType->isPointerTy() || ValType->isIntegerTy(PtrSizeInBits)))
@@ -537,11 +564,12 @@ Constant *TangoLLVM::resolveLoadROData(LoadInst *LI, const DataLayout &DL) {
       if (Siz != PtrSizeInBits/8)
         return nullptr;
 
-      if (Reloc->getOperand(i + 4) == nullptr)
-        return nullptr; // constant symbol is dead and removed by GlobalOpt
-
       Value *Ptr = nullptr;
-      StringRef PtrName = dyn_cast<MDString>(Reloc->getOperand(i + 4))->getString();
+      StringRef PtrName = Reloc.sym;
+      if (Reloc.sym.empty()) {
+        return nullptr;
+      }
+
       Ptr = M->getGlobalVariable(PtrName);
       if (Ptr == nullptr)
         Ptr = M->getFunction(PtrName);
@@ -550,8 +578,7 @@ Constant *TangoLLVM::resolveLoadROData(LoadInst *LI, const DataLayout &DL) {
 
       assert(Ptr->getType()->isPointerTy() && "must be a global");
 
-      uint64_t Add = dyn_cast<ConstantAsMetadata>(Reloc->getOperand(i + 3))
-        ->getValue()->getUniqueInteger().getZExtValue();
+      uint64_t Add = Reloc.addend;
 
       Constant *NewValue = nullptr;
       if (Add != 0) {
@@ -639,13 +666,6 @@ Constant *TangoLLVM::resolveLoadROData(LoadInst *LI, const DataLayout &DL) {
   }
 
   return nullptr;
-}
-
-Value* TangoLLVM::simplifyLoadGoROData(LoadInst *LI) {
-  if (!EnableGoROData)
-    return nullptr;
-  const DataLayout &DL = LI->getDataLayout();
-  return TangoLLVM::resolveLoadROData(LI, DL);
 }
 
 static bool expectZeroBytes(StringRef Bytes, size_t Pos, size_t Len) {
@@ -822,7 +842,7 @@ static Constant* buildConstFromBytes(Type *T, StringRef Bytes, size_t &Off,
   return emitErr("unsupported IR type in rodata decode");
 }
 
-static GlobalVariable* materializeROInit(const GlobalVariable &G, Module &M) {
+GlobalVariable* GORoDataInitializerPass::materializeROInit(GlobalVariable &G, Module &M) {
   auto *Top = dyn_cast_or_null<MDNode>(G.getMetadata("go.rodata"));
   if (!Top) return nullptr;
 
@@ -833,35 +853,25 @@ static GlobalVariable* materializeROInit(const GlobalVariable &G, Module &M) {
   if (Zero) return nullptr;
 
   StringRef Bytes = MDBytes->getString();
-  SmallVector<GoReloc, 8> R;
+  GoROData data;
   if (Top->getNumOperands() == 2) {
-    auto *MDRel = cast<MDNode>(Top->getOperand(1));
-    for (unsigned i = 0; i + 4 < MDRel->getNumOperands(); i += 5) {
-      auto getI64 = [&](unsigned idx)->int64_t {
-        auto *C = cast<ConstantAsMetadata>(MDRel->getOperand(i+idx));
-        return cast<ConstantInt>(C->getValue())->getSExtValue();
-      };
+    // load cache
+    auto It = GVMap.find(&G);
+    if (It == GVMap.end()) {
+      data = buildRODataRelocation(Top);
+      GVMap[&G] = data;
+    } else {
+      data = It->second;
+    }
 
-      int64_t enabled = getI64(0);
-      uint64_t off    = (uint64_t)getI64(1);
-      uint64_t siz    = (uint64_t)getI64(2);
-      int64_t addend  = getI64(3);
-
-      if (enabled == 0) {
-        return nullptr;
-      }
-      StringRef sym;
-      if (auto *S = dyn_cast<MDString>(MDRel->getOperand(i+4)))
-        sym = S->getString();
-
-      if (enabled == 1 && siz == 8 && off + 8 <= Bytes.size()) {
-        R.push_back({off, addend, sym.str()});
-      } else {
+    for (auto reloc : data.relocs) {
+      if (reloc.enabled == 0 || reloc.sym.empty()) {
         return nullptr;
       }
     }
   }
 
+  auto R = data.relocs;
   auto &DL = M.getDataLayout();
   if (R.empty() && isa<StructType>(G.getValueType())) {
       LLVMContext &C = M.getContext();

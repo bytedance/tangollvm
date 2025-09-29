@@ -7,6 +7,7 @@
 #ifndef LLVM_TRANSFORMS_IPO_GORODATA_H
 #define LLVM_TRANSFORMS_IPO_GORODATA_H
 
+#include "llvm/Analysis/ProfileSummaryInfo.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/PassManager.h"
@@ -19,28 +20,44 @@ struct GoRODataOptions {
   GoRODataOptions(bool Specialize = false) : Specialize(Specialize) {}
 };
 
+struct GoReloc {
+  uint64_t off;
+  uint64_t size;
+  int64_t addend;
+  int64_t enabled;
+  std::string sym;
+};
+
+struct GoROData {
+  bool invalid = false;
+  SmallVector<GoReloc, 4> relocs;
+};
+
 struct GoRODataPass : public PassInfoMixin<GoRODataPass> {
   GoRODataOptions Options;
 
+private:
+  DenseMap<GlobalVariable *, GoROData> GVMap;
 public:
   GoRODataPass() = default;
-
   GoRODataPass(GoRODataOptions Options) : Options(Options) {}
 
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &);
-};
-
-struct GoReloc {
-  uint64_t off;
-  int64_t addend;
-  std::string sym;
+  bool specializeGoBuiltins(ProfileSummaryInfo& PSI, Function &F, bool UseInline);
+  CallInst *specializeCall(ProfileSummaryInfo& PSI, Function &F, CallInst *CI, bool Aggressive);
+  bool replaceLoadROData(Function &F);
+  bool runOnFunction(ProfileSummaryInfo& PSI, Function &F, bool Specialize, bool UseInline);
+  Constant *resolveLoadROData(LoadInst *LI, const DataLayout &DL);
 };
 
 struct GORoDataInitializerPass : public PassInfoMixin<GORoDataInitializerPass> {
 public:
   GORoDataInitializerPass() = default;
 
+  GlobalVariable* materializeROInit(GlobalVariable &G, Module &M);
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &);
+private:
+  DenseMap<GlobalVariable *, GoROData> GVMap;
 };
 
 struct GORoDataRestorePass : public PassInfoMixin<GORoDataRestorePass> {
