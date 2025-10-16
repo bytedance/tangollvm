@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-10-16.
 //===----------------------------------------------------------------------===//
 #include "PerfReader.h"
 #include "ProfileGenerator.h"
@@ -163,6 +165,17 @@ void VirtualUnwinder::unwindReturn(UnwindState &State) {
   // Add extra frame as we unwind through the return
   const LBREntry &LBR = State.getCurrentLBR();
   uint64_t CallAddr = Binary->getCallAddrFromFrameAddr(LBR.Target);
+  if (CallAddr == 0 && State.CurrentLeafFrame->Address != CallAddr) {
+    // LBR.Target usually represents the return address, but for
+    // runtime.goexit, it is the call address.
+    // See proc.go/newproc1 and proc.go/oneNewExtraM
+    // gp.sched.pc = abi.FuncPCABI0(goexit) + sys.PCQuantum
+    const FuncRange * FR = Binary->findFuncRange(LBR.Target);
+    if (FR && FR->Func && FR->Func->FuncName == "runtime.goexit") {
+      assert(Binary->addressIsCode(LBR.Target));
+      CallAddr = LBR.Target;
+    }
+  }
   State.switchToFrame(CallAddr);
   State.pushFrame(LBR.Source);
   State.InstPtr.update(LBR.Source);
