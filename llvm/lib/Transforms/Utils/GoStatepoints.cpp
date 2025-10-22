@@ -3211,7 +3211,9 @@ static bool legalizeTangoLLVMIR(Function &F, DomTreeUpdater *DTU) {
       TangoLLVM::prepareFixGoPanicReturn(BB);
 
       SmallVector<DominatorTree::UpdateType, 2> DTUpdates;
+      SmallVector<BasicBlock*, 2> Succs;
       for (BasicBlock *Succ : successors(BB)) {
+        Succs.push_back(Succ);
         DTUpdates.push_back({DominatorTree::Delete, BB, Succ});
       }
 
@@ -3219,6 +3221,11 @@ static bool legalizeTangoLLVMIR(Function &F, DomTreeUpdater *DTU) {
       T->eraseFromParent();
 
       DTU->applyUpdates(DTUpdates);
+
+      for (BasicBlock *Succ : Succs) {
+        if (pred_size(Succ) == 0)
+          DTU->deleteBB(Succ);
+      }
 
       IRBuilder<> Builder(BB);
       Builder.CreateUnreachable();

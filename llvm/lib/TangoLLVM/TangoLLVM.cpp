@@ -488,11 +488,17 @@ void TangoLLVM::prepareFixGoPanicReturn(BasicBlock *BB) {
       while (I != Succ->end() && isa<PHINode>(I)) {
         auto PN = cast<PHINode>(I);
         int Num = PN->getBasicBlockIndex(BB);
+        Value* IncomingValue = nullptr;
         if (Num != -1) {
+          IncomingValue = PN->getIncomingValue(Num);
           // manually remove PH and update iterator accordingly
           PN->removeIncomingValue(Num, false);
         }
         if (PN->getNumOperands() == 0) {
+          if (!PN->use_empty()) {
+            assert(IncomingValue != nullptr && "invariant");
+            PN->replaceAllUsesWith(IncomingValue);
+          }
           I = PN->eraseFromParent();
           continue;
         }
