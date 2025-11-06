@@ -1607,7 +1607,7 @@ PassBuilder::buildPerModuleDefaultPipeline(OptimizationLevel Level,
   MPM.addPass(buildModuleSimplificationPipeline(Level, LTOPhase));
 
   if (TM->getTargetTriple().isGoEnvironment()) {
-    MPM.addPass(GoRODataPass(GoRODataOptions(true)));
+    MPM.addPass(GoRODataPass(GoRODataOptions(true, false)));
     if (UseGoGlobalInitRestoreOpt) {
       MPM.addPass(GORoDataInitializerPass());
     }
@@ -1620,7 +1620,7 @@ PassBuilder::buildPerModuleDefaultPipeline(OptimizationLevel Level,
     if (UseGoGlobalInitRestoreOpt) {
       MPM.addPass(GORoDataRestorePass());
     }
-    MPM.addPass(GoRODataPass(GoRODataOptions(true)));
+    MPM.addPass(GoRODataPass(GoRODataOptions(true, false)));
   }
 
   if (PGOOpt && PGOOpt->PseudoProbeForProfiling &&
@@ -1784,13 +1784,6 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
   // in the current module.
   MPM.addPass(CrossDSOCFIPass());
 
-  if (TM->getTargetTriple().isGoEnvironment()) {
-    MPM.addPass(GoRODataPass(GoRODataOptions(true)));
-    if (UseGoGlobalInitRestoreOpt) {
-      MPM.addPass(GORoDataInitializerPass());
-    }
-  }
-
   if (Level == OptimizationLevel::O0) {
     // The WPD and LowerTypeTest passes need to run at -O0 to lower type
     // metadata and intrinsics.
@@ -1816,6 +1809,13 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
     // Cache ProfileSummaryAnalysis once to avoid the potential need to insert
     // RequireAnalysisPass for PSI before subsequent non-module passes.
     MPM.addPass(RequireAnalysisPass<ProfileSummaryAnalysis, Module>());
+  }
+
+  if (TM->getTargetTriple().isGoEnvironment()) {
+    MPM.addPass(GoRODataPass(GoRODataOptions(true, true, PGOOpt.has_value() ? PGOOpt->ProfileFile : "")));
+    if (UseGoGlobalInitRestoreOpt) {
+      MPM.addPass(GORoDataInitializerPass());
+    }
   }
 
   // Try to run OpenMP optimizations, quick no-op if no OpenMP metadata present.
@@ -2090,7 +2090,7 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
     if (UseGoGlobalInitRestoreOpt) {
       MPM.addPass(GORoDataRestorePass());
     }
-    MPM.addPass(GoRODataPass(GoRODataOptions(false)));
+    MPM.addPass(GoRODataPass(GoRODataOptions(false, true)));
   }
 
   // Now that we have optimized the program, discard unreachable functions.

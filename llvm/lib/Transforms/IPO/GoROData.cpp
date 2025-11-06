@@ -210,6 +210,18 @@ CallInst *GoRODataPass::specializeCall(ProfileSummaryInfo& PSI, Function &F, Cal
 
   Module *M = F.getParent();
   Function * NewCallee = M->getFunction(SpecName);
+
+  if (Options.LTO && !ProfileMap.empty()) {
+    auto It = ProfileMap.find(FunctionId(SpecName));
+    if (It != ProfileMap.end()) {
+      if (!PSI.isHotCount(It->second.getHeadSamples())) {
+        return nullptr;
+      }
+    } else {
+      return nullptr;
+    }
+  }
+
   if (NewCallee == nullptr) {
     // We must create a function with the same signature
     // even we know some arguments must be constants.
@@ -391,8 +403,8 @@ bool GoRODataPass::runOnFunction(ProfileSummaryInfo& PSI, Function &F, bool Spec
   while (true) {
     bool IterChanged = replaceLoadROData(F);
     IterChanged |= intrinsifyGoBuiltins(F);
-    auto Hot = F.hasProfileData() ? PSI.isFunctionEntryHot(&F) : true;
-    if (Specialize && Hot && specializeGoBuiltins(PSI, F, UseInline)) {
+    // auto Hot = F.hasProfileData() ? PSI.isFunctionEntryHot(&F) : true;
+    if (Specialize && specializeGoBuiltins(PSI, F, UseInline)) {
       IterChanged = true;
     }
     if (!IterChanged) {
@@ -409,6 +421,20 @@ PreservedAnalyses GoRODataPass::run(Module &M, ModuleAnalysisManager &MAM) {
 
   auto &PSI = MAM.getResult<ProfileSummaryAnalysis>(M);
   bool Changed = false;
+
+  if (Options.LTO && !Options.FileName.empty()) {
+    auto &Ctx = M.getContext();
+
+    if (!FS) {
+      FS = vfs::getRealFileSystem();
+    }
+    auto ReaderOrErr = SampleProfileReader::create(Options.FileName, Ctx, *FS, FSDiscriminatorPass::Base, "");
+    if (std::error_code EC = ReaderOrErr.getError()) {
+      assert(EC == sampleprof_error::success && "read profile failed");
+    }
+    auto Reader = std::move(ReaderOrErr.get());
+    ProfileMap = Reader->getProfiles();
+  }
 
   for (Function &F : M) {
     if (F.isDeclaration())

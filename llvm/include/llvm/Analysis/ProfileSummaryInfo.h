@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-11-06.
 //===----------------------------------------------------------------------===//
 //
 // This file contains a pass that provides access to profile summary
@@ -21,6 +23,8 @@
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/ProfileSummary.h"
 #include "llvm/Pass.h"
+#include "llvm/ProfileData/SampleProf.h"
+#include "llvm/ProfileData/SampleProfReader.h"
 #include <memory>
 #include <optional>
 

@@ -7,17 +7,21 @@
 #ifndef LLVM_TRANSFORMS_IPO_GORODATA_H
 #define LLVM_TRANSFORMS_IPO_GORODATA_H
 
+#include "llvm/ADT/IntrusiveRefCntPtr.h"
 #include "llvm/Analysis/ProfileSummaryInfo.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/Support/VirtualFileSystem.h"
 
 namespace llvm {
 
 struct GoRODataOptions {
   bool Specialize;
-
-  GoRODataOptions(bool Specialize = false) : Specialize(Specialize) {}
+  bool LTO;
+  std::string FileName;
+  GoRODataOptions(bool Specialize = false, bool LTO = false,
+                  const std::string &FileName = "") : Specialize(Specialize), LTO(LTO), FileName(FileName) {}
 };
 
 struct GoReloc {
@@ -38,6 +42,8 @@ struct GoRODataPass : public PassInfoMixin<GoRODataPass> {
 
 private:
   DenseMap<GlobalVariable *, GoROData> GVMap;
+  SampleProfileMap ProfileMap;
+  IntrusiveRefCntPtr<vfs::FileSystem> FS;
 public:
   GoRODataPass() = default;
   GoRODataPass(GoRODataOptions Options) : Options(Options) {}
