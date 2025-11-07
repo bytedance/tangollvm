@@ -1477,7 +1477,6 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
   }
 
   // TODO: We need to remove any ill-formed pointer like value with unsupported type
-
   if (!IllFormedPtr.empty()) {
     Function *F = Call->getParent()->getParent();
     if (!TangoLLVM::isObsoleted(F)) {
@@ -2849,10 +2848,17 @@ static SetVector<GetElementPtrInst*> analyzeGepUsages(
                 AddToMoveList(GEP);
                 GEPUsages[GEP].UnsafeIds.insert(PredId);
               }
+            } else {
+              // there maybe duplicate phi incoming value
+              PredId = GEPUsages[GEP].PhiFUIds[PHI][Pred];
+              GEPUsages[GEP].PhiId2Idx[PHI][PredId].insert(PhiIdx);
             }
           } else if (PredId > StackMap) {
             if (!GEPUsages[GEP].PhiFUIds[PHI].contains(Pred)) {
               GEPUsages[GEP].Children[PredId].insert(PHI);
+              GEPUsages[GEP].PhiId2Idx[PHI][PredId].insert(PhiIdx);
+            } else {
+              // there maybe duplicate phi incoming value
               GEPUsages[GEP].PhiId2Idx[PHI][PredId].insert(PhiIdx);
             }
           }
@@ -2928,13 +2934,25 @@ static void moveHoistedGEP(Function &F, DominatorTree &DT,
     for (Instruction *FirstUse : GEPUsages[GEP].FirstUsages) {
       Debugger.processFirstUse(FirstUse);
       if (PHINode* PHI = dyn_cast<PHINode>(FirstUse)) {
+        SmallDenseMap<BasicBlock*, GetElementPtrInst*> B2G;
         for (unsigned I = 0, E = PHI->getNumIncomingValues(); I < E; I++) {
           BasicBlock *Pred = PHI->getIncomingBlock(I);
           if (GEPUsages[GEP].PhiFUIds[PHI].contains(Pred)) {
             unsigned Id = GEPUsages[GEP].PhiFUIds[PHI][Pred];
             assert(!GEPUsages[GEP].Children.contains(Id));
-            auto *NewGEP = CreateNewGEP(GEP, Id);
-            NewGEP->insertBefore(Pred->getTerminator());
+            GetElementPtrInst *NewGEP = nullptr;
+            if (B2G.contains(Pred)) {
+              NewGEP = B2G[Pred];
+            } else {
+              NewGEP = CreateNewGEP(GEP, Id);
+              NewGEP->insertBefore(Pred->getTerminator());
+              B2G[Pred] = NewGEP;
+            }
+            if (!GEPUsages[GEP].PhiId2Idx[PHI][Id].contains(I)) {
+              dbgs() << "PHI: " << *PHI << ", Id: " << Id << ", Idx: " << I << "\n";
+              dbgs() << "GEP: " << *GEP << "\n";
+              F.print(dbgs());
+            }
             assert(GEPUsages[GEP].PhiId2Idx[PHI][Id].contains(I));
             PHI->setIncomingValue(I, NewGEP);
           }
@@ -3716,7 +3734,15 @@ static void computeLiveInValues(BasicBlock::reverse_iterator Begin,
             continue;
           }
 
-          dbgs() << "illegal operation on non-address-taken alloca " << I << "\n";
+          if (isa<ReturnInst>(&I)) {
+            // return alloca, this does indeed happen.
+            Gen.insert(Base);
+            LiveTmp.insert(Base);
+            continue;
+          }
+
+          dbgs() << "illegal operation on non-address-taken alloca " << I << ", Base: " << *Base << "\n";
+          I.getFunction()->print(dbgs());
           // We know it is not address-taken, other operation should not happen.
           assert(false && "illegal operation on non-address-taken alloca");
         }
@@ -3798,6 +3824,15 @@ static void checkBasicSSA(DominatorTree &DT, GCPtrLivenessData &Data,
 #endif
 
 
+static void markInstrAsIllFormed(Instruction *I, const char *Reason) {
+  if (I->hasMetadata("go.pointerlike.illformed"))
+    return;
+  I->setMetadata("go.pointerlike.illformed", MDNode::get(I->getContext(), {}));
+  if (PrintObsoleted) {
+    dbgs() << "Mark Instr IllFormed: " << *I << ", reason is " << Reason << "\n";
+  }
+}
+
 // return false if we must mark parent as ill-formed pointer-like
 // return false if Child is not a pointer like value.
 // We need additional backward checking to confirm results.
@@ -3810,10 +3845,7 @@ bool CheckIllFormedPointerForward(Instruction *Parent, Instruction *Child) {
     if (!I->hasMetadata("go.pointerlike")) {
       I->setMetadata("go.pointerlike", MDNode::get(I->getContext(), {}));
     }
-    if (PrintObsoleted) {
-      dbgs() << "Mark a pointer like value illformed: " << *I << ", reason is " << Reason << "\n";
-    }
-    I->setMetadata("go.pointerlike.illformed", MDNode::get(I->getContext(), {}));
+    markInstrAsIllFormed(I, Reason);
     return false;
   };
 
@@ -3866,6 +3898,7 @@ bool CheckIllFormedPointerForward(Instruction *Parent, Instruction *Child) {
             || isa<ShuffleVectorInst>(Parent)
             || isa<BinaryOperator>(Parent)
             || isa<FreezeInst>(Parent)
+            || isa<AtomicCmpXchgInst>(Parent)
             ) {
     // fallthrough
     // We can assume Parent is a pointer-like value
@@ -3888,6 +3921,7 @@ bool CheckIllFormedPointerForward(Instruction *Parent, Instruction *Child) {
 
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
   dbgs() << "find an unsupported pointer like value: " << *Parent << "\n";
+  dbgs() << "child: " << *Child << "\n";
   Parent->getParent()->getParent()->dump();
 #endif
   report_fatal_error("unsupported pointer like value");
@@ -4086,7 +4120,7 @@ static void checkNegativeOffset(Function &F) {
         if (PrintObsoleted) {
           dbgs() << F.getName() << ": found a bad pointer " << I << "\n";
         }
-        I.setMetadata("go.pointerlike.illformed", MDNode::get(I.getContext(), {}));
+        markInstrAsIllFormed(&I, "bad base pointer for negative offset (GEP)");
       }
     } else if (BinaryOperator *BO = dyn_cast<BinaryOperator>(&I)) {
       Value *Op0 = BO->getOperand(0);
@@ -4124,14 +4158,15 @@ static void checkNegativeOffset(Function &F) {
         if (PrintObsoleted) {
           dbgs() << F.getName() << ": found a bad pointer " << I << "\n";
         }
-        I.setMetadata("go.pointerlike.illformed", MDNode::get(I.getContext(), {}));
+        markInstrAsIllFormed(&I, "bad base pointer for negative offset (BinaryOperator)");
       }
     }
   }
 }
 
 // Mark all values that depends on a PtrToInt value.
-static void checkForward(Function &F, Instruction *Start, const Type *PtrIntTy) {
+static void checkForward(Function &F, Instruction *Start, const Type *PtrIntTy,
+                         SetVector<IntToPtrInst*> &CheckedITPs) {
   SmallVector<Instruction*, 32> Worklist;
   SmallSet<Instruction*, 32> Visited;
 
@@ -4153,14 +4188,12 @@ static void checkForward(Function &F, Instruction *Start, const Type *PtrIntTy) 
           || isa<AtomicRMWInst>(I))
         continue;
 
-      if (isa<IntToPtrInst>(I)) {
+      if (IntToPtrInst* ITP = dyn_cast<IntToPtrInst>(I)) {
         // We try to find a chain from PtrToInt to IntToPtr.
         // All well-formed pointer values in the Chain must
         // be GC-live to keep IntToPtr live.
+        CheckedITPs.insert(ITP);
         checkBackward(F, V, PtrIntTy);
-        if (V->hasMetadata("go.pointerlike.illformed"))
-          // Mark IntToPtr as IllFormed
-          I->setMetadata("go.pointerlike.illformed", MDNode::get(I->getContext(), {}));
         continue;
       }
 
@@ -4209,19 +4242,26 @@ static void checkGoPointerLikeValues(Function &F) {
   assert(F.getParent()->getDataLayout().getPointerSize() == 8 && "only 64bit");
   const Type *PtrIntTy = Type::getInt64Ty(F.getContext());
 
+  SetVector<IntToPtrInst*> CheckedITPs;
+  SetVector<IntToPtrInst*> AllITPs;
   for (Instruction &I : instructions(F)) {
     if (PtrToIntInst *PTI = dyn_cast<PtrToIntInst>(&I)) {
-      checkForward(F, PTI, PtrIntTy);
+      checkForward(F, PTI, PtrIntTy, CheckedITPs);
       continue;
     }
     if (IntToPtrInst *ITP = dyn_cast<IntToPtrInst>(&I)) {
-      // The Src of a IntToPtrInst must be a pointer-like value.
-      // If the Src does not derive from a PtrToInt, we probably have no need to track it.
-      // However, it produces many false warnings in the MIR fixup pass.
-      // Here, we simply mark the value as pointer-like value to avoid unnecessary false warnings.
-      checkBackward(F, ITP, PtrIntTy);
+      AllITPs.insert(ITP);
       continue;
     }
+  }
+  AllITPs.set_subtract(CheckedITPs);
+  for (IntToPtrInst *ITP : AllITPs) {
+    // The Src of a IntToPtrInst must be a pointer-like value.
+    // If the Src does not derive from a PtrToInt, we probably have no need to track it.
+    // However, it produces many false warnings in the MIR fixup pass.
+    // Here, we simply mark the value as pointer-like value to avoid unnecessary false warnings.
+    if (Instruction *Src = dyn_cast<Instruction>(ITP->getOperand(0)))
+      checkBackward(F, Src, PtrIntTy);
   }
 
   std::function<void(Value*)> MarkAllIllFormed;
@@ -4235,7 +4275,7 @@ static void checkGoPointerLikeValues(Function &F) {
         continue;
 
       if (I->hasMetadata("go.pointerlike")) {
-        I->setMetadata("go.pointerlike.illformed", MDNode::get(I->getContext(), {}));
+        markInstrAsIllFormed(I, "propagate ill-formed pointer-like value");
         MarkAllIllFormed(I);
       }
     }

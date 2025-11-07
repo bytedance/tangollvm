@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-11-07.
 //===----------------------------------------------------------------------===//
 //
 // The code below implements dead store elimination using MemorySSA. It uses
@@ -73,6 +75,7 @@
 #include "llvm/Support/DebugCounter.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TangoLLVM/TangoLLVM.h"
 #include "llvm/Transforms/Utils/AssumeBundleBuilder.h"
 #include "llvm/Transforms/Utils/BuildLibCalls.h"
 #include "llvm/Transforms/Utils/Local.h"
@@ -1079,8 +1082,16 @@ struct DSEState {
   }
 
   bool isInvisibleToCallerAfterRet(const Value *V) {
-    if (isa<AllocaInst>(V))
+    if (const AllocaInst *AI = dyn_cast<AllocaInst>(V)) {
+      // yes, Go may return alloca to caller
+      if (TangoLLVM::isGoABIInternal(*AI->getFunction())) {
+        for (auto &U : AI->uses()) {
+          if (isa<ReturnInst>(U.getUser()))
+            return false;
+        }
+      }
       return true;
+    }
     auto I = InvisibleToCallerAfterRet.insert({V, false});
     if (I.second) {
       if (!isInvisibleToCallerOnUnwind(V)) {
