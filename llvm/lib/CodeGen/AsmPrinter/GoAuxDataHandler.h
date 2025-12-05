@@ -62,6 +62,7 @@ private:
   DenseMap<DIFile*, int32_t> FileTableMap;
   std::vector<MCGoDwarfEntry> DwarfTable;
   bool FuncInfoHasStartLine;
+  int32_t GoMinorVersion;
 
   int32_t LastSPAdjust;
   DenseMap<const MachineInstr*, int32_t> PreSPMap;
@@ -116,6 +117,7 @@ private:
     FileTableMap.clear();
     FuncInfoHasStartLine = false;
     MaxStatepointID = 0;
+    GoMinorVersion = 0;
   }
 
 

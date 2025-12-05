@@ -252,10 +252,17 @@ static void AddOperandToStatePoint(MachineInstr& MI, ArrayRef<Register> Regs) {
     SavedOps.push_back(MI.getOperand(Idx));
     MI.removeOperand(Idx);
   }
+  if (DebugFixupPointers) {
+    dbgs() << "add Regs to StatePoint: " << MI;
+  }
   for (auto R : Regs) {
     assert(Register::isVirtualRegister(R) && "invariant");
+    if (DebugFixupPointers)
+      dbgs() << " " << Register::virtReg2Index(R);
     MI.addOperand(MachineOperand::CreateReg(R, false));
   }
+  if (DebugFixupPointers)
+    dbgs() << "\n";
   for (auto &MO : llvm::reverse(SavedOps))
     MI.addOperand(MO);
 

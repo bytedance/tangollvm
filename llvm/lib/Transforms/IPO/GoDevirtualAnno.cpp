@@ -33,6 +33,7 @@
 #include "llvm/IR/PatternMatch.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TangoLLVM/TangoLLVM.h"
 #include "llvm/Transforms/Utils/Local.h"
 #include <algorithm>
 #include <map>
@@ -689,14 +690,8 @@ PreservedAnalyses GoDevirtualAnnotatorPass::run(Module &M,
 
   // Step 1: Detect Go version and set appropriate itab prefix
   // Different Go versions use different naming conventions for itab symbols
-  if (NamedMDNode *CUNodes = M.getNamedMetadata("go.version")) {
-    StringRef GoVersion =
-        cast<MDString>(CUNodes->getOperand(0)->getOperand(0))->getString();
-    int GoMinorVersion = 0;
-    if (std::sscanf(GoVersion.data(), "go1.%d", &GoMinorVersion)) {
-      GoItabPrefix = (GoMinorVersion >= 22) ? "go:itab" : "go.itab";
-    }
-  }
+  int GoMinorVersion = TangoLLVM::goVersion(M);
+  GoItabPrefix = (GoMinorVersion >= 22) ? "go:itab" : "go.itab";
 
   // Step 2: Build mapping from (itab_name, slot_index) to implementation
   // function This information comes from metadata attached to itab globals

@@ -3682,7 +3682,7 @@ static void computeLiveInValues(BasicBlock::reverse_iterator Begin,
             continue;
           }
 
-          if (isa<BitCastInst>(I) ||
+          if (isa<BitCastInst>(I) || isa<InsertValueInst>(I) ||
               isa<GetElementPtrInst>(I) || isa<ICmpInst>(I) ||
               isa<InsertElementInst>(I) || isa<ExtractElementInst>(I) ||
               isa<AddrSpaceCastInst>(I) || isa<PtrToIntInst>(I) ||

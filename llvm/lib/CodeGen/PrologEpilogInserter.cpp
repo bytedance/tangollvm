@@ -51,6 +51,7 @@
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InlineAsm.h"
+#include "llvm/IR/InstIterator.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/TangoLLVM/TangoLLVM.h"
 #include "llvm/InitializePasses.h"
@@ -922,27 +923,48 @@ void PEI::calculateFrameObjectOffsets(MachineFunction &MF) {
   // stack area.
   int64_t FixedCSEnd = Offset;
 
-  // FixedCSEnd is the stack offset to the end of the fixed and callee-save
-  // stack area.
-  if (TangoLLVM::isGoABIInternal(MF.getFunction())) {
-    // this is a special Go function.
-    if (auto n = MF.getFunction().getMetadata("go.local.variable.area")) {
-      assert(n->getNumOperands() == 2 && "must have at least two operands");
-      int64_t LocalVariableArea = dyn_cast<ConstantAsMetadata>(n->getOperand(0))
-                                      ->getValue()
-                                      ->getUniqueInteger()
-                                      .getSExtValue();
-      Offset += LocalVariableArea; // this is the go local variable area when having opendefer.
-      Align StackAlign = TFI.getStackAlign();
-      Align MaxAlign = MFI.getMaxAlign();
-      StackAlign = std::max(StackAlign, MaxAlign);
-      int64_t OffsetBeforeAlignment = Offset;
-      Offset = alignTo(Offset, StackAlign);
-      if (Offset != OffsetBeforeAlignment) {
-        LLVM_DEBUG(llvm::dbgs() << "Adjusting offset " << Offset << " from "
-                                << OffsetBeforeAlignment
-                                << " for Go's MaxCallFrameSize ("
-                                << LocalVariableArea << ")";);
+  SmallDenseSet<int> OpenDeferFrameIndex;
+  if (TangoLLVM::isGoABIInternal(MF.getFunction())
+      && MF.getFunction().hasMetadata("go.opendefer")
+      && TangoLLVM::goVersion(*MF.getFunction().getParent()) >= 22) {
+    // AllocaInst -> Go front end Index
+    int64_t MaxId = 0;
+    DenseMap<const AllocaInst*, int64_t> AllocaToIdx;
+    for (auto &I : instructions(MF.getFunction())) {
+      const IntrinsicInst *II = dyn_cast<const IntrinsicInst>(&I);
+      if (!II || II->getIntrinsicID() != Intrinsic::go_metadata)
+        continue;
+      GoMetadata ID = GoMetadata(cast<ConstantInt>(II->getArgOperand(1))->getZExtValue());
+      if (ID != GoMetadata::OpenDefer)
+        continue;
+      const AllocaInst *AI = dyn_cast<const AllocaInst>(II->getArgOperand(0)->stripPointerCasts());
+      if (AI == nullptr)
+        continue;
+      int64_t Idx = cast<const ConstantAsMetadata>(cast<const MetadataAsValue>(II->getOperand(2))->getMetadata())->getValue()->getUniqueInteger().getSExtValue();
+      if (Idx > MaxId)
+        MaxId = Idx;
+      auto It = AllocaToIdx.find(AI);
+      if (It == AllocaToIdx.end())
+        AllocaToIdx[AI] = Idx;
+      else if (It->second != Idx)
+        report_fatal_error("mismatched idx");
+    }
+    DenseMap<int64_t, int> IdxToFrameIndex;
+    for (int I = MFI.getObjectIndexBegin(), E = MFI.getObjectIndexEnd(); I != E; ++I) {
+      if (MFI.isDeadObjectIndex(I))
+        continue;
+      const AllocaInst *Alloc = MFI.getObjectAllocation(I);
+      if (Alloc == nullptr)
+        continue;
+      if (!AllocaToIdx.contains(Alloc))
+        continue;
+      IdxToFrameIndex[AllocaToIdx[Alloc]] = I;
+    }
+    for (int64_t I = MaxId; I >= 0 ; I--) {
+      if (IdxToFrameIndex.contains(I)) {
+        OpenDeferFrameIndex.insert(IdxToFrameIndex[I]);
+        AdjustStackOffset(MFI, IdxToFrameIndex[I], StackGrowsDown, Offset,
+                          MaxAlign);
       }
     }
   }
@@ -1088,6 +1110,8 @@ void PEI::calculateFrameObjectOffsets(MachineFunction &MF) {
       continue;
     // Only allocate objects on the default stack.
     if (MFI.getStackID(i) != TargetStackID::Default)
+      continue;
+    if (OpenDeferFrameIndex.contains(i))
       continue;
 
     // Add the objects that we need to allocate to our working set.

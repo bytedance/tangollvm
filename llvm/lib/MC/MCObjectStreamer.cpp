@@ -876,19 +876,38 @@ static inline size_t dvarint(int64_t Value, raw_ostream &OS) {
   return Count;
 }
 
-void MCObjectStreamer::emitGoOpenDefer(int64_t TempBitsOffset, ArrayRef<int64_t> Defers) {
+void MCObjectStreamer::emitGoOpenDefer(int64_t TempBitsOffset, ArrayRef<int64_t> Defers, int32_t GoMinorVersion) {
   MCDataFragment *DF = getOrCreateDataFragment();
   SmallVectorImpl<char> &Data = DF->getContents();
   raw_svector_ostream OSE(Data);
 
-  dvarint(-TempBitsOffset, OSE);
-  dvarint(int64_t(Defers.size()), OSE);
-  for (auto Offset : llvm::reverse(Defers)) {
-    dvarint(-Offset, OSE);
+  // goversion < 1.22 format:
+  //  - Offset of the deferBits variable
+  //  - Number of defers in the function
+  //  - Information about each defer call, in reverse order of appearance in
+  //   the function:
+  //  - Offset of the closure value to call
+  if (GoMinorVersion < 22) {
+    dvarint(-TempBitsOffset, OSE);
+    dvarint(int64_t(Defers.size()), OSE);
+    for (auto Offset : llvm::reverse(Defers)) {
+      dvarint(-Offset, OSE);
+    }
+  } else {
+    // goversion > 1.22 format:
+    // - Offset of the deferBits variable
+    // - Offset of the first closure slot (the rest are laid out consecutively).
+    // GO code:
+    // off = objw.Uvarint(x, off, uint64(-s.deferBitsTemp.FrameOffset()))
+    // off = objw.Uvarint(x, off, uint64(-firstOffset))
+
+    dvarint(-TempBitsOffset, OSE);
+    dvarint(-Defers.front(), OSE);
   }
 }
 
-void MCObjectStreamer::emitGoStackObjects(ArrayRef<MCGoStackObjectRecord> StackObjects) {
+void MCObjectStreamer::emitGoStackObjects(
+    ArrayRef<MCGoStackObjectRecord> StackObjects) {
   MCDataFragment *DF = getOrCreateDataFragment();
   SmallVectorImpl<char> &Data = DF->getContents();
   size_t Offset = Data.size();

@@ -605,6 +605,16 @@ bool TangoLLVM::fixGoPanicReturn(Function &F, Function::iterator Begin, SmallVec
   return true;
 }
 
+int TangoLLVM::goVersion(Module &M) {
+  int GoMinorVersion = 0;
+  if (auto *MD = M.getNamedMetadata("go.version")) {
+    StringRef GoVersion =
+        cast<MDString>(MD->getOperand(0)->getOperand(0))->getString();
+    std::sscanf(GoVersion.data(), "go1.%d", &GoMinorVersion);
+  }
+  return GoMinorVersion;
+}
+
 void TangoLLVM::harvestGoMetadata(Function &F, ArrayRef<GoMetadata> WL) {
   auto doHarvest = [&](GoMetadata ID) {
     if (WL.empty())

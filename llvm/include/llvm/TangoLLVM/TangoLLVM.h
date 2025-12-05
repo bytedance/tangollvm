@@ -161,6 +161,8 @@ public:
     return nullptr;
   }
 
+  static int goVersion(Module &M);
+
   // Remove all intrinsic call llvm.go.metadata
   // Fill the metadata back to tracked instructions
   static void harvestGoMetadata(Function &F, ArrayRef<GoMetadata> WL);

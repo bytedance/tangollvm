@@ -46,15 +46,9 @@ static const MCExpr *buildSymbolDiff(MCContext &Context, const MCSymbol *A,
 
 void MCGoAuxData::beginModule(Module *M) {
   resetModule();
-
-  if (NamedMDNode *CUNodes = M->getNamedMetadata("go.version")) {
-    StringRef GoVersion = cast<MDString>(CUNodes->getOperand(0)->getOperand(0))->getString();
-    int GoMinorVersion = 0;
-    if (std::sscanf(GoVersion.data(), "go1.%d", &GoMinorVersion)) {
-      if (GoMinorVersion >= 21) {
-        FuncInfoHasStartLine = true;
-      }
-    }
+  GoMinorVersion = TangoLLVM::goVersion(*M);
+  if (GoMinorVersion >= 21) {
+    FuncInfoHasStartLine = true;
   }
 
   // switch section after creating end symbol
@@ -844,7 +838,7 @@ void MCGoAuxData::endFunctionImpl(const MachineFunction *MF) {
               bitstr = bitVecToString(Bits, ptrdata, DL.getPointerSize());
               gcdata = StringRef(bitstr);
             } else {
-              bitstr = "type..gcprog." + getTypeString(AllocType);
+              bitstr = (GoMinorVersion > 19 ? "type:.gcprog." : "type..gcprog.") + getTypeString(AllocType);
               gcdata = StringRef(bitstr);
               MCGoGCProgWriter ProgWriter;
               ProgWriter.emit(AllocType, MFI.getObjectSize(i), DL, 0);
@@ -1064,7 +1058,7 @@ void MCGoAuxData::endFunctionImpl(const MachineFunction *MF) {
     MCSymbol *AddrSymbol = Asm->OutContext.getOrCreateSymbol(StringRef(symbol));
     Asm->OutStreamer->emitLabel(AddrSymbol);
     int64_t DeferBitsTempOffset = MFI.getObjectOffset(DeferBitsTemp) + 16;
-    Asm->OutStreamer->emitGoOpenDefer(DeferBitsTempOffset, ObjectOffsets);
+    Asm->OutStreamer->emitGoOpenDefer(DeferBitsTempOffset, ObjectOffsets, GoMinorVersion);
   }
   {
     std::string symbol = MF->getName().str();
