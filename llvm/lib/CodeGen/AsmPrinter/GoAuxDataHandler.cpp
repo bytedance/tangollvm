@@ -19,8 +19,8 @@
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/DebugLoc.h"
-#include "llvm/IR/Instructions.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCObjectFileInfo.h"
@@ -29,6 +29,16 @@
 #include "llvm/Target/TargetLoweringObjectFile.h"
 
 using namespace llvm;
+
+static cl::opt<bool> EnableUnsafePoint("go-enable-unsafe-point",
+                                      cl::Hidden,
+                                      cl::init(true));
+static cl::opt<bool> DebugUnsafePoint("go-debug-unsafe-point",
+                                      cl::Hidden,
+                                      cl::init(false));
+static cl::opt<bool> StrictUnsafePoint("go-strict-unsafe-point",
+                                      cl::Hidden,
+                                      cl::init(false));
 
 // Any negative value would be OK because no index should be negative.
 const int32_t DeferReturnStackMapIndexPlaceholder = -1000;
@@ -472,6 +482,339 @@ void MCGoAuxData::computeFunctionSP(const MachineFunction *MF) {
   }
 }
 
+static StringRef GetMOName(const MachineOperand *MO) {
+  if (MO->isGlobal())
+    return MO->getGlobal()->getName();
+  if (MO->isSymbol())
+    return StringRef(MO->getSymbolName());
+  return "";
+}
+
+static std::pair<bool, bool> IsBarrierCmp(const MachineInstr* MI) {
+  // cmp runtime.writeBarrier.enabled 0
+  // or
+  // %reg = move runtime.writeBarrier.enabled
+  // test %reg
+  const MachineOperand *MO = nullptr;
+  if (MI->isCompare() && MI->getNumOperands() > 3) {
+    MO = &MI->getOperand(3);
+  } else if (MI->isMoveReg() && MI->getNumOperands() > 4) {
+    MO = &MI->getOperand(4);
+  }
+  if (MO) {
+    if (GetMOName(MO) == "runtime.writeBarrier") {
+      return {true, MO->getOffset() == 0};
+    }
+  }
+  return {false, false};
+}
+
+static bool ReverseMarkBarrierInBlock(const MachineBasicBlock* MBB,
+                                      DenseSet<const MachineInstr*> &UnsafePoints,
+                                      std::function<void(const MachineInstr*)> Fn) {
+  bool FoundBarrier = false;
+  for (auto It = MBB->rbegin(), E = MBB->rend(); It != E; It++) {
+    if (It->isMetaInstruction())
+      continue;
+    UnsafePoints.insert(&*It);
+    auto [WB, Enable] = IsBarrierCmp(&*It);
+    if (WB) {
+      if (Enable) {
+        return true;
+      }
+      Fn(&*It);
+    }
+  }
+  return false;
+}
+
+void MCGoAuxData::computeFunctionUnsafePoint(const MachineFunction *MF) {
+  if (!EnableUnsafePoint)
+    return;
+
+  assert(UnsafePoints.empty() && AllUnsafe);
+  auto MarkAllUnsafe = [&]() {
+    UnsafePoints.clear();
+    AllUnsafe = true;
+  };
+
+  if (MF->getFunction().hasFnAttribute("go.allunsafe") ||
+      (MF->getFunction().hasFnAttribute("go-no-split") && !MF->getFunction().hasFnAttribute("go-leaf"))) {
+    MarkAllUnsafe();
+    return;
+  }
+
+  const TargetInstrInfo &TII = *Asm->MF->getSubtarget().getInstrInfo();
+  SmallDenseSet<const MachineBasicBlock*> MoreStackBlocks;
+
+  if (!MF->getFunction().hasFnAttribute("go-leaf")) {
+    // more-stack blocks
+    auto *CheckBB = &MF->front();
+    if (auto *Succ = CheckBB->getSingleSuccessor())
+      CheckBB = Succ;
+    assert(CheckBB->succ_size() == 2);
+
+    auto Type = MF->getFunction()
+                    .getFnAttribute("go.stack.size.type")
+                    .getValueAsString();
+
+    MachineBasicBlock *AllocBB = nullptr, *CheckBB2 = nullptr;
+    bool BigStack = Type == "big";
+    auto *Succ0 = *CheckBB->successors().begin();
+    auto *Succ1 = *(CheckBB->successors().begin() + 1);
+    if (Succ0->getSingleSuccessor() == CheckBB) {
+      AllocBB = Succ0;
+      if (BigStack)
+        CheckBB2 = Succ1;
+    } else {
+      if (Succ1->getSingleSuccessor() != CheckBB) {
+        MarkAllUnsafe();
+        return;
+      }
+      AllocBB = Succ1;
+      if (BigStack)
+        CheckBB2 = Succ0;
+    }
+
+    MoreStackBlocks.insert(CheckBB);
+    MoreStackBlocks.insert(AllocBB);
+
+    bool Found = false;
+    for (auto &MI : *CheckBB) {
+      if (MI.isMetaInstruction())
+        continue;
+      if (Found) {
+        UnsafePoints.insert(&MI);
+      }
+      if ((BigStack && MI.isMoveReg()) || (!BigStack && MI.isCompare()))
+        Found = true;
+    }
+    if (CheckBB2) {
+      MoreStackBlocks.insert(CheckBB2);
+      for (auto &MI : *CheckBB2) {
+        if (MI.isMetaInstruction())
+          continue;
+        UnsafePoints.insert(&MI);
+      }
+    }
+    Found = false;
+    for (auto &MI : *AllocBB) {
+      if (MI.isMetaInstruction())
+        continue;
+      if (MI.isTerminator())
+        break;
+      if (MI.getOpcode() == TII.getNop().getOpcode())
+        Found = true;
+      if (Found) {
+        UnsafePoints.insert(&MI);
+      }
+    }
+  }
+
+  {
+    for (const auto &MBB : *MF) {
+      const MachineInstr *FirstSIMD = nullptr, *LastSIMD = nullptr;
+      for (const MachineInstr &MI : MBB) {
+        if (MI.isMetaInstruction())
+          continue;
+        if (TII.isSIMD(MI)) {
+          if (FirstSIMD == nullptr)
+            FirstSIMD = &MI;
+          LastSIMD = &MI;
+        }
+      }
+      // TODO: async preempt at SIMD instructions may cause runtime data errors,
+      // the reason is unclear.
+      if (FirstSIMD != nullptr) {
+        auto IterBegin =
+            MachineBasicBlock::iterator(const_cast<MachineInstr *>(FirstSIMD));
+        auto IterEnd = std::next(
+            MachineBasicBlock::iterator(const_cast<MachineInstr *>(LastSIMD)));
+        for (auto It = IterBegin; It != IterEnd; ++It) {
+          UnsafePoints.insert(&*It);
+        }
+      }
+    }
+  }
+
+  {
+    SmallDenseSet<const MachineBasicBlock*> MarkedCheckBBs;
+    SmallDenseSet<const MachineBasicBlock*> MarkedSuccBBs;
+    SmallDenseSet<const MachineInstr*> BarrierCmps;
+    for (const auto &MBB : *MF) {
+      SmallDenseSet<const MachineInstr*> MIs;
+      bool FoundGCWrite = false;
+      for (const MachineInstr &MI : MBB) {
+        if (MI.isMetaInstruction())
+          continue;
+        auto [WB, Enable] = IsBarrierCmp(&MI);
+        if (WB) {
+          if (Enable)
+            BarrierCmps.insert(&MI);
+          else {
+            if (DebugUnsafePoint)
+              dbgs() << "Func: " << MF->getName() << ", MI: " << MI
+                     << ", writeBarrier.xx at BB: " << MBB.getName() << "\n";
+
+            if (StrictUnsafePoint) {
+              MarkAllUnsafe();
+              return;
+            }
+          }
+        }
+        if (FoundGCWrite) {
+          UnsafePoints.insert(&MI);
+          continue;
+        }
+
+        MIs.insert(&MI);
+        if (!MI.isCall())
+          continue;
+        auto &CalleeMO = MI.getOperand(0);
+        if (!GetMOName(&CalleeMO).starts_with("runtime.gcWriteBarrier"))
+          continue;
+
+        UnsafePoints.insert(MIs.begin(), MIs.end());
+        FoundGCWrite = true;
+      }
+
+      if (!FoundGCWrite)
+        continue;
+
+      SmallDenseSet<const MachineBasicBlock*> Candidates;
+      for (auto &Pred : MBB.predecessors()) {
+        if (!MarkedCheckBBs.insert(Pred).second)
+          continue;
+        auto *CurrMBB = const_cast<MachineBasicBlock*>(Pred);
+        do {
+          bool FnUnsafe = false;
+          bool FoundBarrier =
+              ReverseMarkBarrierInBlock(CurrMBB, UnsafePoints, [&](auto *I) {
+                if (DebugUnsafePoint)
+                  dbgs() << "Func: " << MF->getName()
+                         << ", MI: " << *I
+                         << ", writeBarrier.xx at BB: " << MBB.getName() << "\n";
+
+                if (StrictUnsafePoint)
+                  FnUnsafe = true;
+              });
+
+          if (FnUnsafe) {
+            MarkAllUnsafe();
+            return;
+          }
+
+          Candidates.insert(Pred);
+          CurrMBB = CurrMBB->getSinglePredecessor();
+        } while (!FoundGCWrite && CurrMBB);
+
+        if (!FoundGCWrite) {
+          MF->print(dbgs());
+          report_fatal_error("can't find runtime.writeBarrier for MBB: " +
+                             Pred->getName());
+        }
+      }
+      if (Candidates.empty())
+        continue;
+      for (auto *CurrMBB : Candidates) {
+        for (auto *Succ : CurrMBB->successors()) {
+          if (!MarkedSuccBBs.insert(Succ).second)
+            continue;
+          for (auto &I : *Succ) {
+            if (I.isMetaInstruction())
+              continue;
+            UnsafePoints.insert(&I);
+          }
+        }
+      }
+    }
+
+    for (auto *MI : BarrierCmps)
+      if (!UnsafePoints.contains(MI)) {
+        auto *MBB = MI->getParent();
+        if (MBB->succ_size() != 2) {
+          if (DebugUnsafePoint) {
+            dbgs() << "barrier cmp is not marked: " << MF->getName() << "\n";
+            dbgs() << "    MI: " << *MI
+                   << ", at BB: " << MI->getParent()->getName() << "\n";
+            MF->print(dbgs());
+          }
+          MarkAllUnsafe();
+          return;
+        } else {
+          ReverseMarkBarrierInBlock(MBB, UnsafePoints, [&](auto *){});
+          for (auto *Succ : MBB->successors())
+            for (auto &I : *Succ) {
+              if (I.isMetaInstruction())
+                continue;
+              UnsafePoints.insert(&I);
+            }
+        }
+      }
+  }
+
+  {
+    if (MF->getFunction().hasMetadata("go.has.unsafepoint")) {
+      // find unsafe point marked by go front end, which is opconvert now.
+      DenseSet<const MachineInstr *> Flooded;
+      std::function<void(const MachineBasicBlock *, const MachineInstr *)>
+          Flood;
+      Flood = [&](const MachineBasicBlock *MBB, const MachineInstr *MI) {
+        if (MoreStackBlocks.contains(MBB))
+          return;
+        auto It = MI == nullptr ? MBB->rbegin()
+                                : MachineBasicBlock::reverse_iterator(
+                                      const_cast<MachineInstr *>(MI));
+        for (auto End = MBB->rend(); It != End; It++) {
+          const MachineInstr &I = *It;
+          if (I.isMetaInstruction())
+            continue;
+          if (Flooded.contains(&I))
+            // already marked
+            return;
+          if (I.isCall())
+            return;
+          Flooded.insert(&I);
+        }
+        for (const MachineBasicBlock *Pred : MBB->predecessors())
+          Flood(Pred, nullptr);
+      };
+
+      uint64_t Got = 0;
+      for (const MachineBasicBlock &MBB : *MF)
+        for (const MachineInstr &MI : MBB) {
+          if (MI.getFlag(MachineInstr::GoUnsafePointRange)) {
+            Got++;
+            Flood(&MBB, &MI);
+          } else if (MI.getFlag(MachineInstr::GoUnsafePoint)) {
+            Got++;
+            UnsafePoints.insert(&MI);
+          }
+        }
+      for (const MachineInstr *MI : Flooded)
+        UnsafePoints.insert(MI);
+
+      auto *MD = MF->getFunction().getMetadata("go.has.unsafepoint");
+      if (MD && MD->getNumOperands() > 0) {
+        uint64_t Want = mdconst::extract<ConstantInt>(MD->getOperand(0))->getLimitedValue();
+        if (Got != Want) {
+          if (StrictUnsafePoint) {
+            MarkAllUnsafe();
+            return;
+          }
+        }
+        if (DebugUnsafePoint) {
+          // GoUnsafePoint removed by passes.
+          dbgs() << "Go Unsafe Point removed, Func: " << MF->getName() << ", Want: " << Want << ", Got: " << Got << "\n";
+        }
+      }
+    }
+  }
+
+  AllUnsafe = false;
+  if (UnsafePoints.empty())
+    assert(MF->getFunction().hasFnAttribute("go-leaf"));
+}
 
 bool MCGoAuxData::hasPointerTy(Type* type) {
   return TangoLLVM::hasPointerTy(type);
@@ -599,6 +942,7 @@ void MCGoAuxData::beginFunctionImpl(const MachineFunction *MF) {
   //
   computeFunctionSP(MF);
   computeFuncInfo(MF);
+  computeFunctionUnsafePoint(MF);
 
   {
     // Every Go function has a PC TText
@@ -610,6 +954,9 @@ void MCGoAuxData::beginFunctionImpl(const MachineFunction *MF) {
   }
   {
     LastStackMapIndex = -1;
+  }
+  {
+    PreIsUnsafe = false;
   }
 }
 
@@ -946,7 +1293,12 @@ void MCGoAuxData::endFunctionImpl(const MachineFunction *MF) {
     // PCDATA_UnsafePoint values.
     // PCDATA_UnsafePointSafe   = -1 // Safe for async preemption
     // PCDATA_UnsafePointUnsafe = -2 // Unsafe for async preemption/
-    appendPCData(PCUnsafePoint, -2, EndFunc);
+    if (AllUnsafe) {
+      assert(UnsafePoints.empty());
+      appendPCData(PCUnsafePoint, -2, EndFunc);
+    } else {
+      appendPCData(PCUnsafePoint, PreIsUnsafe? -2 : -1, EndFunc);
+    }
     std::string symbol = MF->getName().str();
     symbol += "..pcunsafepoint";
     emitPCData(PCUnsafePoint, symbol);
@@ -1245,10 +1597,18 @@ void MCGoAuxData::beginInstruction(const MachineInstr *MI) {
     LastPCIndex++;
   }
 
-  if (PrePC != nullptr) {
-    Asm->OutStreamer->emitLabel(PrePC);
-    PrePC = nullptr;
+  {
+    if (!UnsafePoints.empty())
+      if (PreIsUnsafe != UnsafePoints.contains(MI)) {
+        appendPCData(PCUnsafePoint, PreIsUnsafe? -2 : -1, getOrCreatePrePCSymbol(MI));
+        PreIsUnsafe = UnsafePoints.contains(MI);
+      }
   }
+
+  if (PrePCMap.contains(MI)) {
+    Asm->OutStreamer->emitLabel(PrePCMap[MI]);
+  }
+
 }
 
 void MCGoAuxData::endInstruction() {
@@ -1260,10 +1620,9 @@ void MCGoAuxData::endInstruction() {
 }
 
 MCSymbol* MCGoAuxData::getOrCreatePrePCSymbol(const MachineInstr* MI) {
-  if (PrePC == nullptr) {
-    PrePC = Asm->OutStreamer->getContext().createTempSymbol();
-  }
-  return PrePC;
+  if (!PrePCMap.contains(MI))
+      PrePCMap[MI] = Asm->OutStreamer->getContext().createTempSymbol();
+    return PrePCMap[MI];
 }
 
 MCSymbol* MCGoAuxData::getOrCreatePostPCSymbol(const MachineInstr* MI) {

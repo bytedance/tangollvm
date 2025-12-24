@@ -309,7 +309,7 @@ static cl::opt<bool> UseLoopVersioningLICM(
     cl::desc("Enable the experimental Loop Versioning LICM pass"));
 
 static cl::opt<bool> UseGoGlobalInitRestoreOpt(
-    "enable-go-global-init-opt", cl::init(true), cl::Hidden,
+    "enable-go-global-init-opt", cl::init(false), cl::Hidden,
     cl::desc("Enable generate initializer & restore go global var passes."));
 
 namespace llvm {

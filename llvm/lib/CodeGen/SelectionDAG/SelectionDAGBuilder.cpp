@@ -6668,8 +6668,31 @@ void SelectionDAGBuilder::visitIntrinsicCall(const CallInst &I,
     report_fatal_error("should be legalized in IR");
     return;
   }
-  case Intrinsic::go_metadata:
+  case Intrinsic::go_metadata: {
+    uint64_t ID = cast<ConstantInt>(I.getArgOperand(1))->getZExtValue();
+    if (ID == uint64_t(GoMetadata::UnsafePoint)) {
+      // generate GO_UNSAFE_POINT pseudo instr
+      SDValue Chain = getRoot();
+      SDValue Ptr = getValue(I.getArgOperand(0));
+      SDValue IntCst = DAG.getConstant(Intrinsic, getCurSDLoc(), MVT::i32);
+      SDValue IDCst = DAG.getConstant(ID, getCurSDLoc(), MVT::i32);
+      auto *MV = dyn_cast<MetadataAsValue>(I.getArgOperand(2));
+      assert(MV);
+      auto *MD = dyn_cast<ConstantAsMetadata>(MV->getMetadata());
+      auto UnsafeType = dyn_cast<ConstantInt>(MD->getValue())->getZExtValue();
+      SDValue UnsafeTypeCst = DAG.getConstant(UnsafeType, getCurSDLoc(), MVT::i32);
+      SDValue Ops[] = {Chain, IntCst, Ptr, IDCst, UnsafeTypeCst};
+      SDValue Result = DAG.getNode(
+          ISD::INTRINSIC_VOID,
+          getCurSDLoc(),
+          MVT::Other,
+          Ops
+      );
+
+      DAG.setRoot(Result);
+    }
     return;
+  }
   case Intrinsic::go_preallocated: {
     auto getOrCreateFixedObject = [&](const CallInst &I) {
       if (!isa<ConstantPointerNull>(I.getArgOperand(0))) {

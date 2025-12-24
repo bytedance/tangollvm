@@ -803,6 +803,7 @@ private:
     return RegName == "RSP";
   }
 
+  bool markUnsafePoint();
   bool optimizeOpSP();
   bool foldStackPointers();
   bool cloneStackPointers();
@@ -862,6 +863,7 @@ bool X86GoFixupPreRegAllocPass::runOnMachineFunction(MachineFunction &fn) {
 
   bool Changed = false;
 
+  Changed |= markUnsafePoint();
   Changed |= optimizeOpSP();
   Changed |= foldStackPointers();
   Changed |= cloneStackPointers();
@@ -912,6 +914,97 @@ static bool usedInPhi(MachineInstr &MI, std::set<MachineInstr*> &visited) {
     }
   }
   return result;
+}
+
+static uint64_t getUnsafeTypeValue(MachineRegisterInfo *MRI, MachineOperand& MO) {
+  assert(MO.isReg() && Register::isVirtualRegister(MO.getReg()));
+  auto *MI = MRI->getUniqueVRegDef(MO.getReg());
+  switch (MI->getOpcode()) {
+  case X86::MOV8ri:
+  case X86::MOV16ri:
+  case X86::MOV32ri:
+  case X86::MOV32ri64:
+  case X86::MOV64ri:
+  case X86::MOV64ri32:
+  // Pseudo-instructions for small constants
+  case X86::MOV32r0:
+  case X86::MOV32r1:
+  case X86::MOV32r_1:
+  case X86::MOV32ImmSExti8:
+  case X86::MOV64ImmSExti8: {
+    if (MI->getOperand(1).isImm())
+      return MI->getOperand(1).getImm();
+    return 0;
+  }
+  case X86::COPY:
+    return getUnsafeTypeValue(MRI, MI->getOperand(1));
+  default: {
+    dbgs() << "MI: " << *MI << ", Flags: " << MI->getDesc().getFlags() << "\n";
+    return 0;
+  }
+  }
+}
+
+// passes may move or change instructions, so we mark them until now
+bool X86GoFixupPreRegAllocPass::markUnsafePoint() {
+  if (!MF->getFunction().hasMetadata("go.has.unsafepoint"))
+    return false;
+
+  auto ReportErr = [&](StringRef S, MachineInstr &MI) {
+    std::string Msg;
+    raw_string_ostream OS(Msg);
+    OS << S << ", Func: " << MF->getName() << ", MI:" << MI << "\n";
+    report_fatal_error(OS.str().c_str());
+  };
+
+  SmallDenseSet<MachineInstr*> ToRemovedMI;
+  SmallDenseSet<Register> ToRemovedReg;
+  for (auto &MBB : *MF) {
+    for (auto &MI : MBB) {
+      if (MI.getOpcode() != X86::GO_UNSAFE_POINT)
+        continue;
+
+      auto PtrMO = MI.getOperand(0);
+      if (!PtrMO.isReg() || !Register::isVirtualRegister(PtrMO.getReg()))
+        ReportErr("GO_UNSAFE_POINT mark non-reg", MI);
+
+      auto *Ptr = MRI->getUniqueVRegDef(PtrMO.getReg());
+      if (!Ptr)
+        ReportErr("GO_UNSAFE_POINT can't get unique def", MI);
+
+      auto Ty = getUnsafeTypeValue(MRI, MI.getOperand(1));
+      auto Flags = Ptr->getFlags();
+      if (Ty == 1)
+        Ptr->setFlags(Flags | MachineInstr::GoUnsafePointRange);
+      else if (Ty == 2)
+        Ptr->setFlags(Flags | MachineInstr::GoUnsafePoint);
+      else
+        ReportErr("GO_UNSAFE_POINT get unexpected value", MI);
+
+      ToRemovedMI.insert(&MI);
+      ToRemovedReg.insert(MI.getOperand(1).getReg());
+    }
+  }
+
+  if (ToRemovedMI.empty()) {
+    // some passes may remove ptr and metadata instructions
+    MF->getFunction().setMetadata("go.has.unsafepoint", nullptr);
+    return false;
+  }
+
+  auto &Context = MF->getFunction().getContext();
+  ConstantAsMetadata *SizeMD = ConstantAsMetadata::get(
+      ConstantInt::get(Type::getInt64Ty(Context), ToRemovedMI.size()));
+  MF->getFunction().setMetadata("go.has.unsafepoint", MDNode::get(Context, {SizeMD}));
+
+  for (auto *MI : ToRemovedMI)
+      MI->eraseFromParent();
+
+  for (auto Reg : ToRemovedReg)
+    if (MRI->use_empty(Reg))
+      MRI->getUniqueVRegDef(Reg)->eraseFromParent();
+
+  return true;
 }
 
 bool X86GoFixupPreRegAllocPass::optimizeOpSP() {

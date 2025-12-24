@@ -741,6 +741,9 @@ namespace llvm {
     CCMP,
     CTEST,
 
+    // TangoLLVM
+    GO_UNSAFE_POINT,
+
     /// X86 strict FP compare instructions.
     STRICT_FCMP = ISD::FIRST_TARGET_STRICTFP_OPCODE,
     STRICT_FCMPS,

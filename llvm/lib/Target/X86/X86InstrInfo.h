@@ -261,6 +261,8 @@ public:
   unsigned isLoadStackSlotAddress(const MachineInstr &MI,
                                        int &FrameIndex) const override;
 
+  bool isSIMD(const MachineInstr &MI) const override;
+
   /// Returns true if the instruction has no behavior (specified or otherwise)
   /// that is based on the value loaded from memory or the value of any
   /// non-address register operands.

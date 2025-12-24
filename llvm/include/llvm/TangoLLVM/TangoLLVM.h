@@ -38,6 +38,8 @@ enum class GoMetadata {
   // |len{idx:value, ...}, len{idx:value,...}
   DereferSize,
 
+  UnsafePoint,
+
   // Count of metadata
   MaxMetadata
 };

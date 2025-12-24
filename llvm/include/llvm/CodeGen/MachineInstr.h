@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-12-24.
 //===----------------------------------------------------------------------===//
 //
 // This file contains the declaration of the MachineInstr class, which is the
@@ -119,6 +121,8 @@ public:
     Disjoint = 1 << 19,      // Each bit is zero in at least one of the inputs.
     NoUSWrap = 1 << 20,      // Instruction supports geps
                              // no unsigned signed wrap.
+    GoUnsafePointRange = 1 << 21,
+    GoUnsafePoint = 1 << 22,
   };
 
 private:

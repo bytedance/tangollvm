@@ -3476,6 +3476,7 @@ void X86FrameLowering::adjustForSegmentedStacks(
 leafSearchDone:
       if (leaf) {
         // mark function is no-split
+        MF.getFunction().addFnAttr("go-leaf", "true");
         MF.getFunction().addFnAttr("go-no-split", "true");
         return;
       }
@@ -3527,12 +3528,14 @@ leafSearchDone:
     auto InsertCheck = [&](MachineBasicBlock *CheckMBB, MachineBasicBlock *AllocMBB) {
       MachineBasicBlock * CheckMBB2 = nullptr;
       if (StackSize <= StackSmall) {
+        MF.getFunction().addFnAttr("go.stack.size.type", "small");
         // build cmp and jae
         //
         // small stack: SP <= stackguard
         // CMPQ SP, stackguard
         addRegOffset(BuildMI(CheckMBB, DL, TII.get(X86::CMP64rm)).addReg(X86::RSP), TlsReg, false, TlsOffset);
       } else if (StackSize < StackBig) {
+        MF.getFunction().addFnAttr("go.stack.size.type", "middle");
         // large stack: SP-framesize <= stackguard-StackSmall
         //  LEAQ -xxx(SP), tmp
         //  CMPQ tmp, stackguard
@@ -3540,6 +3543,7 @@ leafSearchDone:
           .addImm(1).addReg(0).addImm(-(StackSize - StackSmall)).addReg(0);
         addRegOffset(BuildMI(CheckMBB, DL, TII.get(X86::CMP64rm)).addReg(ScratchReg), TlsReg, false, TlsOffset);
       } else {
+        MF.getFunction().addFnAttr("go.stack.size.type", "big");
         // Such a large stack we need to protect against underflow.
         // The runtime guarantees SP > objabi.StackBig, but
         // framesize is large enough that SP-framesize may

@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-12-24.
 //===----------------------------------------------------------------------===//
 //
 // This file describes the various pseudo instructions used by the compiler,
@@ -19,6 +21,18 @@ def GetLo32XForm : SDNodeXForm<imm, [{
   return getI32Imm((uint32_t)N->getZExtValue(), SDLoc(N));
 }]>;
 
+
+//===----------------------------------------------------------------------===//
+// Go related Instructions
+def X86go_unsafe_point : SDNode<"X86ISD::GO_UNSAFE_POINT",
+                        SDTypeProfile<0, 2, [SDTCisVT<0, i64>, SDTCisVT<1, i64>]>,
+                        [SDNPHasChain, SDNPSideEffect, SDNPOptInGlue]>;
+
+let isPseudo = 1, mayLoad = 0, mayStore = 0, hasSideEffects = 1, SchedRW = [WriteALU] in {
+  def GO_UNSAFE_POINT : I<0, Pseudo, (outs), (ins GR64:$src, GR64:$val),
+                          "# GO_UNSAFE_POINT $src, $val",
+                          [(X86go_unsafe_point GR64:$src, GR64:$val)]>;
+}
 
 //===----------------------------------------------------------------------===//
 // Random Pseudo Instructions.

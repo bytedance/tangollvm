@@ -754,6 +754,60 @@ unsigned X86InstrInfo::isLoadStackSlotAddress(const MachineInstr &MI,
   return 0;
 }
 
+static bool hasRegOfClass(const MachineInstr &MI,
+                          const TargetRegisterClass &RC) {
+  for (const MachineOperand &MO : MI.operands())
+    if (MO.isReg() && RC.contains(MO.getReg()))
+      return true;
+  return false;
+}
+
+static bool isVKReg(unsigned R) {
+  return X86::VK1RegClass.contains(R) || X86::VK2RegClass.contains(R) ||
+         X86::VK4RegClass.contains(R) || X86::VK8RegClass.contains(R) ||
+         X86::VK16RegClass.contains(R) || X86::VK32RegClass.contains(R) ||
+         X86::VK64RegClass.contains(R);
+}
+
+bool X86InstrInfo:: isSIMD(const MachineInstr &MI) const {
+  const MCInstrDesc &Desc = MI.getDesc();
+  const uint64_t TSFlags = Desc.TSFlags;
+  const uint64_t Enc = TSFlags & X86II::EncodingMask;
+
+  const bool HasMMX = hasRegOfClass(MI, X86::VR64RegClass);
+  const bool HasXMM = hasRegOfClass(MI, X86::VR128RegClass) ||
+                      hasRegOfClass(MI, X86::VR128XRegClass);
+  const bool HasYMM = hasRegOfClass(MI, X86::VR256RegClass) ||
+                      hasRegOfClass(MI, X86::VR256XRegClass);
+  const bool HasZMM = hasRegOfClass(MI, X86::VR512RegClass);
+  const bool HasK   = [&]() {
+    for (const MachineOperand &MO : MI.operands())
+      if (MO.isReg() && isVKReg(MO.getReg())) return true;
+    return false;
+  }();
+
+  if (Enc == X86II::EVEX || HasZMM || HasK)
+    return true;
+
+  if (Enc == X86II::VEX || HasYMM) {
+    return true;
+  }
+
+  if (HasXMM)
+    return true;
+  if (HasMMX)
+    return true;
+
+  switch (MI.getOpcode()) {
+  case X86::VZEROUPPER:
+  case X86::VZEROALL:
+    return true;
+  default:
+    break;
+  }
+
+  return false;
+}
 
 Register X86InstrInfo::isLoadFromStackSlot(const MachineInstr &MI,
                                            int &FrameIndex) const {

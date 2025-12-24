@@ -64,6 +64,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/KnownBits.h"
 #include "llvm/Support/MathExtras.h"
+#include "llvm/TangoLLVM/TangoLLVM.h"
 #include "llvm/Target/TargetOptions.h"
 #include <algorithm>
 #include <bitset>
@@ -27288,6 +27289,22 @@ static SDValue LowerINTRINSIC_W_CHAIN(SDValue Op, const X86Subtarget &Subtarget,
   }
 }
 
+static SDValue LowerINTRINSIC_VOID(SDValue Op, const X86Subtarget &Subtarget,
+                                   SelectionDAG &DAG) {
+  SDLoc DL(Op);
+  SDValue Chain = Op.getOperand(0);
+  unsigned IntNo = Op.getConstantOperandVal(1);
+  if (IntNo == Intrinsic::go_metadata) {
+    unsigned ID = Op.getConstantOperandVal(3);
+    if (ID == unsigned(GoMetadata::UnsafePoint)) {
+      SDValue Ptr = Op.getOperand(2);
+      SDValue UnsafeType = Op.getOperand(4);
+      return DAG.getNode(X86ISD::GO_UNSAFE_POINT, DL, MVT::Other, {Chain, Ptr, UnsafeType});
+    }
+  }
+  return LowerINTRINSIC_W_CHAIN(Op, Subtarget, DAG);
+}
+
 SDValue X86TargetLowering::LowerRETURNADDR(SDValue Op,
                                            SelectionDAG &DAG) const {
   MachineFrameInfo &MFI = DAG.getMachineFunction().getFrameInfo();
@@ -32487,7 +32504,7 @@ SDValue X86TargetLowering::LowerOperation(SDValue Op, SelectionDAG &DAG) const {
   case ISD::VAARG:              return LowerVAARG(Op, DAG);
   case ISD::VACOPY:             return LowerVACOPY(Op, Subtarget, DAG);
   case ISD::INTRINSIC_WO_CHAIN: return LowerINTRINSIC_WO_CHAIN(Op, DAG);
-  case ISD::INTRINSIC_VOID:
+  case ISD::INTRINSIC_VOID:     return LowerINTRINSIC_VOID(Op, Subtarget, DAG);
   case ISD::INTRINSIC_W_CHAIN:  return LowerINTRINSIC_W_CHAIN(Op, Subtarget, DAG);
   case ISD::RETURNADDR:         return LowerRETURNADDR(Op, DAG);
   case ISD::ADDROFRETURNADDR:   return LowerADDROFRETURNADDR(Op, DAG);
@@ -34124,6 +34141,7 @@ const char *X86TargetLowering::getTargetNodeName(unsigned Opcode) const {
   NODE_NAME_CASE(CTEST)
   NODE_NAME_CASE(CLOAD)
   NODE_NAME_CASE(CSTORE)
+  NODE_NAME_CASE(GO_UNSAFE_POINT)
   }
   return nullptr;
 #undef NODE_NAME_CASE

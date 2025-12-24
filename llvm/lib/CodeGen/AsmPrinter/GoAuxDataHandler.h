@@ -46,7 +46,7 @@ private:
   // All following data are reset for each new function.
   // the PC of method entry
   MCSymbol* EntryPC;
-  MCSymbol* PrePC;
+  DenseMap<const MachineInstr*, MCSymbol*> PrePCMap;
   MCSymbol* PostPC;
   MCGoFuncInfo FuncInfo;
   std::vector<PCData> PCSP;
@@ -67,6 +67,10 @@ private:
   int32_t LastSPAdjust;
   DenseMap<const MachineInstr*, int32_t> PreSPMap;
   DenseMap<const MachineInstr*, int32_t> PostSPMap;
+
+  bool AllUnsafe;
+  bool PreIsUnsafe;
+  DenseSet<const MachineInstr*> UnsafePoints;
 
   int32_t LastFileIndex;
   int32_t LastLineNumber;
@@ -123,7 +127,6 @@ private:
 
   void resetFunction() {
     EntryPC = nullptr;
-    PrePC = nullptr;
     PostPC = nullptr;
     LastSPAdjust = -1;
     LastFileIndex = -1;
@@ -137,6 +140,7 @@ private:
     LineStarted = false;
     InlineTreeStarted = false;
 
+    PrePCMap.clear();
     PreSPMap.clear();
     PostSPMap.clear();
     PCSP.clear();
@@ -155,6 +159,8 @@ private:
     // See GoGCPrinter.cpp
     FunctionBeginID = MaxStatepointID;
 
+    UnsafePoints.clear();
+    AllUnsafe = true;
   }
 
   static unsigned ptrDataSize(const DataLayout&, Type*);
@@ -165,6 +171,7 @@ private:
 
   void computeFunctionSP(const MachineFunction *MF);
   void computeFuncInfo(const MachineFunction *MF);
+  void computeFunctionUnsafePoint(const MachineFunction *MF);
   MCGoInlTreeNode* addInlNode(DILocation* M, DIScope *Called);
 
   int32_t getFileIndex(DIFile* F);

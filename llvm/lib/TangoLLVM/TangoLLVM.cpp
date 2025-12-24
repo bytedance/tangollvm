@@ -695,6 +695,20 @@ void TangoLLVM::updateMetadataForInlining(Function *Callee, Function *Caller) {
   if (Callee->hasMetadata("go.opendefer")) {
     report_fatal_error("cannot inline opendefer");
   }
+
+  if (Callee->hasFnAttribute("go.allunsafe")) {
+    auto UnsafeValue = Callee->getFnAttribute("go.allunsafe").getValueAsString();
+    if (UnsafeValue == "CompilingRuntime") {
+      // if the callee is 'CompilingRuntime' function but all instructions are safe,
+      // don't change caller's attribute
+    } else {
+      Caller->addFnAttr("go.allunsafe", UnsafeValue);
+    }
+  }
+
+  if (Callee->hasMetadata("go.has.unsafepoint"))
+    Caller->setMetadata("go.has.unsafepoint", Callee->getMetadata("go.has.unsafepoint"));
+
   if (auto CalleeMarker = Callee->getMetadata("go.marker.reloc")) {
     if (auto CallerMarker = Caller->getMetadata("go.marker.reloc")) {
       SmallVector<Metadata*, 32> MDs(CallerMarker->op_begin(), CallerMarker->op_end());
@@ -969,7 +983,6 @@ static bool isDereferenceableImpl(const Value *V,
     ObjectSizeOpts Opts;
     Opts.RoundToAlign = false;
     Opts.NullIsUnknownSize = true;
-    uint64_t ObjSize;
     (void)getObjectSize(V, DerefBytes, DL, &TLI, Opts);
   }
   APInt KnownDerefBytes(Size.getBitWidth(), DerefBytes);
