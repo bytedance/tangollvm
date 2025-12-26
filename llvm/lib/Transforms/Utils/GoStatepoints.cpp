@@ -1477,8 +1477,9 @@ makeStatepointExplicitImpl(CallBase *Call, /* to replace */
   }
 
   // TODO: We need to remove any ill-formed pointer like value with unsupported type
-  if (!IllFormedPtr.empty()) {
-    Function *F = Call->getParent()->getParent();
+  Function *F = Call->getParent()->getParent();
+  // assume that 'specialized' functions do not actually contain ill-formed pointers
+  if (!IllFormedPtr.empty() && !F->hasMetadata("go.specialized") && !F->hasMetadata("go.spec.cond")) {  
     if (!TangoLLVM::isObsoleted(F)) {
       if (PrintObsoleted) {
         dbgs() << F->getName() << ": mark function obsolete due to ill-formed pointer\n";

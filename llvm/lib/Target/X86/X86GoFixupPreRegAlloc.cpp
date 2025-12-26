@@ -971,6 +971,8 @@ bool X86GoFixupPreRegAllocPass::optimizeOpSP() {
               }
               case X86::INC64r:
                 break;
+              case X86::CMOV64rr:
+                break;
               default:
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)
                 dbgs() << "cannot handle MI: " << MI << "\n";
