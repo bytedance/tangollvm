@@ -1142,7 +1142,7 @@ PassBuilder::buildModuleSimplificationPipeline(OptimizationLevel Level,
   // years, it should be re-analyzed.
   MPM.addPass(IPSCCPPass(
               IPSCCPOptions(/*AllowFuncSpec=*/
-                            !TM->getTargetTriple().isGoEnvironment() &&
+                            (!TM || !TM->getTargetTriple().isGoEnvironment()) &&
                             Level != OptimizationLevel::Os &&
                             Level != OptimizationLevel::Oz &&
                             !isLTOPreLink(Phase))));
@@ -1219,9 +1219,6 @@ PassBuilder::buildModuleSimplificationPipeline(OptimizationLevel Level,
 
   MPM.addPass(AlwaysInlinerPass(/*InsertLifetimeIntrinsics=*/true));
 
-  if (TM->getTargetTriple().isGoEnvironment()) {
-    // MPM.addPass(GoDevirtualAnnotatorPass());
-  }
 
   if (EnableModuleInliner)
     MPM.addPass(buildModuleInlinerPipeline(Level, Phase));
@@ -1462,7 +1459,7 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
         /*USeMemorySSA=*/true, /*UseBlockFrequencyInfo=*/false));
   }
 
-  if (TM->getTargetTriple().isGoEnvironment())
+  if (TM && TM->getTargetTriple().isGoEnvironment())
     OptimizePM.addPass(GoNilCheckElimPass());
 
   OptimizePM.addPass(Float2IntPass());
@@ -1606,7 +1603,7 @@ PassBuilder::buildPerModuleDefaultPipeline(OptimizationLevel Level,
   // Add the core simplification pipeline.
   MPM.addPass(buildModuleSimplificationPipeline(Level, LTOPhase));
 
-  if (TM->getTargetTriple().isGoEnvironment()) {
+  if (TM && TM->getTargetTriple().isGoEnvironment()) {
     MPM.addPass(GoRODataPass(GoRODataOptions(true, false)));
     if (UseGoGlobalInitRestoreOpt) {
       MPM.addPass(GORoDataInitializerPass());
@@ -1616,7 +1613,7 @@ PassBuilder::buildPerModuleDefaultPipeline(OptimizationLevel Level,
   // Now add the optimization pipeline.
   MPM.addPass(buildModuleOptimizationPipeline(Level, LTOPhase));
 
-  if (TM->getTargetTriple().isGoEnvironment()) {
+  if (TM && TM->getTargetTriple().isGoEnvironment()) {
     if (UseGoGlobalInitRestoreOpt) {
       MPM.addPass(GORoDataRestorePass());
     }
@@ -1811,7 +1808,7 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
     MPM.addPass(RequireAnalysisPass<ProfileSummaryAnalysis, Module>());
   }
 
-  if (TM->getTargetTriple().isGoEnvironment()) {
+  if (TM && TM->getTargetTriple().isGoEnvironment()) {
     MPM.addPass(GoRODataPass(GoRODataOptions(true, true, PGOOpt.has_value() ? PGOOpt->ProfileFile : "")));
     if (UseGoGlobalInitRestoreOpt) {
       MPM.addPass(GORoDataInitializerPass());
@@ -1844,7 +1841,7 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
     // opens opportunities for globalopt (and inlining) by substituting function
     // pointers passed as arguments to direct uses of functions.
     MPM.addPass(IPSCCPPass(IPSCCPOptions(/*AllowFuncSpec=*/
-                                         !TM->getTargetTriple().isGoEnvironment() &&
+                                         (!TM || !TM->getTargetTriple().isGoEnvironment()) &&
                                          Level != OptimizationLevel::Os &&
                                          Level != OptimizationLevel::Oz)));
 
@@ -1865,9 +1862,6 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
   // Use in-range annotations on GEP indices to split globals where beneficial.
   MPM.addPass(GlobalSplitPass());
 
-  if (TM->getTargetTriple().isGoEnvironment()) {
-    // MPM.addPass(GoDevirtualAnnotatorPass());
-  }
   // Run whole program optimization of virtual call when the list of callees
   // is fixed.
   MPM.addPass(WholeProgramDevirtPass(ExportSummary, nullptr));
@@ -2086,7 +2080,7 @@ PassBuilder::buildLTODefaultPipeline(OptimizationLevel Level,
   MPM.addPass(EliminateAvailableExternallyPass());
 
   // Previous optimizations may lead to new opportunity for GoROData
-  if (TM->getTargetTriple().isGoEnvironment()) {
+  if (TM && TM->getTargetTriple().isGoEnvironment()) {
     if (UseGoGlobalInitRestoreOpt) {
       MPM.addPass(GORoDataRestorePass());
     }

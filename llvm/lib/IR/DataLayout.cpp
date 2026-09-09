@@ -81,7 +81,7 @@ StructLayout::StructLayout(StructType *ST, const DataLayout &DL)
     getMemberOffsets()[i] = StructSize;
     // TANGOLLVM: Consume space for this data item
     auto ElemSize = DL.getTypeAllocSize(Ty);
-    if (ElemSize.getFixedValue() == 0) {
+    if (DL.needExtraBytePadding() && ElemSize.isZero()) {
       LastZero = StructSize;
     }
     StructSize += ElemSize;
@@ -95,6 +95,7 @@ StructLayout::StructLayout(StructType *ST, const DataLayout &DL)
   // pointer to the next object in the heap.
   if (DL.needExtraBytePadding() && StructSize > 0 && LastZero == StructSize) {
     StructSize += TypeSize::getFixed(1);
+    IsPadded = true;
   }
 
   // Add padding to the end of the struct so that it could be put in an array
@@ -215,6 +216,7 @@ void DataLayout::reset(StringRef Desc) {
 
   LayoutMap = nullptr;
   BigEndian = false;
+  ExtraBytePadding = false;
   AllocaAddrSpace = 0;
   StackNaturalAlign.reset();
   ProgramAddrSpace = 0;

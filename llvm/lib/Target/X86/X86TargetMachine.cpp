@@ -65,7 +65,7 @@ static cl::opt<bool> EnableMachineCombinerPass("x86-machine-combiner",
 static cl::opt<bool>
     EnableTileRAPass("x86-tile-ra",
                      cl::desc("Enable the tile register allocation pass"),
-                     cl::init(false), cl::Hidden);
+                     cl::init(true), cl::Hidden);
 
 extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeX86Target() {
   // Register the target.
@@ -558,9 +558,9 @@ bool X86PassConfig::addPreISel() {
 }
 
 void X86PassConfig::addPreRegAlloc() {
-   // TANGOLLVM Add pass for Go fixup
-  addPass(createX86GoFixupPreRegAlloc());
- 
+  if (TM->getTargetTriple().isGoEnvironment())
+    addPass(createX86GoFixupPreRegAlloc());
+
   if (getOptLevel() != CodeGenOptLevel::None) {
     addPass(&LiveRangeShrinkID);
     addPass(createX86WinFixupBufferSecurityCheckPass());
@@ -594,8 +594,8 @@ void X86PassConfig::addPostRegAlloc() {
   // analyses needed by the LVIHardening pass when compiling at -O0.
   if (getOptLevel() != CodeGenOptLevel::None)
     addPass(createX86LoadValueInjectionLoadHardeningPass());
-  // TANGOLLVM.
-  addPass(createX86GoFixupPostRegAlloc());
+  if (TM->getTargetTriple().isGoEnvironment())
+    addPass(createX86GoFixupPostRegAlloc());
 }
 
 void X86PassConfig::addPreSched2() {
@@ -703,7 +703,9 @@ static bool onlyAllocateTileRegisters(const TargetRegisterInfo &TRI,
 
 bool X86PassConfig::addRegAssignAndRewriteOptimized() {
   // Don't support tile RA when RA is specified by command line "-regalloc".
-  if (!isCustomizedRegAlloc() && EnableTileRAPass) {
+  if (!isCustomizedRegAlloc() && EnableTileRAPass &&
+      (!TM->getTargetTriple().isGoEnvironment() ||
+       EnableTileRAPass.getNumOccurrences())) {
     // Allocate tile register first.
     addPass(createGreedyRegisterAllocator(onlyAllocateTileRegisters));
     addPass(createX86TileConfigPass());

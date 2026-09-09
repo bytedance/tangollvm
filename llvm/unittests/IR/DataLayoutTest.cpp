@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
+// Copyright (c) 2026 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2026-09-10.
 //===----------------------------------------------------------------------===//
 
 #include "llvm/IR/DataLayout.h"
@@ -18,6 +20,22 @@
 using namespace llvm;
 
 namespace {
+
+TEST(DataLayoutTest, ResetGoExtraBytePadding) {
+  LLVMContext Context;
+  auto *Ty = StructType::get(Type::getInt64Ty(Context),
+                             ArrayType::get(Type::getInt8Ty(Context), 0));
+  DataLayout Layout("e-p:64:64-i64:64-z1");
+  EXPECT_TRUE(Layout.needExtraBytePadding());
+  EXPECT_EQ(Layout.getTypeAllocSize(Ty), 16u);
+  auto *ByteTy = StructType::get(Type::getInt8Ty(Context),
+                                ArrayType::get(Type::getInt8Ty(Context), 0));
+  EXPECT_EQ(Layout.getTypeAllocSize(ByteTy), 2u);
+  EXPECT_TRUE(Layout.getStructLayout(ByteTy)->hasPadding());
+  Layout.reset("e-p:64:64-i64:64");
+  EXPECT_FALSE(Layout.needExtraBytePadding());
+  EXPECT_EQ(Layout.getTypeAllocSize(Ty), 8u);
+}
 
 TEST(DataLayoutTest, FunctionPtrAlign) {
   EXPECT_EQ(MaybeAlign(0), DataLayout("").getFunctionPtrAlign());

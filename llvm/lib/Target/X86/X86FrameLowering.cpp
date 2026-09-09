@@ -1850,7 +1850,8 @@ void X86FrameLowering::emitPrologue(MachineFunction &MF,
 
     if (!CanElimFP) {
       // Save EBP/RBP into the appropriate stack slot.
-      BuildMI(MBB, MBBI, DL, TII.get(Is64Bit ? X86::PUSH64r : X86::PUSH32r))
+      BuildMI(MBB, MBBI, DL,
+              TII.get(getPUSHOpcode(MF.getSubtarget<X86Subtarget>())))
         .addReg(MachineFramePtr, RegState::Kill)
         .setMIFlag(MachineInstr::FrameSetup);
     }
@@ -2542,8 +2543,9 @@ void X86FrameLowering::emitEpilogue(MachineFunction &MF,
 
     if (!CanElimFP) {
       // Pop EBP.
-      BuildMI(MBB, MBBI, DL, TII.get(Is64Bit ? X86::POP64r : X86::POP32r),
-          MachineFramePtr)
+      BuildMI(MBB, MBBI, DL,
+              TII.get(getPOPOpcode(MF.getSubtarget<X86Subtarget>())),
+              MachineFramePtr)
         .setMIFlag(MachineInstr::FrameDestroy);
     }
 

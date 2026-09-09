@@ -2448,7 +2448,10 @@ void SelectionDAGISel::Select_READ_REGISTER(SDNode *Op) {
                              CurDAG->getMachineFunction());
   // TANGOLLVM
   MachineFunction &MF = CurDAG->getMachineFunction();
-  Reg = MF.addLiveIn(Reg, MF.getSubtarget().getTargetLowering()->getRegClassFor(VT.getSimpleVT()));
+  if (MF.getFunction().getCallingConv() == CallingConv::Go_Internal)
+    Reg = MF.addLiveIn(
+        Reg,
+        MF.getSubtarget().getTargetLowering()->getRegClassFor(VT.getSimpleVT()));
   SDValue New = CurDAG->getCopyFromReg(
                         Op->getOperand(0), dl, Reg, Op->getValueType(0));
   New->setNodeId(-1);

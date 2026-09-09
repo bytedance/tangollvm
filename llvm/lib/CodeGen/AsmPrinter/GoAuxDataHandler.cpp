@@ -30,6 +30,8 @@
 
 using namespace llvm;
 
+static cl::opt<bool> TangoLLVMLTO("tangollvm-lto", cl::Hidden, cl::init(false));
+
 static cl::opt<bool> EnableUnsafePoint("go-enable-unsafe-point",
                                       cl::Hidden,
                                       cl::init(true));
@@ -56,6 +58,23 @@ static const MCExpr *buildSymbolDiff(MCContext &Context, const MCSymbol *A,
 
 void MCGoAuxData::beginModule(Module *M) {
   resetModule();
+  // Per-package Go objects use the compiler's file indices. LTO instead
+  // creates a global table that the Go linker maps back to compilation units.
+  if (!TangoLLVMLTO) {
+    if (NamedMDNode *Meta = M->getNamedMetadata("go.local.filetab")) {
+      for (MDNode *D : Meta->operands()) {
+        if (D->getNumOperands() % 3 != 0)
+          report_fatal_error("invalid Go local file table");
+        for (unsigned I = 0; I < D->getNumOperands(); I += 3) {
+          StringRef Dir = cast<MDString>(D->getOperand(I))->getString();
+          StringRef File = cast<MDString>(D->getOperand(I + 1))->getString();
+          int32_t Index = cast<ConstantAsMetadata>(D->getOperand(I + 2))
+                              ->getValue()->getUniqueInteger().getSExtValue();
+          FileTable.emplace_back(Dir, File, Index);
+        }
+      }
+    }
+  }
   GoMinorVersion = TangoLLVM::goVersion(*M);
   if (GoMinorVersion >= 21) {
     FuncInfoHasStartLine = true;
@@ -110,6 +129,8 @@ void MCGoAuxData::beginModule(Module *M) {
 }
 
 void MCGoAuxData::endModule() {
+  if (!FileTable.empty())
+    return;
   const TargetLoweringObjectFile &TLOF= Asm->getObjFileLowering();
   MCSection *ReadOnlySection = TLOF.getGoAuxDataSection();
   Asm->OutStreamer->pushSection();
@@ -129,7 +150,8 @@ void MCGoAuxData::endModule() {
     llvm::sort(Entries, [](const MCGoFileEntry &LHS, const MCGoFileEntry &RHS) { return LHS.Index < RHS.Index; });
     assert(Entries[0].Index == 0 && "invariant");
     assert((Entries[Entries.size() - 1].Index == Entries.size() - 1) && "invariant");
-    std::string symbol = "tangollvm..filetable";
+    std::string symbol = TangoLLVMLTO ? "tangollvmlto..filetable"
+                                     : "tangollvm..filetable";
     MCSymbol *AddrSymbol = Asm->OutContext.getOrCreateSymbol(StringRef(symbol));
     Asm->OutStreamer->emitLabel(AddrSymbol);
     Asm->OutStreamer->emitGoFileTab(Entries);
@@ -1448,6 +1470,17 @@ int32_t MCGoAuxData::getFileIndex(DIFile* DF) {
   int32_t Index;
   if (It != FileTableMap.end()) {
     Index = It->second;
+  } else if (!FileTable.empty()) {
+    Index = -1;
+    for (const auto &F : FileTable) {
+      if (F.Dir == DF->getDirectory() && F.File == DF->getFilename()) {
+        Index = F.Index;
+        break;
+      }
+    }
+    if (Index < 0)
+      report_fatal_error("debug file missing from Go local file table");
+    FileTableMap[DF] = Index;
   } else {
     Index = FileTableMap.size();
     FileTableMap[DF] = Index;

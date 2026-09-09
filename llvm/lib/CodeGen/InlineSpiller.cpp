@@ -53,6 +53,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Target/TargetMachine.h"
 #include <cassert>
 #include <iterator>
 #include <tuple>
@@ -74,7 +75,7 @@ STATISTIC(NumRemats,          "Number of rematerialized defs for spilling");
 
 static cl::opt<bool>
 RestrictStatepointRemat("restrict-statepoint-remat",
-                       cl::init(true), cl::Hidden,
+                       cl::init(false), cl::Hidden,
                        cl::desc("Restrict remat for statepoint operands"));
 
 namespace {
@@ -589,7 +590,11 @@ void InlineSpiller::markValueUsed(LiveInterval *LI, VNInfo *VNI) {
 
 bool InlineSpiller::canGuaranteeAssignmentAfterRemat(Register VReg,
                                                      MachineInstr &MI) {
-  if (!RestrictStatepointRemat)
+  bool RestrictRemat = RestrictStatepointRemat;
+  if (!RestrictStatepointRemat.getNumOccurrences() &&
+      MF.getTarget().getTargetTriple().isGoEnvironment())
+    RestrictRemat = true;
+  if (!RestrictRemat)
     return true;
   // Here's a quick explanation of the problem we're trying to handle here:
   // * There are some pseudo instructions with more vreg uses than there are

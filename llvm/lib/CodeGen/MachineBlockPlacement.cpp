@@ -159,7 +159,7 @@ static cl::opt<bool>
 BranchFoldPlacement("branch-fold-placement",
               cl::desc("Perform branch folding during placement. "
                        "Reduces code size."),
-              cl::init(false), cl::Hidden);
+              cl::init(true), cl::Hidden);
 
 // Heuristic for tail duplication.
 static cl::opt<unsigned> TailDupPlacementThreshold(
@@ -3490,7 +3490,9 @@ bool MachineBlockPlacement::runOnMachineFunction(MachineFunction &MF) {
   // HW that requires structured CFG.
   bool EnableTailMerge = !MF.getTarget().requiresStructuredCFG() &&
                          PassConfig->getEnableTailMerge() &&
-                         BranchFoldPlacement;
+                         BranchFoldPlacement &&
+                         (!MF.getTarget().getTargetTriple().isGoEnvironment() ||
+                          BranchFoldPlacement.getNumOccurrences());
   // No tail merging opportunities if the block number is less than four.
   if (MF.size() > 3 && EnableTailMerge) {
     unsigned TailMergeSize = TailDupSize + 1;

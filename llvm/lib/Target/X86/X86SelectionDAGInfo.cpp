@@ -37,12 +37,12 @@ static cl::opt<bool>
 
 // Use the AVX version of duffzero even when AVX is not available in general.
 static cl::opt<bool>
-    UseAVXForDuffzero("x86-use-avx-for-duffzero", cl::Hidden, cl::init(true),
+    UseAVXForDuffzero("x86-use-avx-for-duffzero", cl::Hidden, cl::init(false),
                      cl::desc("Use AVX version of duffzero"));
 
 // Use the AVX version of duffcopy even when AVX is not available in general.
 static cl::opt<bool>
-    UseAVXForDuffcopy("x86-use-avx-for-duffcopy", cl::Hidden, cl::init(true),
+    UseAVXForDuffcopy("x86-use-avx-for-duffcopy", cl::Hidden, cl::init(false),
                      cl::desc("Use AVX version of duffcopy"));
 
 
