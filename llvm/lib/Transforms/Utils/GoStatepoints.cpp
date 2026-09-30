@@ -1,15 +1,25 @@
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
-// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// SPDX-License-Identifier: (Apache-2.0 WITH LLVM-exception) AND BSD-3-Clause AND NCSA
 //
+// Copyright 2018 The Go Authors. All rights reserved.
 // Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
+// Statepoint rewriting is adapted from passes/GoStatepoints.cpp of gollvm
+// (https://go.googlesource.com/gollvm/). getPtrBitmapForTypeHelper is
+// adapted from that project's passes/Util.cpp. The historical NCSA notice below is
+// retained for LLVM-derived portions of the original implementation.
+// The gollvm-derived portions and their modifications retain BSD 3-Clause
+// terms in third-party/gollvm/LICENSE. Original LLVM-derived portions
+// retain the historical NCSA terms in LICENSE_UPSTREAM.TXT. Other TangoLLVM
+// code uses Apache-2.0 WITH LLVM-exception; see LICENSE.TXT.
 
 //===- GoStatepoints.cpp - Insert statepoints for Go GC -------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
 // This file is distributed under the University of Illinois Open Source
-// License. See LICENSE.TXT for details.
+// License. See LICENSE_UPSTREAM.TXT for details.
 //
 //===----------------------------------------------------------------------===//
 //

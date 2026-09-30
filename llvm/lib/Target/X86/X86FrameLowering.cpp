@@ -2,10 +2,14 @@
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
-// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// SPDX-License-Identifier: (Apache-2.0 WITH LLVM-exception) AND MIT
 //
 // Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
 // This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
+// LLVM-derived code and its modifications retain Apache-2.0 WITH
+// LLVM-exception; see LICENSE_UPSTREAM.TXT. The Go stacksplit-derived portion
+// and its modifications retain MIT terms; see third-party/go/LICENSE-MIT
+// and the source notice at the Go ABI Internal implementation below.
 //===----------------------------------------------------------------------===//
 //
 // This file contains the X86 implementation of TargetFrameLowering class.
@@ -3417,7 +3421,10 @@ void X86FrameLowering::adjustForSegmentedStacks(
     }
 
     // Go ABI Internal
-    // The following code is copied from stacksplit in obj6.go
+    // Adapted from stacksplit in Go src/cmd/internal/obj/x86/obj6.go.
+    // Portions Copyright 2009 The Go Authors. All rights reserved.
+    // These portions are governed by the MIT license. The original copyright
+    // notices and full license text are retained in third-party/go/LICENSE-MIT.
     // g is in r14
     assert(Is64Bit && "GoInternal supports 64bit only");
 

@@ -1,0 +1,72 @@
+TangoLLVM source and license notices
+
+Unless otherwise noted, ByteDance contributions use
+Apache-2.0 WITH LLVM-exception, in LICENSE.TXT.
+Upstream and third-party code retains its original copyright and licenses.
+A combined SPDX identifier in a mixed file lists the applicable license
+conditions; the source notices below identify the corresponding portions.
+
+LLVM
+  TangoLLVM is based on LLVM 19: https://github.com/llvm/llvm-project.
+  The complete original license, including historical NCSA terms, is retained
+  unchanged in LICENSE_UPSTREAM.TXT. Original per-file notices are retained.
+
+LLVM Go bindings / go-llvm
+  tango/overlay/src/cmd/internal/llvm contains historical LLVM Go bindings
+  with extensions maintained at https://github.com/tinygo-org/go-llvm.
+  The directory's NOTICE lists the eight derived files and its LICENSE.txt
+  contains the original LLVM license, including historical terms.
+  These files and their modifications retain Apache-2.0 WITH LLVM-exception.
+  The files are copied into Tango without changing their license.
+  C API implementations and declarations are also adapted from go-llvm
+  IRBindings.cpp, IRBindings.h, backports.cpp and backports.h in
+  llvm/lib/TangoLLVM/TangoLLVM.cpp and llvm/include/llvm-c/TangoLLVM.h.
+  These binding portions and their modifications retain
+  Apache-2.0 WITH LLVM-exception; the complete original license is in
+  tango/overlay/src/cmd/internal/llvm/LICENSE.txt.
+
+Go Authors' code in gollvm
+  Source: https://go.googlesource.com/gollvm/
+  passes/GC.cpp is adapted in llvm/lib/CodeGen/AsmPrinter/GoGCPrinter.cpp.
+  passes/GoStatepoints.cpp is adapted in
+  llvm/lib/Transforms/Utils/GoStatepoints.cpp.
+  passes/Util.cpp is adapted in
+  llvm/lib/CodeGen/AsmPrinter/GoAuxDataHandler.cpp,
+  llvm/lib/Transforms/Utils/GoStatepoints.cpp, and
+  llvm/include/llvm/TangoLLVM/TangoLLVM.h (hasPointerTy).
+  The Go-derived portions and their modifications retain BSD 3-Clause terms
+  in third-party/gollvm/LICENSE. The original GoStatepoints LLVM-derived
+  portions retain the historical NCSA terms in LICENSE_UPSTREAM.TXT.
+  Other TangoLLVM code uses Apache-2.0 WITH LLVM-exception.
+
+Go gcprog
+  Source: https://github.com/golang/go, src/cmd/internal/gcprog/gcprog.go.
+  Portions of code and comments are adapted in
+  llvm/lib/CodeGen/AsmPrinter/GoGCProgWriter.cpp and GoGCProgWriter.h.
+  These portions and their modifications retain BSD 3-Clause terms in
+  third-party/go/LICENSE. Other TangoLLVM code uses
+  Apache-2.0 WITH LLVM-exception.
+
+Go stacksplit
+  Source: https://github.com/golang/go, src/cmd/internal/obj/x86/obj6.go.
+  The Go ABI stack-splitting implementation is adapted in
+  llvm/lib/Target/X86/X86FrameLowering.cpp.
+  These portions and their modifications retain Inferno/MIT terms. The full
+  original copyright notices and MIT terms are in third-party/go/LICENSE-MIT.
+  LLVM-derived code and its modifications retain
+  Apache-2.0 WITH LLVM-exception.
+
+Go aeshash
+  Source: https://github.com/golang/go, src/runtime/asm_amd64.s.
+  The intrinsifyMemHash32Or64 and intrinsifyMemHash implementations in
+  llvm/lib/TangoLLVM/TangoLLVM.cpp adapt the aeshash code and comments.
+  These portions and their modifications retain BSD 3-Clause terms in
+  third-party/go/LICENSE. Other code retains its stated LLVM/project license.
+
+Go duffcopy offset calculation
+  Source: https://github.com/golang/go, src/cmd/compile/internal/amd64/ssa.go.
+  The offset calculation and related comments are adapted in
+  llvm/lib/Target/X86/X86SelectionDAGInfo.cpp.
+  These portions and their modifications retain BSD 3-Clause terms in
+  third-party/go/LICENSE. LLVM-derived code and its modifications retain
+  Apache-2.0 WITH LLVM-exception.

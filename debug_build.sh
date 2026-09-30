@@ -30,5 +30,11 @@ cmake -G Ninja \
 cmake --build . -j 24
 
 ninja install
+cp -p "${DIR}/LICENSE.TXT" "${DIR}/llvm-bin-debug/LICENSE.TXT"
+cp -p "${DIR}/LICENSE_UPSTREAM.TXT" "${DIR}/llvm-bin-debug/LICENSE_UPSTREAM.TXT"
+cp -p "${DIR}/NOTICE" "${DIR}/llvm-bin-debug/NOTICE"
+cp -p "${DIR}/third-party/gollvm/LICENSE" "${DIR}/llvm-bin-debug/LICENSE.gollvm"
+cp -p "${DIR}/third-party/go/LICENSE" "${DIR}/llvm-bin-debug/LICENSE.go"
+cp -p "${DIR}/third-party/go/LICENSE-MIT" "${DIR}/llvm-bin-debug/LICENSE.go-MIT"
 
 popd &> /dev/null

@@ -2,14 +2,25 @@
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
-// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// SPDX-License-Identifier: (Apache-2.0 WITH LLVM-exception) AND BSD-3-Clause
 //
+// Copyright 2009 The Go Authors. All rights reserved.
 // Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-04-15.
+//
 //===----------------------------------------------------------------------===//
 //
 /// @file
 /// This file contains the implementations of TangoLLVM
 //
+// The aeshash lowering in intrinsifyMemHash32Or64 and intrinsifyMemHash is
+// adapted from Go src/runtime/asm_amd64.s. These portions and their
+// modifications retain BSD 3-Clause terms in third-party/go/LICENSE.
+//
+// C binding portions adapted from go-llvm IRBindings.cpp and backports.cpp
+// are part of the LLVM Project, under Apache-2.0 WITH LLVM-exception.
+// See tango/overlay/src/cmd/internal/llvm/LICENSE.txt for the original license.
+// Other TangoLLVM code uses Apache-2.0 WITH LLVM-exception; see LICENSE.TXT.
 //===----------------------------------------------------------------------===//
 
 #include "llvm-c/Core.h"

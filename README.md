@@ -35,9 +35,11 @@ If you are looking for the full Tango toolchain and end‑to‑end usage, please
 
 This repository follows the upstream `llvm-project` monorepo layout (e.g. `llvm/`, `clang/`, `lld/`, `compiler-rt/`, etc.).
 
-In addition, the repository provides a few helper scripts for building and packaging a minimal TangoLLVM distribution:
+In addition, the repository provides scripts for building LLVM and preparing a separate TangoLLVM toolchain:
 
 - `build.sh`: builds and installs a release LLVM build into `llvm-bin-release/`.
+- `tango/prepare.sh`: checks overlay destinations and copies the bindings and complete SDK into a new build directory.
+- `tango/build.sh`: prepares that directory and builds the TangoLLVM toolchain.
 
 ## Build from Source
 
@@ -61,6 +63,24 @@ By default it:
 - builds the `X86` target,
 - installs to `./llvm-bin-release/`.
 
+### Build the TangoLLVM toolchain
+
+After `./build.sh` installs the LLVM SDK, run:
+
+```bash
+TANGO_ROOT=/path/to/tango \
+TANGOLLVM_BUILD_ROOT=/path/to/new-tango-llvm-build \
+GOROOT_BOOTSTRAP=/path/to/bootstrap-go \
+./tango/build.sh
+```
+
+This integration currently supports native Linux/amd64. The output directory must
+be new and outside both source repositories. Preparation uses Bash and standard
+Linux tools, copies the full SDK, and leaves both source checkouts unchanged.
+Python and jq are not needed by the preparation entry point.
+See [tango/README.md](tango/README.md) for dependencies, application compilation,
+source ownership, and validation commands.
+
 ### Custom Build
 
 You can also build with standard LLVM CMake options:
@@ -81,7 +101,14 @@ For more details, see LLVM’s upstream documentation:
 
 ## License
 
-This project is under the Apache License v2.0 with LLVM Exceptions. See `LICENSE.TXT`.
+Unless otherwise noted, ByteDance contributions use
+Apache-2.0 WITH LLVM-exception; see
+[LICENSE.TXT](LICENSE.TXT). TangoLLVM is based on
+[LLVM 19](https://github.com/llvm/llvm-project/tree/release/19.x).
+The complete original LLVM license, including historical terms, is preserved
+in [LICENSE_UPSTREAM.TXT](LICENSE_UPSTREAM.TXT). Upstream and third-party code retains
+its original licenses. [NOTICE](NOTICE) lists the go-llvm, gollvm and Go source
+files and their license locations. SDKs retain these notices and licenses.
 
 ## Contributing
 

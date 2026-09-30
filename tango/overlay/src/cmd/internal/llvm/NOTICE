@@ -1,0 +1,23 @@
+LLVM Go bindings source and license notices
+
+The following files are adapted from the historical LLVM Go bindings,
+including extensions maintained at https://github.com/tinygo-org/go-llvm:
+  analysis.go
+  bitwriter.go
+  dibuilder.go
+  ir.go
+  llvm_dep.go
+  llvm_config_linux_llvm14.go
+  string.go
+  target.go
+
+The original LLVM license headers and ByteDance modification notices are
+retained. These files and their modifications remain licensed under
+Apache-2.0 WITH LLVM-exception. LICENSE.txt contains the complete upstream
+license text, including the original historical terms.
+
+The other adapter files in this directory are TangoLLVM contributions,
+also licensed under Apache-2.0 WITH LLVM-exception.
+
+These notices and LICENSE.txt are retained when this directory is copied
+into Tango. The exact original import revision is not asserted here.

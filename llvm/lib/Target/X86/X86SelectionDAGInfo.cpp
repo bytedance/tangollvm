@@ -2,10 +2,15 @@
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
-// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// SPDX-License-Identifier: (Apache-2.0 WITH LLVM-exception) AND BSD-3-Clause
 //
+// Copyright 2016 The Go Authors. All rights reserved.
 // Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
 // This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
+// Duffcopy offset calculation and related comments are adapted from Go
+// src/cmd/compile/internal/amd64/ssa.go and retain BSD 3-Clause terms in
+// third-party/go/LICENSE. LLVM-derived code and its modifications retain
+// Apache-2.0 WITH LLVM-exception; see LICENSE_UPSTREAM.TXT.
 //===----------------------------------------------------------------------===//
 //
 // This file implements the X86SelectionDAGInfo class.

@@ -1,14 +1,18 @@
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
-// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-//
-// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// SPDX-License-Identifier: (Apache-2.0 WITH LLVM-exception) AND BSD-3-Clause
 
 //===--- GoGC.cpp -----------------------------------------------------------===//
 //
 // Copyright 2018 The Go Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
+//
+// The GoGC strategy, GC printer registration and stack-map routines are
+// adapted from passes/GC.cpp of gollvm (https://go.googlesource.com/gollvm/).
+// These portions and their modifications retain BSD 3-Clause terms in
+// third-party/gollvm/LICENSE. Other TangoLLVM code
+// uses Apache-2.0 WITH LLVM-exception; see LICENSE.TXT.
 //
 //===----------------------------------------------------------------------===//
 //

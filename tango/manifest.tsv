@@ -1,0 +1,19 @@
+version	1
+tango_base	39f936734e550baa7fe8e02d2894cb5812acff8b
+integration_source	2aa05be13a0e44573f7d21cae300c6cefa87afaa
+overlay	src/cmd/internal/llvm/LICENSE.txt	-
+overlay	src/cmd/internal/llvm/NOTICE	-
+overlay	src/cmd/internal/llvm/analysis.go	-
+overlay	src/cmd/internal/llvm/bitwriter.go	-
+overlay	src/cmd/internal/llvm/dibuilder.go	-
+overlay	src/cmd/internal/llvm/ir.go	-
+overlay	src/cmd/internal/llvm/llvm.go	-
+overlay	src/cmd/internal/llvm/llvm_config_linux_llvm14.go	-
+overlay	src/cmd/internal/llvm/llvm_dep.go	-
+overlay	src/cmd/internal/llvm/string.go	-
+overlay	src/cmd/internal/llvm/tangollvm.c	-
+overlay	src/cmd/internal/llvm/tangollvm.go	-
+overlay	src/cmd/internal/llvm/tangollvm.h	-
+overlay	src/cmd/internal/llvm/target.go	-
+overlay	src/cmd/internal/llvm/tools.go	-
+overlay	src/cmd/internal/llvm/tools_test.go	-

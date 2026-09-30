@@ -2,9 +2,19 @@
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
-// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// SPDX-License-Identifier: (Apache-2.0 WITH LLVM-exception) AND BSD-3-Clause
 //
+// Copyright 2015 The Go Authors. All rights reserved.
 // Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
+// This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-01-28.
+//
+// Portions of MCGoGCProgWriter method declarations and comments, including
+// those for ptr, zeroUtil, repeat and shouldRepeat, are adapted from Writer
+// methods in src/cmd/internal/gcprog/gcprog.go of Go
+// (https://github.com/golang/go).
+// These portions and their modifications retain BSD 3-Clause terms in
+// third-party/go/LICENSE. Other TangoLLVM code uses
+// Apache-2.0 WITH LLVM-exception; see LICENSE.TXT.
 //===----------------------------------------------------------------------===//
 //
 // This file contains the declaration of the GoGCProgWriter to support the

@@ -39,6 +39,20 @@ Run the most relevant LLVM tests for the area you touched. Typical examples:
 
 If your change impacts Go/TangoLLVM integration paths, please also include a minimal reproducer and, when possible, a targeted regression test under `llvm/test/`.
 
+## Tango integration changes
+
+Keep LLVM-derived bindings, the C bridge, backend implementation, and SDK
+preparation in this repository. Tango owns its Go-to-LLVM translator and compiler,
+linker, and experiment dispatch. Copy LLVM-owned files only into a prepared build
+directory; do not commit generated copies back into Tango.
+
+When changing the boundary, review both repositories and validate each target
+Tango branch. Update `tango/manifest.tsv` when overlay destinations change. Run
+`./tango/test_prepare.sh` for preparation changes, and test a toolchain prepared
+with `./tango/build.sh` for compiler or ABI changes. Report both repository
+revisions and retain `tangollvm-source.json` with the validation results.
+See [tango/README.md](tango/README.md) for the full workflow.
+
 ## Issues
 
 We use the issue tracker of the public mirror to track public bugs.

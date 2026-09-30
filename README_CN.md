@@ -35,9 +35,11 @@ TangoLLVM 是基于上游 [LLVM 项目](https://llvm.org/) 的修改版，在此
 
 本仓库沿用上游 `llvm-project` 的单仓结构（例如 `llvm/`、`clang/`、`lld/`、`compiler-rt/` 等）。
 
-此外，仓库还提供了一些辅助脚本，用于构建与打包一个精简的 TangoLLVM 发行版：
+此外，仓库还提供了一些辅助脚本，用于构建 LLVM 并准备独立的 TangoLLVM 工具链：
 
 - `build.sh`：构建并安装一个 release 版本到 `llvm-bin-release/`。
+- `tango/prepare.sh`：检查 overlay 目标并拷贝 Tango 源码，将绑定和完整 SDK 拷贝到新的构建目录；分支兼容性通过构建和测试验证。
+- `tango/build.sh`：准备该目录并构建 TangoLLVM 工具链。
 
 ## 从源码构建
 
@@ -61,6 +63,22 @@ TangoLLVM 是基于上游 [LLVM 项目](https://llvm.org/) 的修改版，在此
 - 构建 `X86` 目标，
 - 安装到 `./llvm-bin-release/`。
 
+### 构建 TangoLLVM 工具链
+
+先运行 `./build.sh` 安装 LLVM SDK，再执行：
+
+```bash
+TANGO_ROOT=/path/to/tango \
+TANGOLLVM_BUILD_ROOT=/path/to/new-tango-llvm-build \
+GOROOT_BOOTSTRAP=/path/to/bootstrap-go \
+./tango/build.sh
+```
+
+当前集成支持原生 Linux/amd64。输出目录必须是两个源码仓库之外的新目录。
+准备过程使用 Bash 和常见 Linux 工具，拷贝完整 SDK，不修改两个源码目录；
+准备入口不需要 Python 或 jq。依赖、应用编译、源码归属及验证命令见
+[tango/README.md](tango/README.md)。
+
 ### 自定义构建
 
 你也可以使用标准的 LLVM CMake 选项进行构建：
@@ -81,7 +99,11 @@ ninja
 
 ## 许可证
 
-本项目使用 Apache License v2.0 with LLVM Exceptions，见 `LICENSE.TXT`。
+除非文件另有说明，ByteDance 贡献的代码采用 Apache-2.0 WITH LLVM-exception，见 [LICENSE.TXT](LICENSE.TXT)。
+TangoLLVM 基于 [LLVM 19](https://github.com/llvm/llvm-project/tree/release/19.x) 开发；
+完整上游许可证（含历史条款）保留在 [LICENSE_UPSTREAM.TXT](LICENSE_UPSTREAM.TXT)。
+上游及第三方代码保留各自原有许可。[NOTICE](NOTICE) 列出 go-llvm、gollvm 和 Go 的来源文件及许可证位置。
+SDK 中同时保留这些来源说明和许可证。
 
 ## 贡献
 

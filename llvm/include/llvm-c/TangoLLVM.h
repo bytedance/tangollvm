@@ -1,11 +1,3 @@
-/*
- * Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
- * See https://llvm.org/LICENSE.txt for license information.
- * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
- *
- * Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.
- */
-
 /*===-- llvm-c/TangoLLVM.h - TangoLLVM C Interface ----------------*- C -*-===*\
 |*                                                                            *|
 |* Part of the LLVM Project, under the Apache License v2.0 with LLVM          *|
@@ -13,10 +5,15 @@
 |* See https://llvm.org/LICENSE.txt for license information.                  *|
 |* SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception                    *|
 |*                                                                            *|
-|*===----------------------------------------------------------------------===*|
+|* Copyright (c) 2025 ByteDance Ltd. and/or its affiliates.                    *|
+|* This file has been modified by ByteDance Ltd. and/or its affiliates on 2025-05-19. *|
+|*                                                                            *|
+|* Portions adapted from go-llvm IRBindings.h and backports.h, corresponding   *|
+|* to IRBindings.cpp and backports.cpp. The modified file retains              *|
+|* Apache-2.0 WITH LLVM-exception; the complete original license is in          *|
+|* tango/overlay/src/cmd/internal/llvm/LICENSE.txt.                             *|
 |*                                                                            *|
 |* This header declares the C interface for TangoLLVM.                        *|
-|*                                                                            *|
 \*===----------------------------------------------------------------------===*/
 
 #ifndef LLVM_C_TANGOLLVM_H
